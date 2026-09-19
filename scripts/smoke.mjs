@@ -81,6 +81,39 @@ async function main() {
   const swarmWorkers = blocked.steps.filter((s) => s.parentStepId !== null);
   check('swarm fanned out as child steps', swarmWorkers.length >= 3, swarmWorkers.length + ' workers');
 
+  const agentTaskStep = blocked.steps.find((s) => s.kind === 'agent_task');
+  check('agent task step ran', Boolean(agentTaskStep), agentTaskStep?.status ?? 'missing');
+  check(
+    'agent task step succeeded',
+    agentTaskStep?.status === 'succeeded',
+    agentTaskStep?.status ?? 'none',
+  );
+
+  const scheduleDecisions = blocked.scheduleDecisions ?? [];
+  check(
+    'a schedule decision was recorded',
+    scheduleDecisions.length >= 1,
+    scheduleDecisions.length + ' found',
+  );
+  const decision = scheduleDecisions[0];
+  check(
+    'Jev filtered the tool list before the agent runtime ran',
+    Boolean(decision) && decision.exposedTools.length < decision.availableTools.length,
+    decision
+      ? decision.exposedTools.length + ' of ' + decision.availableTools.length
+      : 'no decision',
+  );
+  check('the routing decision names the rule that produced it', Boolean(decision?.rule));
+  check(
+    'the routing decision is NOT gated on model confidence',
+    !('riskClass' in (decision ?? {})),
+  );
+
+  check(
+    'Hermes-internal tool calls were reported into the egress ledger post-hoc',
+    blocked.egress.some((e) => e.policyRule === 'reported-post-hoc-by-hermes'),
+  );
+
   check(
     'PII was detected and pinned locally',
     blocked.piiSpans.length >= 3,

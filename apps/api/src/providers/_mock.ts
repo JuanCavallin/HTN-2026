@@ -27,13 +27,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function meta(id: ProviderId, op: string, mode: ProviderMode, latencyMs: number) {
+export interface MockCostMeta {
+  tokensIn?: number;
+  tokensOut?: number;
+  estimatedCostCents?: number;
+}
+
+function meta(
+  id: ProviderId,
+  op: string,
+  mode: ProviderMode,
+  latencyMs: number,
+  cost?: MockCostMeta,
+) {
   return {
     provider: id,
     op,
     mode,
     latencyMs: Math.round(latencyMs),
     destination: mode === 'mock' ? `mock://${id}` : null,
+    ...cost,
   };
 }
 
@@ -59,6 +72,8 @@ export async function mockCall<T>(
   mode: ProviderMode,
   _ctx: ProviderCallContext,
   produce: () => T,
+  /** Optional cost accounting to attach to a successful result's meta. */
+  cost?: MockCostMeta,
 ): Promise<ProviderResult<T>> {
   if (mode === 'disabled') return disabled<T>(id, op);
 
@@ -77,7 +92,7 @@ export async function mockCall<T>(
     };
   }
 
-  return { ok: true, data: produce(), meta: meta(id, op, mode, Date.now() - started) };
+  return { ok: true, data: produce(), meta: meta(id, op, mode, Date.now() - started, cost) };
 }
 
 /**

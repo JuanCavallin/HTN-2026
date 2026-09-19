@@ -121,12 +121,18 @@ export interface EgressEvent {
   at: Iso;
   providerId: ProviderId;
   op: string;
-  /** Host contacted, or `mock://<provider>`. */
+  /** Host contacted, or `mock://<provider>`, or `hermes-internal://<tool>` for
+   *  a call reported after the fact rather than made directly (see
+   *  policyRule 'reported-post-hoc-by-hermes'). */
   destination: string;
   dataSpans: { placeholder: string; type: string }[];
   policyRule: string;
   decision: 'allowed' | 'redacted' | 'blocked';
   latencyMs?: number;
+  /** Cost accounting, when the provider reported it. See ProviderMeta. */
+  tokensIn?: number;
+  tokensOut?: number;
+  estimatedCostCents?: number;
 }
 
 /* -------------------------------------------------------------------------- */

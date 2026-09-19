@@ -62,6 +62,11 @@ export function withEgress(
             dataSpans: ctx.redactions ?? [],
             policyRule: ctx.policyRule,
             latencyMs: result?.meta?.latencyMs,
+            // Forwarded automatically whenever a provider's meta reports them —
+            // no per-call-site plumbing needed for cost accounting to work.
+            tokensIn: result?.meta?.tokensIn,
+            tokensOut: result?.meta?.tokensOut,
+            estimatedCostCents: result?.meta?.estimatedCostCents,
           });
         } catch (err) {
           // Never fail a provider call because the ledger write failed.
