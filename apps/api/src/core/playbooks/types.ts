@@ -118,6 +118,17 @@ export interface PlaybookContext {
   /** Get a provider by capability — never by vendor name. */
   provider<C extends Capability>(capability: C): CapabilityMap[C];
 
+  /**
+   * Which vendor is currently bound to a capability.
+   *
+   * For LABELLING ONLY — a step badge, a log line. Never branch on this: the
+   * whole point of the capability indirection is that behaviour does not depend
+   * on who is serving it. It exists because a hardcoded `providerId: 'jev'` on
+   * a step becomes a lie the moment someone repoints BINDINGS, and a dashboard
+   * that misreports which vendor ran is worse than one that says nothing.
+   */
+  providerFor(capability: Capability): ProviderId;
+
   /** Detect PII, pin it locally, and return cloud-safe text. */
   redact(text: string, field: string): Promise<RedactionOutput>;
 

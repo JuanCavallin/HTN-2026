@@ -33,6 +33,7 @@ export const orchestrator = new Orchestrator({
   store,
   bus,
   provider: (capability) => providers.provider(capability),
+  providerFor: (capability) => providers.bindings()[capability],
 });
 
 export { store };

@@ -262,7 +262,12 @@ async function runDecide(
   const redactions = redactionsInScope(scope);
 
   const text = await ctx.step(
-    { label: node.label, kind: 'decide', nodeId: node.id, providerId: 'anthropic' },
+    {
+      label: node.label,
+      kind: 'decide',
+      nodeId: node.id,
+      providerId: ctx.providerFor('text.model'),
+    },
     async (step) => {
       const model = ctx.provider('text.model');
       const res = await model.complete(
@@ -353,7 +358,7 @@ async function runTool(
   const cfg = resolveRefs(node.config, scope);
 
   const result = await ctx.step(
-    { label: node.label, kind: 'tool', nodeId: node.id, providerId: 'composio' },
+    { label: node.label, kind: 'tool', nodeId: node.id, providerId: ctx.providerFor('toolbox') },
     async (step) =>
       callToolGated(ctx, {
         stepId: step.id,
@@ -380,7 +385,12 @@ async function runDispatch(
   const cfg = resolveRefs(node.config, scope);
 
   const picked = await ctx.step(
-    { label: node.label, kind: 'dispatch', nodeId: node.id, providerId: 'jev' },
+    {
+      label: node.label,
+      kind: 'dispatch',
+      nodeId: node.id,
+      providerId: ctx.providerFor('decision'),
+    },
     async (step) => {
       const decider = ctx.provider('decision');
       const decision = await decider.decide(
@@ -411,7 +421,7 @@ async function runDispatch(
       await ctx.recordSchedule({
         stepId: step.id,
         requestedCapability: 'toolbox',
-        selectedProvider: 'composio',
+        selectedProvider: ctx.providerFor('toolbox'),
         modelTier: 'cheap' as ModelTier,
         availableTools: cfg.candidateTools,
         exposedTools: [tool],
@@ -447,7 +457,7 @@ async function runJudge(
   const cfg = resolveRefs(node.config, scope);
 
   const verdict = await ctx.step(
-    { label: node.label, kind: 'judge', nodeId: node.id, providerId: 'jev' },
+    { label: node.label, kind: 'judge', nodeId: node.id, providerId: ctx.providerFor('decision') },
     async (step) => {
       const decider = ctx.provider('decision');
       const res = await decider.decide(
@@ -567,7 +577,7 @@ async function runSubmit(
   const cfg = resolveRefs(node.config, scope);
 
   const result = await ctx.step(
-    { label: node.label, kind: 'submit', nodeId: node.id, providerId: 'composio' },
+    { label: node.label, kind: 'submit', nodeId: node.id, providerId: ctx.providerFor('toolbox') },
     async (step) =>
       callToolGated(ctx, {
         stepId: step.id,

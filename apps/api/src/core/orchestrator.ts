@@ -13,6 +13,7 @@ import type {
   Json,
   ProposedAction,
   ProviderCallContext,
+  ProviderId,
   Run,
   ScheduleDecision,
   Step,
@@ -44,6 +45,8 @@ export interface OrchestratorDeps {
   store: Store;
   bus: RunBus;
   provider: <C extends Capability>(capability: C) => CapabilityMap[C];
+  /** Reads the registry's live BINDINGS, so a re-point is reflected everywhere. */
+  providerFor: (capability: Capability) => ProviderId;
 }
 
 export class Orchestrator {
@@ -143,7 +146,7 @@ export class Orchestrator {
   /* ------------------------------------------------------------------ */
 
   private createContext(runId: string, signal: AbortSignal): PlaybookContext {
-    const { store, bus, provider } = this.deps;
+    const { store, bus, provider, providerFor } = this.deps;
     /** Keeps placeholder numbering unique across every field in this run. */
     let piiCounter = 0;
 
@@ -284,6 +287,7 @@ export class Orchestrator {
       },
 
       provider,
+      providerFor,
 
       redact: async (text: string, field: string): Promise<RedactionOutput> => {
         const { redacted, spans } = detectPii(text, piiCounter);
@@ -333,10 +337,9 @@ export class Orchestrator {
           kind: 'agent_task',
           nodeId: spec.nodeId,
           parentStepId: spec.parentStepId ?? null,
-          // Hardcoded rather than read from the registry's actual binding —
-          // correct today ('agent.runtime' -> hermes) but worth revisiting if
-          // that binding ever becomes dynamic per call.
-          providerId: 'hermes',
+          // Read from the registry rather than hardcoded, so re-pointing
+          // 'agent.runtime' in BINDINGS relabels the step too.
+          providerId: providerFor('agent.runtime'),
         });
 
         // 1.5s x 40 = 60s total budget. A real Hermes turn commonly takes
@@ -378,7 +381,7 @@ export class Orchestrator {
             runId,
             stepId: step.id,
             requestedCapability: 'agent.runtime',
-            selectedProvider: 'hermes',
+            selectedProvider: providerFor('agent.runtime'),
             modelTier: routeResult.modelTier,
             availableTools: spec.availableTools,
             exposedTools: routeResult.exposedTools,
