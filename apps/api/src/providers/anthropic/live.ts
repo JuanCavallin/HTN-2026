@@ -23,6 +23,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ModelTier, ProviderResult, TextModelAdapter } from '@htn/shared';
 import type { ProviderConfig } from '../../config.js';
+import { estimateCostCents } from './pricing.js';
 
 const MODEL_BY_TIER: Record<ModelTier, string> = {
   cheap: 'claude-haiku-4-5-20251001',
@@ -30,13 +31,23 @@ const MODEL_BY_TIER: Record<ModelTier, string> = {
   frontier: 'claude-opus-5',
 };
 
-function meta(op: string, started: number) {
+function meta(
+  op: string,
+  started: number,
+  /**
+   * Token/cost accounting. MUST be passed on any call that reports usage:
+   * withEgress reads `result.meta`, never `result.data`, so usage returned only
+   * in `data` never reaches the egress ledger and every cost number reads zero.
+   */
+  cost?: { tokensIn?: number; tokensOut?: number; estimatedCostCents?: number },
+) {
   return {
     provider: 'anthropic' as const,
     op,
     mode: 'live' as const,
     latencyMs: Date.now() - started,
     destination: 'https://api.anthropic.com',
+    ...cost,
   };
 }
 
@@ -100,14 +111,18 @@ export function createLiveAnthropic(cfg: ProviderConfig): TextModelAdapter {
           .map((block) => block.text)
           .join('');
 
+        const tokensIn = message.usage.input_tokens;
+        const tokensOut = message.usage.output_tokens;
+
         return {
           ok: true,
-          data: {
-            text,
-            tokensIn: message.usage.input_tokens,
-            tokensOut: message.usage.output_tokens,
-          },
-          meta: meta('complete', started),
+          data: { text, tokensIn, tokensOut },
+          // Also on `meta` - that is the half withEgress actually records.
+          meta: meta('complete', started, {
+            tokensIn,
+            tokensOut,
+            estimatedCostCents: estimateCostCents(input.tier ?? 'standard', tokensIn, tokensOut),
+          }),
         };
       } catch (err) {
         return failure('complete', started, err);

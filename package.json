@@ -13,7 +13,9 @@
     "typecheck": "pnpm -r exec tsc --noEmit",
     "format": "prettier --write \"**/*.{ts,tsx,json,md,css}\"",
     "build": "pnpm --filter @htn/web build",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:live": "node scripts/live-check.mjs",
+    "check:graph": "pnpm --filter @htn/api check:graph"
   },
   "devDependencies": {
     "concurrently": "^10.0.5",

@@ -26,6 +26,11 @@ export interface StepSpec {
   label: string;
   /** 'fetch' | 'worker' | 'judge' | 'browse' | 'decide' | ... Free-form; drives icons. */
   kind?: string;
+  /**
+   * The graph node this step belongs to, when the run came from a graph. Set by
+   * the interpreter; a hand-written playbook leaves it undefined. See Step.nodeId.
+   */
+  nodeId?: string;
   parentStepId?: string | null;
   providerId?: ProviderId;
   input?: Json;
@@ -34,6 +39,8 @@ export interface StepSpec {
 export interface FanOutSpec<I, O> {
   /** Label for the parent step that contains the swarm. */
   label: string;
+  /** Applied to the parent AND every child, so a fan-out reports as one node. */
+  nodeId?: string;
   items: I[];
   concurrency?: number;
   /** Label for each child step. Shown in the SwarmGrid. */
@@ -65,6 +72,8 @@ export interface AgentTaskSpec {
    * rule for why.
    */
   availableTools: string[];
+  /** The graph node this task belongs to. See Step.nodeId. */
+  nodeId?: string;
   parentStepId?: string | null;
   /** How often to poll while the task runs. Default 400ms. */
   pollIntervalMs?: number;
