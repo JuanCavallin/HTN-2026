@@ -16,7 +16,9 @@
     "smoke": "node scripts/smoke.mjs",
     "smoke:live": "node scripts/live-check.mjs",
     "check:graph": "pnpm --filter @htn/api check:graph",
-    "check:analytics": "pnpm --filter @htn/api check:analytics"
+    "check:analytics": "pnpm --filter @htn/api check:analytics",
+    "test:jev": "pnpm --filter @htn/api test:jev",
+    "test:jev:routing": "pnpm --filter @htn/api test:jev:routing"
   },
   "devDependencies": {
     "concurrently": "^10.0.5",

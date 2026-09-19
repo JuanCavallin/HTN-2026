@@ -11,6 +11,10 @@ import { z } from 'zod';
 import { PROVIDER_IDS, type ProviderId, type ProviderMode } from '@htn/shared';
 
 const modeEnum = z.enum(['mock', 'live', 'disabled']);
+const optionalUrl = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  z.string().url().optional(),
+);
 
 /** Accepts 1/true/yes/on, case-insensitive; anything else is false. */
 const boolish = z
@@ -37,9 +41,12 @@ const envSchema = z.object({
   HERMES_API_KEY: z.string().optional(),
   HERMES_BASE_URL: z.string().optional(),
 
+  AI_GATEWAY_API_KEY: z.string().optional(),
+  AI_GATEWAY_BASE_URL: optionalUrl,
   JEV_MODE: modeEnum.default('mock'),
+  /** Legacy aliases retained so existing local setups keep working. */
   JEV_API_KEY: z.string().optional(),
-  JEV_BASE_URL: z.string().optional(),
+  JEV_BASE_URL: optionalUrl,
 
   BROWSERBASE_MODE: modeEnum.default('mock'),
   BROWSERBASE_API_KEY: z.string().optional(),
@@ -105,7 +112,12 @@ function resolveHermes(): ProviderConfig {
 
 const providers: Record<ProviderId, ProviderConfig> = {
   hermes: resolveHermes(),
-  jev: resolve(env.JEV_MODE, env.JEV_API_KEY, 'JEV_API_KEY', { baseUrl: env.JEV_BASE_URL }),
+  jev: resolve(
+    env.JEV_MODE,
+    env.AI_GATEWAY_API_KEY ?? env.JEV_API_KEY,
+    env.AI_GATEWAY_API_KEY ? 'AI_GATEWAY_API_KEY' : 'JEV_API_KEY',
+    { baseUrl: env.AI_GATEWAY_BASE_URL ?? env.JEV_BASE_URL },
+  ),
   browserbase: resolve(env.BROWSERBASE_MODE, env.BROWSERBASE_API_KEY, 'BROWSERBASE_API_KEY', {
     projectId: env.BROWSERBASE_PROJECT_ID,
   }),

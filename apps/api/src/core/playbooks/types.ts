@@ -13,8 +13,10 @@ import type { ZodType } from 'zod';
 import type {
   Capability,
   CapabilityMap,
+  IntelligenceLevel,
   Json,
   ModelTier,
+  PrivacyRoute,
   ProposedAction,
   ProviderCallContext,
   ProviderId,
@@ -179,6 +181,10 @@ export interface PlaybookContext {
     stepId: string;
     requestedCapability: Capability;
     selectedProvider: ProviderId;
+    privacy?: PrivacyRoute;
+    intelligence?: IntelligenceLevel;
+    privacyConfidence?: number;
+    intelligenceConfidence?: number;
     modelTier: ModelTier;
     availableTools: string[];
     exposedTools: string[];

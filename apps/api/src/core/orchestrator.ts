@@ -320,6 +320,10 @@ export class Orchestrator {
         const decision: ScheduleDecision = {
           id: newId('sch'),
           runId,
+          privacy: input.privacy ?? 'cloud',
+          intelligence: input.intelligence ?? 'low',
+          privacyConfidence: input.privacyConfidence ?? input.confidence,
+          intelligenceConfidence: input.intelligenceConfidence ?? input.confidence,
           escalated: false,
           at: nowIso(),
           ...input,
@@ -384,11 +388,17 @@ export class Orchestrator {
           const routeResult = routed.ok
             ? routed.data
             : {
-                modelTier: 'standard' as const,
-                exposedTools: [] as string[],
+                privacy: 'private' as const,
+                intelligence: 'high' as const,
+                privacyConfidence: 0,
+                intelligenceConfidence: 0,
+                modelTier: 'local' as const,
+                exposedTools: [],
                 confidence: 0,
                 rationale:
-                  'Routing failed (' + routed.error.code + '); exposing no tools (fail closed).',
+                  'Routing failed (' +
+                  routed.error.code +
+                  '); using safe local execution with no tools.',
               };
 
           const decision: ScheduleDecision = {
@@ -397,12 +407,16 @@ export class Orchestrator {
             stepId: step.id,
             requestedCapability: 'agent.runtime',
             selectedProvider: providerFor('agent.runtime'),
+            privacy: routeResult.privacy,
+            intelligence: routeResult.intelligence,
+            privacyConfidence: routeResult.privacyConfidence,
+            intelligenceConfidence: routeResult.intelligenceConfidence,
             modelTier: routeResult.modelTier,
             availableTools: spec.availableTools,
             exposedTools: routeResult.exposedTools,
             confidence: routeResult.confidence,
             escalated: false,
-            rule: routed.ok ? 'jev-routed' : 'route-failed-fallback-no-tools',
+            rule: routed.ok ? 'jev-routed' : 'route-failed-safe-local',
             at: nowIso(),
           };
           await store.createScheduleDecision(decision);

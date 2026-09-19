@@ -26,6 +26,7 @@ import type { ProviderConfig } from '../../config.js';
 import { estimateCostCents } from './pricing.js';
 
 const MODEL_BY_TIER: Record<ModelTier, string> = {
+  local: 'claude-haiku-4-5-20251001',
   cheap: 'claude-haiku-4-5-20251001',
   standard: 'claude-sonnet-5',
   frontier: 'claude-opus-5',
@@ -52,7 +53,12 @@ function meta(
 }
 
 function failure<T>(op: string, started: number, err: unknown): ProviderResult<T> {
-  const message = err instanceof Anthropic.APIError ? err.message : (err as Error).message;
+  const message =
+    err instanceof Anthropic.APIError
+      ? err.message
+      : err instanceof Error
+        ? err.message
+        : String(err);
   const status = err instanceof Anthropic.APIError ? err.status : undefined;
   return {
     ok: false,

@@ -78,18 +78,44 @@ Nothing else changes. Not the store, not the routes, not the streaming, not the 
 
 ## Going live with a provider
 
-Every provider has `index.ts` (factory + mock) and `live.ts` (a stub that throws
-`NOT_IMPLEMENTED` with instructions in its header).
+Every provider has `index.ts` (factory + mock) and, where applicable, a `live.ts` adapter.
+Browserbase and Jev have live implementations. Hermes, Anthropic, and Composio remain
+explicit `NOT_IMPLEMENTED` stubs until their real endpoints and credentials are available.
+Map vendor shapes onto our interfaces; vendor types must not escape the adapter file.
 
-> **The Hermes and Jev live adapters are intentionally unimplemented.** Their real
-> endpoints, auth, and payload shapes were not known when this was scaffolded and were
-> **not guessed** — invented code that compiles and looks finished is worse than a stub
-> that tells you what to ask for. Get the docs from the sponsors and fill in `live.ts`.
-> Map their shapes onto our interfaces; vendor types must not escape that file.
+Flip one `<PROVIDER>_MODE=live` at a time. Anything not working by hour 30 stays mocked;
+the app does not care.
 
-Recommended order, lowest risk first: **Anthropic** → **Browserbase** → **Composio** →
-**Jev** → **Hermes**. Flip one `<PROVIDER>_MODE=live` at a time. Anything not working by
-hour 30 stays mocked; the app does not care.
+### Testing Jev through Vercel AI Gateway
+
+Set `JEV_MODE=live` and `AI_GATEWAY_API_KEY` in the ignored root `.env`, then run:
+
+```bash
+pnpm test:jev
+```
+
+The test verifies Gateway authentication, one typed Jev decision, and model/tool routing
+through the same live adapter used by the API. Jev uses model ID `typesafe-ai/jev` through
+AI SDK's evaluation API; it is not a chat-completions model.
+
+To test Jev's model-tier routing against three built-in task prompts:
+
+```bash
+pnpm test:jev:routing
+```
+
+Or evaluate your own sanitized task description:
+
+```bash
+pnpm test:jev:routing -- "Read my resume and summarize my experience"
+pnpm test:jev:routing -- "Search current software jobs at Google"
+```
+
+Jev makes two independent decisions from the task description: `privacy` is `private` or
+`cloud`, and `intelligence` is `low` or `high`. Together these map to a small private
+model, strong private model, inexpensive cloud model, or frontier cloud model. Both axes
+default to `auto`; `--privacy` and `--intelligence` remain available as explicit test
+overrides. Do not put actual secrets or personal data in a Gateway test prompt.
 
 Two things to confirm at the Browserbase booth in hour one: your **concurrent session
 limit** (the swarm design depends on it — cap `fanOut` concurrency to match) and whether
