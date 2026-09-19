@@ -1,0 +1,28 @@
+{
+  "name": "htn-2026",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.30.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,magenta \"pnpm --filter @htn/api dev\" \"pnpm --filter @htn/web dev\"",
+    "dev:api": "pnpm --filter @htn/api dev",
+    "dev:web": "pnpm --filter @htn/web dev",
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md,css}\"",
+    "build": "pnpm --filter @htn/web build",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5",
+    "prettier": "^3.4.2",
+    "typescript": "^7.0.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

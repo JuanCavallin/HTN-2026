@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // DOM is here only for AbortSignal, which is a standard web API that Node 22
+    // also implements. This package must stay runtime-agnostic: it is bundled
+    // into the browser AND imported by the API, so no Node built-ins here.
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["src"]
+}

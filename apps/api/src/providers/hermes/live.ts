@@ -1,0 +1,61 @@
+/**
+ * Hermes Agent (Nous Research) — LIVE ADAPTER. NOT IMPLEMENTED.
+ *
+ * ============================================================================
+ * READ THIS BEFORE WRITING CODE HERE.
+ *
+ * The real endpoints, auth scheme, and payload shapes for Hermes are NOT known
+ * to whoever scaffolded this file, and were deliberately NOT guessed. Inventing
+ * them would produce code that compiles, looks finished, and fails at the booth.
+ *
+ * TO IMPLEMENT — go to the sponsor's docs or their table, then fill in:
+ *   1. Base URL                 -> HERMES_BASE_URL
+ *   2. Auth header shape        -> Authorization: Bearer? X-API-Key? something else?
+ *   3. Start a task             -> map to startTask({ goal, context, tools })
+ *   4. Poll / stream a task     -> map to pollTask(taskId)
+ *   5. Cancel a task            -> map to cancelTask(taskId)
+ *
+ * Map THEIR shapes onto OUR AgentRuntimeAdapter interface. Do not let their types
+ * leak past this file — that is the whole point of the adapter.
+ *
+ * Until then: HERMES_MODE=mock (the default) and everything works.
+ * ============================================================================
+ */
+
+import type { AgentRuntimeAdapter, ProviderResult } from '@htn/shared';
+import type { ProviderConfig } from '../../config.js';
+
+function notImplemented<T>(op: string): ProviderResult<T> {
+  return {
+    ok: false,
+    error: {
+      code: 'NOT_IMPLEMENTED',
+      message: `hermes.${op} live adapter is not implemented yet. See providers/hermes/live.ts.`,
+      retryable: false,
+    },
+    meta: { provider: 'hermes', op, mode: 'live', latencyMs: 0, destination: null },
+  };
+}
+
+export function createLiveHermes(_cfg: ProviderConfig): AgentRuntimeAdapter {
+  return {
+    id: 'hermes',
+    mode: 'live',
+    capabilities: ['agent.runtime'],
+    async health() {
+      return notImplemented('health');
+    },
+    async invoke(op) {
+      return notImplemented(op);
+    },
+    async startTask() {
+      return notImplemented('startTask');
+    },
+    async pollTask() {
+      return notImplemented('pollTask');
+    },
+    async cancelTask() {
+      return notImplemented('cancelTask');
+    },
+  };
+}

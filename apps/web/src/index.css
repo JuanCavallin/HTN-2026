@@ -1,0 +1,50 @@
+@import 'tailwindcss';
+
+/*
+ * Tailwind v4 — theme tokens are declared here, not in a JS config file.
+ * Keep styling in components (utility classes). Two devs must never need to edit
+ * this file at the same time.
+ */
+
+@theme {
+  --color-ink: #0b0d12;
+  --color-surface: #12151d;
+  --color-raised: #1a1f2b;
+  --color-edge: #2a3140;
+  --color-muted: #8b95a8;
+  --color-accent: #6ea8fe;
+  --color-ok: #4ade80;
+  --color-warn: #fbbf24;
+  --color-bad: #f87171;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-ink);
+  color: #e6e9f0;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+}
+
+/* Timeline connector line between steps. */
+.step-rail::before {
+  content: '';
+  position: absolute;
+  left: 0.5rem;
+  top: 1.6rem;
+  bottom: -0.25rem;
+  width: 1px;
+  background: var(--color-edge);
+}
