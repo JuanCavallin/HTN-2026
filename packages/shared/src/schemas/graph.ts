@@ -42,19 +42,31 @@ const modelTierSchema = z.enum(['cheap', 'standard', 'frontier']);
  * analytics.ts is derived from reported tokens rather than from this list, so a
  * no-LLM node contributes zero automatically.
  *
- *   fetch      no    load a source
- *   tool       NO    one deterministic tool call, no model at all
- *   redact     no    local PII detection
- *   decide     yes   text.model completion
- *   agent_task yes   delegate a subtask to the agent runtime (Hermes)
- *   swarm      both  fan out N workers
- *   judge      yes   decision provider adjudicates
- *   submit     no    tool call BEHIND an approval gate (irreversible)
- *   approval   no    standalone human gate
+ *   fetch      no      load a source
+ *   tool       NO      one deterministic tool call, no model at all
+ *   dispatch   cheap   decision layer picks ONE tool, then we call it directly
+ *   redact     no      local PII detection
+ *   decide     yes     text.model completion
+ *   agent_task opaque  delegate a subtask to the agent runtime (Hermes)
+ *   swarm      both    fan out N workers
+ *   judge      yes     decision provider adjudicates
+ *   submit     no      tool call BEHIND an approval gate (irreversible)
+ *   approval   no      standalone human gate
+ *
+ * There is a deliberate THREE-RUNG LADDER of delegation here, and the middle
+ * rung is the point:
+ *
+ *   tool      0 model calls    you pick the tool, you pick the args
+ *   dispatch  1 cheap call     the decision layer picks the tool; no harness
+ *   agent_task  many, opaque   the harness picks and runs everything
+ *
+ * Pushing work down to the cheapest rung that can do it is the product
+ * argument, and `executorOf()` in executors.ts renders that ladder visually.
  */
 export const GRAPH_NODE_TYPES = [
   'fetch',
   'tool',
+  'dispatch',
   'redact',
   'decide',
   'agent_task',
@@ -93,6 +105,12 @@ export const fetchNodeSchema = nodeVariant(
   z.object({
     /** Opaque to the runtime; the interpreter decides how to resolve it. */
     source: z.string().min(1),
+    /**
+     * Literal content, when the graph itself carries the document rather than
+     * naming somewhere to go and get it. Resolved for {{refs}} like any other
+     * string, so it can also pull from a run variable.
+     */
+    text: z.string().optional(),
   }),
 );
 
@@ -107,6 +125,53 @@ export const toolNodeSchema = nodeVariant(
   z.object({
     tool: z.string().min(1),
     args: argsSchema.default({}),
+    /**
+     * What this call DOES, in core/risk.ts's vocabulary ('read_page',
+     * 'send_email', 'submit_form', ...). The risk gate classifies on this, so
+     * a write-shaped tool still reaches the approval gate from a plain `tool`
+     * node.
+     *
+     * TODO(person-3): remove this once the tool registry reports reversibility
+     * per tool — see docs/tool-registry-handoff.md. Until then the interpreter
+     * falls back to a small lookup table and, failing that, asks a human.
+     */
+    actionKind: z.string().min(1).optional(),
+  }),
+);
+
+/**
+ * THE MIDDLE RUNG: the decision layer picks one tool from a candidate set and
+ * the interpreter calls it directly. No agent harness in the middle, so no
+ * multi-turn model loop — one cheap decide plus one tool call.
+ *
+ * This is the "Direct tool call (no agent loop needed)" branch that already
+ * appears in docs/example_flow.md, hanging straight off the Jev node.
+ *
+ * Needs NO new provider capability: DecisionAdapter.decide({question, options})
+ * already has exactly this shape, with `options` as the candidate tool names.
+ */
+export const dispatchNodeSchema = nodeVariant(
+  'dispatch',
+  z.object({
+    /** Handed to the decision layer as the question. */
+    goal: z.string().min(1),
+    /** The decision layer picks exactly one of these. */
+    candidateTools: z.array(z.string().min(1)).min(2),
+    /**
+     * Static args per candidate tool, keyed by tool name. The default mode,
+     * and it costs ZERO extra tokens - the model chooses which tool, the graph
+     * author already said what to pass it.
+     */
+    args: z.record(z.string(), argsSchema).default({}),
+    /**
+     * 'static' uses `args` above. 'model' spends one additional completion to
+     * infer arguments - far more than static, still far less than handing the
+     * whole job to a harness.
+     */
+    argsFrom: z.enum(['static', 'model']).default('static'),
+    evidence: z.string().optional(),
+    /** See toolNodeSchema.actionKind. Applies to whichever tool is chosen. */
+    actionKind: z.string().min(1).optional(),
   }),
 );
 
@@ -177,6 +242,11 @@ export const submitNodeSchema = nodeVariant(
     /** Shown VERBATIM in the approval panel. Not summarised. */
     description: z.string().min(1),
     amountCents: z.number().int().optional(),
+    /**
+     * See toolNodeSchema.actionKind. A submit node stops for a human either
+     * way; this only sharpens which rule the approval panel cites.
+     */
+    actionKind: z.string().min(1).optional(),
   }),
 );
 
@@ -191,6 +261,7 @@ export const approvalNodeSchema = nodeVariant(
 export const graphNodeSchema = z.discriminatedUnion('type', [
   fetchNodeSchema,
   toolNodeSchema,
+  dispatchNodeSchema,
   redactNodeSchema,
   decideNodeSchema,
   agentTaskNodeSchema,

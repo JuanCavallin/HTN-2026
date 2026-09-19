@@ -15,7 +15,8 @@
     "build": "pnpm --filter @htn/web build",
     "smoke": "node scripts/smoke.mjs",
     "smoke:live": "node scripts/live-check.mjs",
-    "check:graph": "pnpm --filter @htn/api check:graph"
+    "check:graph": "pnpm --filter @htn/api check:graph",
+    "check:analytics": "pnpm --filter @htn/api check:analytics"
   },
   "devDependencies": {
     "concurrently": "^10.0.5",

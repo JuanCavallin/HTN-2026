@@ -10,6 +10,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import type {
+  AgentGraph,
   Approval,
   EgressEvent,
   PiiSpanWithValue,
@@ -23,6 +24,7 @@ import { nowIso } from '../lib/ids.js';
 import { NotFoundError, type ListRunsFilter, type Store } from './types.js';
 
 interface Snapshot {
+  graphs?: AgentGraph[];
   runs: Run[];
   steps: Step[];
   approvals: Approval[];
@@ -44,6 +46,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   const pii = new Map<string, PiiSpanWithValue[]>();
   const scheduleDecisions = new Map<string, ScheduleDecision[]>();
   const events = new Map<string, StoredEvent[]>();
+  const graphs = new Map<string, AgentGraph>();
   /** Monotonic step counter per run, so Step.seq is stable and gap-free. */
   const stepSeq = new Map<string, number>();
 
@@ -61,6 +64,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
 
   async function save(): Promise<void> {
     const snapshot: Snapshot = {
+      graphs: [...graphs.values()],
       runs: [...runs.values()],
       steps: [...steps.values()],
       approvals: [...approvals.values()],
@@ -92,6 +96,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
       for (const p of snap.pii) push(pii, p.runId, p);
       for (const d of snap.scheduleDecisions) push(scheduleDecisions, d.runId, d);
       for (const e of snap.events) push(events, e.runId, e);
+      for (const g of snap.graphs ?? []) graphs.set(g.id, g);
       console.log('[store] hydrated ' + snap.runs.length + ' run(s) from snapshot');
     } catch {
       // No snapshot yet, or it is unreadable. Starting empty is correct.
@@ -207,6 +212,24 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
     },
     async listScheduleDecisions(runId) {
       return [...(scheduleDecisions.get(runId) ?? [])];
+    },
+
+    /* -------------------------------------------------------------- Graphs */
+    async saveGraph(graph) {
+      graphs.set(graph.id, graph);
+      scheduleSave();
+      return graph;
+    },
+    async getGraph(id) {
+      return graphs.get(id) ?? null;
+    },
+    async listGraphs() {
+      return [...graphs.values()].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    },
+    async deleteGraph(id) {
+      const existed = graphs.delete(id);
+      if (existed) scheduleSave();
+      return existed;
     },
 
     /* -------------------------------------------------------------- Events */

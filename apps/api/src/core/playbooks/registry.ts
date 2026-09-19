@@ -7,8 +7,14 @@
 
 import type { Playbook } from './types.js';
 import { demoPlaybook } from './demo.playbook.js';
+import { graphPlaybook } from './graph.playbook.js';
 
-const PLAYBOOKS: Playbook<never>[] = [demoPlaybook as unknown as Playbook<never>];
+// demo stays registered alongside graph deliberately: it is the fallback run
+// that works even if graph execution breaks.
+const PLAYBOOKS: Playbook<never>[] = [
+  demoPlaybook as unknown as Playbook<never>,
+  graphPlaybook as unknown as Playbook<never>,
+];
 
 const byKind = new Map<string, Playbook<never>>(PLAYBOOKS.map((p) => [p.kind, p]));
 
@@ -16,8 +22,14 @@ export function getPlaybook(kind: string): Playbook<never> | undefined {
   return byKind.get(kind);
 }
 
-export function listPlaybooks(): { kind: string; title: string }[] {
-  return [...byKind.values()].map((p) => ({ kind: p.kind, title: p.title }));
+export function listPlaybooks(): { kind: string; title: string; directLaunch: boolean }[] {
+  return [...byKind.values()].map((p) => ({
+    kind: p.kind,
+    title: p.title,
+    // Explicit rather than optional on the wire, so the client never has to
+    // guess what `undefined` means.
+    directLaunch: p.directLaunch !== false,
+  }));
 }
 
 export function hasPlaybook(kind: string): boolean {

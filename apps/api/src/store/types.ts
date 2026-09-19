@@ -12,6 +12,7 @@
  */
 
 import type {
+  AgentGraph,
   Approval,
   EgressEvent,
   PiiSpanWithValue,
@@ -59,6 +60,14 @@ export interface Store {
   // PII spans. Values stay server-side; never returned to the client as-is.
   appendPiiSpan(span: PiiSpanWithValue): Promise<PiiSpanWithValue>;
   listPiiSpans(runId: string): Promise<PiiSpanWithValue[]>;
+
+  // Graphs. Unlike everything else here a graph is MUTABLE and not scoped to a
+  // run: it is the editable document a run is launched from. Runs snapshot the
+  // graph they executed, so editing one never rewrites history.
+  saveGraph(graph: AgentGraph): Promise<AgentGraph>;
+  getGraph(id: string): Promise<AgentGraph | null>;
+  listGraphs(): Promise<AgentGraph[]>;
+  deleteGraph(id: string): Promise<boolean>;
 
   // Event log — append-only, monotonic seq per run. Powers SSE replay.
   appendEvent(runId: string, event: RunEvent): Promise<StoredEvent>;

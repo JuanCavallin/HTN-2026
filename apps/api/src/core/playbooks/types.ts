@@ -14,6 +14,7 @@ import type {
   Capability,
   CapabilityMap,
   Json,
+  ModelTier,
   ProposedAction,
   ProviderCallContext,
   ProviderId,
@@ -117,6 +118,17 @@ export interface PlaybookContext {
   /** Get a provider by capability — never by vendor name. */
   provider<C extends Capability>(capability: C): CapabilityMap[C];
 
+  /**
+   * Which vendor is currently bound to a capability.
+   *
+   * For LABELLING ONLY — a step badge, a log line. Never branch on this: the
+   * whole point of the capability indirection is that behaviour does not depend
+   * on who is serving it. It exists because a hardcoded `providerId: 'jev'` on
+   * a step becomes a lie the moment someone repoints BINDINGS, and a dashboard
+   * that misreports which vendor ran is worse than one that says nothing.
+   */
+  providerFor(capability: Capability): ProviderId;
+
   /** Detect PII, pin it locally, and return cloud-safe text. */
   redact(text: string, field: string): Promise<RedactionOutput>;
 
@@ -130,6 +142,27 @@ export interface PlaybookContext {
    * Blocks until the task reports done, fails, or maxPolls is exceeded.
    */
   runAgentTask(spec: AgentTaskSpec): Promise<AgentTaskResult>;
+
+  /**
+   * Record a routing decision made OUTSIDE runAgentTask.
+   *
+   * runAgentTask records its own, but the `dispatch` node -- where the decision
+   * layer picks ONE tool and the interpreter calls it directly, with no agent
+   * harness in the middle -- needs the same visibility. Without this, the cheap
+   * path would look like it did no routing at all and the
+   * availableTools-vs-exposedTools number would only ever come from the
+   * expensive path.
+   */
+  recordSchedule(input: {
+    stepId: string;
+    requestedCapability: Capability;
+    selectedProvider: ProviderId;
+    modelTier: ModelTier;
+    availableTools: string[];
+    exposedTools: string[];
+    confidence: number;
+    rule: string;
+  }): Promise<ScheduleDecision>;
 
   /** Build the context every provider call requires. */
   callContext(args: {
@@ -150,6 +183,15 @@ export interface Playbook<I = unknown> {
   kind: string;
   title: string;
   inputSchema: ZodType<I>;
+  /**
+   * Can the generic "pick a playbook and go" form launch this with NO input?
+   *
+   * Defaults to true. `graph` sets it false: it needs a graphId, so offering it
+   * in a dropdown that posts `{}` produces a guaranteed validation error. If
+   * you add a playbook with required input, set this, or the launch form will
+   * advertise a button that cannot work.
+   */
+  directLaunch?: boolean;
   execute(ctx: PlaybookContext, input: I): Promise<PlaybookOutcome>;
 }
 
