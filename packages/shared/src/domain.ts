@@ -117,6 +117,35 @@ export interface Approval {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Conversation                                                               */
+/* -------------------------------------------------------------------------- */
+
+export interface ConversationMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  at: Iso;
+  /** The graph version this turn produced, when it produced one. */
+  graphVersion?: number;
+}
+
+/**
+ * A chat that authors a graph.
+ *
+ * It holds the transcript and a pointer to the graph being built -- never the
+ * graph itself, so there is exactly one copy and the canvas and the chat cannot
+ * disagree about what the current document is.
+ */
+export interface Conversation {
+  id: string;
+  title: string;
+  graphId?: string;
+  messages: ConversationMessage[];
+  createdAt: Iso;
+  updatedAt: Iso;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Egress ledger                                                              */
 /* -------------------------------------------------------------------------- */
 

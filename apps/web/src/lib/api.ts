@@ -7,7 +7,10 @@ import type {
   AgentGraph,
   Approval,
   ApprovalDecision,
+  Conversation,
+  ConversationMessage,
   EgressEvent,
+  GraphDelegation,
   GraphEdge,
   GraphNode,
   PiiSpan,
@@ -132,6 +135,29 @@ export const api = {
     request<{ graph: AgentGraph }>('/graphs/' + id + '/edges/' + edgeId, {
       method: 'DELETE',
       body: JSON.stringify({ version }),
+    }),
+
+  /* --------------------------------------------------------- Conversations */
+
+  createConversation: () =>
+    request<{ conversation: Conversation }>('/conversations', { method: 'POST' }),
+
+  conversation: (id: string) =>
+    request<{ conversation: Conversation; graph: AgentGraph | null }>('/conversations/' + id),
+
+  /**
+   * ONE endpoint for both building and editing. The first turn creates a graph;
+   * a later turn modifies the same document and bumps its version.
+   */
+  sendMessage: (id: string, text: string) =>
+    request<{
+      conversation: Conversation;
+      message: ConversationMessage;
+      graph: AgentGraph;
+      delegation: GraphDelegation;
+    }>('/conversations/' + id + '/messages', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
     }),
 
   /** Launch a run of a graph. The run snapshots the graph as it is right now. */
