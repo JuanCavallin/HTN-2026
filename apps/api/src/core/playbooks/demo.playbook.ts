@@ -77,7 +77,10 @@ export const demoPlaybook = definePlaybook<DemoInput>({
       async (step) => {
         const model = ctx.provider('text.model');
         const res = await model.complete(
-          { prompt: redaction.redacted, maxTokens: 256 },
+          // Summarizing redacted text is a cheap-tier task by nature — real
+          // demonstration of Jev's model_tier reaching an actual model choice
+          // (Haiku here), not just a label recorded for telemetry.
+          { prompt: redaction.redacted, maxTokens: 256, tier: 'cheap' },
           ctx.callContext({
             stepId: step.id,
             policyRule: 'redacted-payload-may-leave',
