@@ -1,18 +1,14 @@
 import type { Step } from '@htn/shared';
+import { NODE_TYPE_ICON } from '@htn/shared';
 import { Badge } from '../ui/Badge';
 import { Spinner } from '../ui/Spinner';
 import { duration, humanStatus, STEP_STATUS_TONE } from '../../lib/format';
 
-const ICONS: Record<string, string> = {
-  fetch: '▤',
-  redact: '◐',
-  decide: '◆',
-  swarm: '⋯',
-  worker: '•',
-  judge: '⚖',
-  submit: '↥',
-  task: '▸',
-};
+/**
+ * Sourced from @htn/shared so the timeline and the graph canvas cannot show
+ * different marks for the same work. Adding a node type there adds it here.
+ */
+const ICONS: Record<string, string> = NODE_TYPE_ICON;
 
 export function StepRow({ step }: { step: Step }) {
   const tone = STEP_STATUS_TONE[step.status];

@@ -7,8 +7,14 @@
 
 import type { Playbook } from './types.js';
 import { demoPlaybook } from './demo.playbook.js';
+import { graphPlaybook } from './graph.playbook.js';
 
-const PLAYBOOKS: Playbook<never>[] = [demoPlaybook as unknown as Playbook<never>];
+// demo stays registered alongside graph deliberately: it is the fallback run
+// that works even if graph execution breaks.
+const PLAYBOOKS: Playbook<never>[] = [
+  demoPlaybook as unknown as Playbook<never>,
+  graphPlaybook as unknown as Playbook<never>,
+];
 
 const byKind = new Map<string, Playbook<never>>(PLAYBOOKS.map((p) => [p.kind, p]));
 

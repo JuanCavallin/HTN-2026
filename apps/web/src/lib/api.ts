@@ -4,9 +4,12 @@
  */
 
 import type {
+  AgentGraph,
   Approval,
   ApprovalDecision,
   EgressEvent,
+  GraphEdge,
+  GraphNode,
   PiiSpan,
   Run,
   RunAnalytics,
@@ -74,6 +77,68 @@ export const api = {
    * request, and it updates with the stream.
    */
   analytics: (id: string) => request<RunAnalytics>('/runs/' + id + '/analytics'),
+
+  /* ------------------------------------------------------------- Graphs */
+
+  graphs: () => request<{ graphs: AgentGraph[] }>('/graphs'),
+
+  graph: (id: string) => request<{ graph: AgentGraph }>('/graphs/' + id),
+
+  createGraph: (body: { name?: string; description?: string }) =>
+    request<{ graph: AgentGraph }>('/graphs', { method: 'POST', body: JSON.stringify(body) }),
+
+  /**
+   * Whole-document save. `version` is the copy you last read: the server
+   * returns 409 if someone else saved in between, which WILL happen once chat
+   * and the canvas are both writing. Re-read and merge rather than retrying
+   * blind.
+   */
+  saveGraph: (
+    id: string,
+    body: { name?: string; nodes: GraphNode[]; edges: GraphEdge[]; version?: number },
+  ) =>
+    request<{ graph: AgentGraph }>('/graphs/' + id, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  addNode: (id: string, node: GraphNode, version?: number) =>
+    request<{ graph: AgentGraph }>('/graphs/' + id + '/nodes', {
+      method: 'POST',
+      body: JSON.stringify({ node, version }),
+    }),
+
+  patchNode: (id: string, nodeId: string, patch: Partial<GraphNode>, version?: number) =>
+    request<{ graph: AgentGraph }>('/graphs/' + id + '/nodes/' + nodeId, {
+      method: 'PATCH',
+      body: JSON.stringify({ ...patch, version }),
+    }),
+
+  /** Cascades to every edge touching the node. */
+  removeNode: (id: string, nodeId: string, version?: number) =>
+    request<{ graph: AgentGraph }>('/graphs/' + id + '/nodes/' + nodeId, {
+      method: 'DELETE',
+      body: JSON.stringify({ version }),
+    }),
+
+  addEdge: (id: string, edge: GraphEdge, version?: number) =>
+    request<{ graph: AgentGraph }>('/graphs/' + id + '/edges', {
+      method: 'POST',
+      body: JSON.stringify({ edge, version }),
+    }),
+
+  removeEdge: (id: string, edgeId: string, version?: number) =>
+    request<{ graph: AgentGraph }>('/graphs/' + id + '/edges/' + edgeId, {
+      method: 'DELETE',
+      body: JSON.stringify({ version }),
+    }),
+
+  /** Launch a run of a graph. The run snapshots the graph as it is right now. */
+  runGraph: (graphId: string, variables: Record<string, unknown> = {}) =>
+    request<{ run: Run }>('/runs', {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'graph', input: { graphId, variables } }),
+    }),
 
   listRuns: () => request<{ runs: Run[] }>('/runs'),
 

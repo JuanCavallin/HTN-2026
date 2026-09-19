@@ -7,6 +7,11 @@
 
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 import { ApprovalConflictError } from '../../services/approvals.service.js';
+import {
+  GraphConflictError,
+  GraphNotFoundError,
+  GraphValidationError,
+} from '../../services/graphs.service.js';
 import { ValidationError } from '../../services/runs.service.js';
 import { NotFoundError } from '../../store/types.js';
 import { HttpError } from './validate.js';
@@ -34,7 +39,21 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
 
-  if (err instanceof ApprovalConflictError) {
+  if (err instanceof GraphValidationError) {
+    res.status(400).json({
+      error: { code: err.code, message: err.message, details: err.details },
+    });
+    return;
+  }
+
+  if (err instanceof GraphNotFoundError) {
+    res.status(404).json({ error: { code: err.code, message: err.message } });
+    return;
+  }
+
+  // Someone else saved this graph first. The client should re-read and retry —
+  // chat and the canvas both write, so this is a real race, not a rare one.
+  if (err instanceof ApprovalConflictError || err instanceof GraphConflictError) {
     res.status(409).json({ error: { code: err.code, message: err.message } });
     return;
   }

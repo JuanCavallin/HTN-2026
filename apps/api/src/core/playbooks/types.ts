@@ -14,6 +14,7 @@ import type {
   Capability,
   CapabilityMap,
   Json,
+  ModelTier,
   ProposedAction,
   ProviderCallContext,
   ProviderId,
@@ -130,6 +131,27 @@ export interface PlaybookContext {
    * Blocks until the task reports done, fails, or maxPolls is exceeded.
    */
   runAgentTask(spec: AgentTaskSpec): Promise<AgentTaskResult>;
+
+  /**
+   * Record a routing decision made OUTSIDE runAgentTask.
+   *
+   * runAgentTask records its own, but the `dispatch` node -- where the decision
+   * layer picks ONE tool and the interpreter calls it directly, with no agent
+   * harness in the middle -- needs the same visibility. Without this, the cheap
+   * path would look like it did no routing at all and the
+   * availableTools-vs-exposedTools number would only ever come from the
+   * expensive path.
+   */
+  recordSchedule(input: {
+    stepId: string;
+    requestedCapability: Capability;
+    selectedProvider: ProviderId;
+    modelTier: ModelTier;
+    availableTools: string[];
+    exposedTools: string[];
+    confidence: number;
+    rule: string;
+  }): Promise<ScheduleDecision>;
 
   /** Build the context every provider call requires. */
   callContext(args: {

@@ -312,6 +312,19 @@ export class Orchestrator {
         };
       },
 
+      recordSchedule: async (input) => {
+        const decision: ScheduleDecision = {
+          id: newId('sch'),
+          runId,
+          escalated: false,
+          at: nowIso(),
+          ...input,
+        };
+        await store.createScheduleDecision(decision);
+        await bus.emit(runId, { type: 'schedule.decided', decision });
+        return decision;
+      },
+
       callContext: buildCallContext,
 
       runAgentTask: async (spec: AgentTaskSpec): Promise<AgentTaskResult> => {
