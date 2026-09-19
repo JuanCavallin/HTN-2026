@@ -17,6 +17,7 @@
 import type { ModelTier } from '@htn/shared';
 
 export const CENTS_PER_MTOK: Record<ModelTier, { in: number; out: number }> = {
+  local: { in: 100, out: 500 },
   cheap: { in: 100, out: 500 },
   standard: { in: 200, out: 1000 },
   frontier: { in: 500, out: 2500 },
