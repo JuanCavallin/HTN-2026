@@ -10,12 +10,12 @@ Person 2: Implement Jev tool-family/tool selection, confidence scores, threshold
 Person 3: Connect registry to scheduler; return only selected tool metadata/schemas.
 Person 4: Visualize 50+ tools → 3–8 tools, confidence, schema/token reduction, and baseline comparison.
 Checkpoint: Same task succeeds while dramatically reducing tool context. This matches the document's 50+ → 3–8 acceptance target.
-Milestone 3 — Adaptive model execution [P2]
+Milestone 3 — Adaptive model execution + completion [P2]
 Person 1: Build model gateway supporting cheap + frontier models.
-Person 2: Implement Jev model routing, confidence-based escalation, fallback, and verification.
-Person 3: Create deterministic/task-specific verification checks and failure signals.
-Person 4: Show model choice and escalation visually: cheap → verification failure → frontier.
-Checkpoint: Agent starts cheaply, escalates when necessary, and completes successfully. This implements the escalation lifecycle already specified in the design.
+Person 2: Implement Jev model routing, confidence-based escalation, fallback, and the done / continue / blocked completion decision over sanitized session state.
+Person 3: Create deterministic/task-specific verification checks and failure signals; Jev cannot mark a task done unless these checks pass.
+Person 4: Show model choice, escalation, and completion visually: cheap → verification failure → frontier → verified done.
+Checkpoint: Agent starts cheaply, escalates when necessary, and completes only after Jev and deterministic verification agree.
 Milestone 4 — Killer demo + benchmarks [P3]
 Person 1: Harden end-to-end execution and failure handling.
 Person 2: Build 20–50 benchmark tasks and run Baseline vs. AgentOS.
@@ -40,7 +40,7 @@ The key is that each person owns a vertical specialty for the entire hackathon r
 
 Person 1: Runtime/Integration → Hermes adapter, API, model gateway, event system, execution.
 
-Person 2: Intelligence/Optimization → Jev, routing, confidence, escalation, benchmarking.
+Person 2: Intelligence/Optimization → Jev, routing, confidence, escalation, completion decisions, benchmarking.
 
 Person 3: Tools/Safety → registry, tool execution, verification, policies, privacy.
 

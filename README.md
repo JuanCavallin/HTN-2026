@@ -1,11 +1,13 @@
-# HTN 2026 — Agent Runtime Scaffold
+# HTN 2026 — AgentOS
 
-A supervised agent runtime: kick off a long-running task, watch it work in real time,
-and it stops for a human before anything irreversible.
+A harness-agnostic control plane that makes AI agents faster, cheaper, more private,
+and easier to supervise. Hermes is the first harness adapter for the demo; Jev selects
+the model route, context scope, and relevant tools for each step and helps determine
+whether the task is complete from canonical session state.
 
-**The product idea is not decided yet, and this scaffold does not assume one.** Nothing
-above `core/playbooks/` is named after a product. Choosing the idea means adding one
-playbook file, one zod schema, and one result card — not restructuring the app.
+Deterministic AgentOS policy remains the final authority for privacy, authorization,
+verification, and irreversible actions. See the
+[final design specification](docs/agentos-design.md) for the product contract and MVP.
 
 ## Quick start
 
@@ -65,7 +67,7 @@ API: **additive edits only**, and say so in chat before changing an existing fie
 Only D adds dependencies — resolve `pnpm-lock.yaml` conflicts by taking either side and
 re-running `pnpm install`, never by hand-merging.
 
-## Shipping the product idea
+## Shipping the AgentOS demo playbook
 
 1. `packages/shared/src/schemas/playbooks/<kind>.ts` — the zod input schema
 2. Add one line to `packages/shared/src/schemas/playbooks/index.ts`
