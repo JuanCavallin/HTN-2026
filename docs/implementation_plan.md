@@ -1,7 +1,9 @@
+Before you start: Jev is a typed decision model, not a chat model. It returns a choice, a score, or a probability with calibrated confidence — it cannot generate text, has no tools and has no loop. Every milestone below that says "Jev decides X" means "Jev picks X from a list we construct." Anything generative comes from a normal model. Read docs/jev.md before writing code that calls it; read docs/agentos-design.md for scope and contracts.
+
 Milestone 1 — Working baseline + infrastructure [P0]
 Person 1 — Runtime: Get Hermes → AgentOS → model → response working; define ScheduleDecision, StepEvent, and adapter interfaces.
 Person 2 — Jev/optimization: Create mocked scheduler first; establish frontier-for-everything baseline; implement metric collection for model calls/tokens.
-Person 3 — Tools/Browser (split across two people: 3A registry+MCP, 3B browser+Browserbase): Build tool registry with 50+ real/simulated tools; implement common tool interface and read/write classification; stand up the browser tool family.
+Person 3 — Tools/Browser (split across two people: 3A registry+MCP, 3B browser+Browserbase): 3A builds the registry, MCP client, manifest loader and select_tool_metadata against a DELIBERATELY EMPTY catalog — do not pick or add tools yet. Which providers to integrate is decided at the hackathon by which sponsor APIs are worth building against for sponsor tracks; the deliverable is that adding provider number one through fifty is one manifest plus one binding. The 50+ tools criterion is therefore deferred until that list exists. 3B stands up the browser tool family, which is real and gives 3A its first genuine consumer.
 Person 4 — Dashboard: Build basic live execution timeline; display model, tools, latency, tokens, and estimated cost.
 Checkpoint: One baseline task runs end-to-end and produces a complete trace.
 Milestone 2 — Tool optimization [P1]
@@ -13,7 +15,7 @@ Checkpoint: Same task succeeds while dramatically reducing tool context. This ma
 Milestone 3 — Adaptive model execution + completion [P2]
 Person 1: Build model gateway supporting cheap + frontier models.
 Person 2: Implement Jev model routing, confidence-based escalation, fallback, and the done / continue / blocked completion decision over sanitized session state; create deterministic/task-specific verification checks and failure signals; Jev cannot mark a task done unless these checks pass.
-Person 3: Run the live browser through the executor; build both backends (Browserbase and local) so policy can choose the destination.
+Person 3 (3B): Build both browser backends (Browserbase and local) so policy can choose the destination, and run them through the gated executor. The browser is Jev-driven: build an indexed element table from an accessibility snapshot and let Jev pick an operation and a target by index — Jev cannot produce a selector. Target one network round trip per browser step, and cache resolved targets so a repeat run makes zero model calls. See person-3.md and jev.md.
 Person 4: Show model choice, escalation, and completion visually: cheap → verification failure → frontier → verified done.
 Checkpoint: Agent starts cheaply, escalates when necessary, and completes only after Jev and deterministic verification agree.
 Milestone 4 — Killer demo + benchmarks [P3]

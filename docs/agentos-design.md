@@ -86,6 +86,30 @@ provisional action policy (`auto`, `verify`, `ask_user`, or `deny`), confidence,
 typed reason codes. Jev receives sanitized session summaries and short tool metadata,
 not credential values, raw secrets, or every full schema.
 
+### What Jev is
+
+Jev is TypeSafe AI's *System One* decision model, reached through the `typesafe-sdk`
+package or `POST https://api.typesafe.ai/v1/systemone` with model id `jev-latest`.
+
+It answers **typed questions against state** and returns a `Choice` (one key from a
+supplied `criteria` set), a `Score` (a float against an ordered scale), or a `Noul` (a
+probability that a proposition holds). Every answer carries calibrated confidence and a
+probability distribution, and many questions may be batched into one request.
+
+**Jev does not generate text and has no tool access or agent loop.** It selects among
+options the caller constructs. Anything generative — a plan, a payload, text to type into
+a field — comes from a normal model, with Jev choosing between the candidates produced.
+
+Two consequences for this design:
+
+- The confidence thresholds this document relies on are directly implementable, because
+  Jev returns calibrated probabilities rather than self-reported certainty.
+- Jev is inherently a quarantined reader: a model that can only return an index into a
+  caller-built list cannot be induced by untrusted page or tool content to issue an
+  action. This constrains injection; it does not replace the policy gate.
+
+Operational detail, browser usage and anti-patterns: [jev.md](./jev.md).
+
 ### Jev completion decision
 
 After each meaningful step, AgentOS may ask Jev whether the objective has been
