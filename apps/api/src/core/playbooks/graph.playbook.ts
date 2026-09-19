@@ -19,6 +19,9 @@ export const graphPlaybook = definePlaybook<GraphRunInput>({
   kind: 'graph',
   title: 'Run an agent graph',
   inputSchema: graphRunInputSchema,
+  // Needs a graphId, so it cannot be launched from the generic form. The graph
+  // page launches it with one.
+  directLaunch: false,
 
   async execute(ctx, input) {
     // Prefer the snapshot taken at creation time. Falling back to a live load

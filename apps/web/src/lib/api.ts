@@ -65,7 +65,8 @@ export const api = {
       '/providers',
     ),
 
-  playbooks: () => request<{ playbooks: { kind: string; title: string }[] }>('/playbooks'),
+  playbooks: () =>
+    request<{ playbooks: { kind: string; title: string; directLaunch: boolean }[] }>('/playbooks'),
 
   /** The node tool-picker's catalog. Served by whatever backs `toolbox`. */
   tools: () =>

@@ -59,7 +59,9 @@ export function useProviders() {
 }
 
 export function usePlaybooks() {
-  const [playbooks, setPlaybooks] = useState<{ kind: string; title: string }[]>([]);
+  const [playbooks, setPlaybooks] = useState<
+    { kind: string; title: string; directLaunch: boolean }[]
+  >([]);
 
   useEffect(() => {
     api

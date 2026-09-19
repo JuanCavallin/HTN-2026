@@ -22,8 +22,14 @@ export function getPlaybook(kind: string): Playbook<never> | undefined {
   return byKind.get(kind);
 }
 
-export function listPlaybooks(): { kind: string; title: string }[] {
-  return [...byKind.values()].map((p) => ({ kind: p.kind, title: p.title }));
+export function listPlaybooks(): { kind: string; title: string; directLaunch: boolean }[] {
+  return [...byKind.values()].map((p) => ({
+    kind: p.kind,
+    title: p.title,
+    // Explicit rather than optional on the wire, so the client never has to
+    // guess what `undefined` means.
+    directLaunch: p.directLaunch !== false,
+  }));
 }
 
 export function hasPlaybook(kind: string): boolean {

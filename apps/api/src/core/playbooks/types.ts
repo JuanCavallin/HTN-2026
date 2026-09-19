@@ -183,6 +183,15 @@ export interface Playbook<I = unknown> {
   kind: string;
   title: string;
   inputSchema: ZodType<I>;
+  /**
+   * Can the generic "pick a playbook and go" form launch this with NO input?
+   *
+   * Defaults to true. `graph` sets it false: it needs a graphId, so offering it
+   * in a dropdown that posts `{}` produces a guaranteed validation error. If
+   * you add a playbook with required input, set this, or the launch form will
+   * advertise a button that cannot work.
+   */
+  directLaunch?: boolean;
   execute(ctx: PlaybookContext, input: I): Promise<PlaybookOutcome>;
 }
 

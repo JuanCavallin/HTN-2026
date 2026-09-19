@@ -54,6 +54,37 @@ async function main() {
     list.map((p) => p.id + '=' + p.mode).join(' '),
   );
 
+  // REGRESSION GUARD. Registering the `graph` playbook put it in the launch
+  // dropdown, which posts an empty input -- and a graph run needs a graphId, so
+  // that option could never work. Anything the API advertises as directly
+  // launchable must actually launch with no input.
+  console.log('\n1b. Every directly-launchable playbook really launches');
+  const advertised = (await api('/api/playbooks')).body?.playbooks ?? [];
+  check(
+    'playbooks report directLaunch',
+    advertised.every((p) => typeof p.directLaunch === 'boolean'),
+  );
+  for (const playbook of advertised.filter((p) => p.directLaunch)) {
+    const probe = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({ kind: playbook.kind, input: {} }),
+    });
+    check(
+      '"' + playbook.kind + '" launches with an empty input',
+      probe.status === 201,
+      'status ' + probe.status,
+    );
+    if (probe.body?.run?.id) {
+      await api('/api/runs/' + probe.body.run.id + '/cancel', { method: 'POST' });
+    }
+  }
+  const needsInput = advertised.filter((p) => !p.directLaunch);
+  check(
+    'a playbook needing configuration is flagged rather than offered blindly',
+    needsInput.every((p) => p.kind === 'graph'),
+    needsInput.map((p) => p.kind).join(',') || 'none',
+  );
+
   console.log('\n2. Launch a run');
   const created = await api('/api/runs', {
     method: 'POST',
@@ -79,7 +110,11 @@ async function main() {
   );
 
   const swarmWorkers = blocked.steps.filter((s) => s.parentStepId !== null);
-  check('swarm fanned out as child steps', swarmWorkers.length >= 3, swarmWorkers.length + ' workers');
+  check(
+    'swarm fanned out as child steps',
+    swarmWorkers.length >= 3,
+    swarmWorkers.length + ' workers',
+  );
 
   const agentTaskStep = blocked.steps.find((s) => s.kind === 'agent_task');
   check('agent task step ran', Boolean(agentTaskStep), agentTaskStep?.status ?? 'missing');
@@ -181,11 +216,17 @@ async function main() {
   // anthropic and jev adapters reported usage in `data` but never in `meta`,
   // and withEgress only reads `meta`. If these fail, check the adapter, not
   // the rollup.
-  check('tokens reached the egress ledger', totals.tokensIn > 0 && totals.tokensOut > 0,
-    totals.tokensIn + ' in / ' + totals.tokensOut + ' out');
+  check(
+    'tokens reached the egress ledger',
+    totals.tokensIn > 0 && totals.tokensOut > 0,
+    totals.tokensIn + ' in / ' + totals.tokensOut + ' out',
+  );
   check('model calls were counted', totals.llmCalls > 0, totals.llmCalls + ' calls');
-  check('a cost was estimated', totals.estimatedCostCents > 0,
-    totals.estimatedCostCents + ' cents');
+  check(
+    'a cost was estimated',
+    totals.estimatedCostCents > 0,
+    totals.estimatedCostCents + ' cents',
+  );
 
   check('wall-clock time was measured', totals.wallMs > 0, totals.wallMs + 'ms');
   check(
@@ -280,7 +321,11 @@ async function main() {
       ],
     }),
   });
-  check('a cycle is rejected with 400, not accepted', cyclic.status === 400, 'status ' + cyclic.status);
+  check(
+    'a cycle is rejected with 400, not accepted',
+    cyclic.status === 400,
+    'status ' + cyclic.status,
+  );
 
   await api('/api/graphs/' + gid, { method: 'DELETE' });
 
@@ -301,7 +346,11 @@ async function main() {
   );
 
   const gBlocked = await waitFor(gRunId, (run) => run.status === 'awaiting_approval', 60_000);
-  check('the graph run reached its approval gate', Boolean(gBlocked), gBlocked?.run?.status ?? 'timed out');
+  check(
+    'the graph run reached its approval gate',
+    Boolean(gBlocked),
+    gBlocked?.run?.status ?? 'timed out',
+  );
 
   if (gBlocked) {
     const withNode = gBlocked.steps.filter((s) => s.nodeId);
@@ -332,14 +381,24 @@ async function main() {
       method: 'POST',
       body: JSON.stringify({ decision: 'approved' }),
     });
-    const gDone = await waitFor(gRunId, (run) => run.status === 'succeeded' || run.status === 'failed', 60_000);
-    check('the graph run completed', gDone?.run?.status === 'succeeded', gDone?.run?.status ?? 'timed out');
+    const gDone = await waitFor(
+      gRunId,
+      (run) => run.status === 'succeeded' || run.status === 'failed',
+      60_000,
+    );
+    check(
+      'the graph run completed',
+      gDone?.run?.status === 'succeeded',
+      gDone?.run?.status ?? 'timed out',
+    );
 
     const gAnalytics = await api('/api/runs/' + gRunId + '/analytics');
     check(
       'analytics attributes every node, nothing unattributed',
       gAnalytics.body?.unattributed === null && gAnalytics.body?.nodes.length === 8,
-      (gAnalytics.body?.nodes ?? []).length + ' nodes, unattributed=' + gAnalytics.body?.unattributed,
+      (gAnalytics.body?.nodes ?? []).length +
+        ' nodes, unattributed=' +
+        gAnalytics.body?.unattributed,
     );
 
     // The whole argument for the middle rung, asserted rather than claimed.
@@ -374,7 +433,11 @@ async function main() {
       secondId,
       (run) => run.status === 'cancelled' || run.status === 'failed',
     );
-    check('rejecting stops the run', cancelled?.run?.status === 'cancelled', cancelled?.run?.status);
+    check(
+      'rejecting stops the run',
+      cancelled?.run?.status === 'cancelled',
+      cancelled?.run?.status,
+    );
     const conflict = await api('/api/approvals/' + approval2.id + '/decide', {
       method: 'POST',
       body: JSON.stringify({ decision: 'approved' }),
