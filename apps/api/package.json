@@ -9,8 +9,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@browserbasehq/stagehand": "^4.1.0",
     "@htn/shared": "workspace:*",
     "express": "^5.2.1",
+    "playwright-core": "^1.63.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
