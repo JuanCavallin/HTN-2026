@@ -60,13 +60,32 @@ async function autoApprovePermission(params) {
 async function connectToHermes() {
   console.log('[hermes-tester] spawning hermes-acp in ' + HERMES_DIR);
 
+  // NOT shell:true — see apps/api/src/providers/hermes/live.ts for why: it
+  // routes through cmd.exe (via process.env.ComSpec), which can go missing
+  // under some wrapped process contexts and throws `spawn ...cmd.exe ENOENT`.
+  // `uv` is a real .exe on PATH; spawn it directly.
   hermesProc = spawn('uv', ['run', 'hermes-acp'], {
     cwd: HERMES_DIR,
     stdio: ['pipe', 'pipe', 'inherit'], // stderr inherited so Hermes's own logs show in this terminal
-    shell: true, // Windows needs this to resolve `uv` via PATH
   });
+
+  // An unhandled 'error' event crashes the whole process — always attach
+  // this before doing anything else with the child.
+  await new Promise((resolve, reject) => {
+    hermesProc.once('error', reject);
+    hermesProc.once('spawn', () => {
+      hermesProc.removeListener('error', reject);
+      resolve();
+    });
+  });
+
   hermesProc.on('exit', (code) => {
     console.error('[hermes-tester] hermes-acp exited (code ' + code + '). Restart this server to reconnect.');
+    connection = null;
+    session = null;
+  });
+  hermesProc.on('error', (err) => {
+    console.error('[hermes-tester] hermes-acp process error:', err.message);
     connection = null;
     session = null;
   });

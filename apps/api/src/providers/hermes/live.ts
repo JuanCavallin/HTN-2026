@@ -91,13 +91,41 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
     connecting = (async () => {
       if (!cfg.cwd) throw new Error('HERMES_CWD is not set');
 
+      // NOT shell:true. `uv` is a real .exe on PATH — Windows CreateProcess
+      // resolves that directly. shell:true instead routes through cmd.exe
+      // (resolved via process.env.ComSpec), which broke under `tsx watch`
+      // specifically (ComSpec apparently doesn't survive tsx watch's nested
+      // process spawn) with `spawn C:\WINDOWS\system32\cmd.exe ENOENT` —
+      // reproduced live, not theoretical. Passing argv separately here also
+      // sidesteps shell quoting entirely, which is more robust regardless.
       hermesProc = spawn('uv', ['run', 'hermes-acp'], {
         cwd: cfg.cwd,
         stdio: ['pipe', 'pipe', 'inherit'], // stderr inherited: Hermes's own logs stay visible
-        shell: true, // Windows needs this to resolve `uv` via PATH
       });
+
+      // spawn() returning tells you nothing about whether the process
+      // actually started — a bad path/executable surfaces asynchronously as
+      // an 'error' event, and an EventEmitter's UNHANDLED 'error' event is
+      // fatal to the entire Node process. This is exactly what took down the
+      // whole API server (and with it the web dev server's proxy) the one
+      // time this fired — always attach this before doing anything else.
+      await new Promise<void>((resolve, reject) => {
+        hermesProc!.once('error', reject);
+        hermesProc!.once('spawn', () => {
+          hermesProc!.removeListener('error', reject);
+          resolve();
+        });
+      });
+
       hermesProc.on('exit', (code) => {
         console.error('[hermes:live] hermes-acp exited (code ' + code + ')');
+        connection = null;
+        connecting = null;
+      });
+      // A LATER error (e.g. the process dies mid-session) must not crash the
+      // server either — same reasoning as above, ongoing rather than one-shot.
+      hermesProc.on('error', (err) => {
+        console.error('[hermes:live] hermes-acp process error:', err.message);
         connection = null;
         connecting = null;
       });
