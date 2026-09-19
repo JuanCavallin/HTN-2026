@@ -1,88 +1,256 @@
 /**
- * Hermes Agent (Nous Research) — LIVE ADAPTER. NOT IMPLEMENTED.
+ * Hermes Agent (Nous Research) — LIVE ADAPTER, implemented.
  *
  * ============================================================================
- * READ THIS BEFORE WRITING CODE HERE.
+ * Drives Hermes as a local subprocess over ACP (Agent Client Protocol) — NOT
+ * an HTTP API. `uv run hermes-acp` speaks newline-delimited JSON-RPC over
+ * stdio; we spawn it once per process lifetime (this factory is called once
+ * and cached by providers/registry.ts) and create one ACP session PER TASK,
+ * so unrelated subtasks never see each other's conversation history.
  *
- * The real endpoints, auth scheme, and payload shapes for Hermes are NOT known
- * to whoever scaffolded this file, and were deliberately NOT guessed. Inventing
- * them would produce code that compiles, looks finished, and fails at the booth.
+ * VERIFIED, not guessed: this shape (persistent `.connect()`, `_meta` as the
+ * documented extension point on `NewSessionRequest`, `session/cancel` as the
+ * real cancellation notification, newline-delimited framing) was proven
+ * against a real running Hermes install — a real prompt got a real answer, a
+ * stuck tool call was genuinely cancelled and confirmed via Hermes's own
+ * "Cancelled session" log line. See hermes-tester/ for that standalone proof.
  *
- * ARCHITECTURE DECISION ALREADY MADE: Hermes owns its own tool-calling loop.
- * We do NOT intercept it turn by turn — we call Jev's route() ONCE before
- * starting a subtask to pick a model tier and filter the tool list, then hand
- * Hermes that filtered list and let it run autonomously until done (see
- * core/orchestrator.ts's runAgentTask). This works with the shape below as
- * long as startTask's `tools` field is honoured as an allowlist.
+ * TWO HONEST LIMITS, DO NOT PAPER OVER THESE:
  *
- * TO IMPLEMENT — go to the sponsor's docs or their table, then fill in, IN
- * THIS ORDER OF IMPORTANCE:
- *   1. Does startTask's tool list actually RESTRICT what Hermes can call, or
- *      is every registered tool always available regardless of what's passed?
- *      If the latter, the tool-filtering mechanic does not work as designed
- *      through this API and needs a different approach (e.g. registering
- *      distinct tool sets per session instead of per call) — confirm this
- *      BEFORE building anything downstream of it.
- *   2. Does pollTask (or an equivalent status/trace endpoint) report which
- *      tools/actions Hermes actually invoked internally? Our `toolCalls` field
- *      below depends on this. If it isn't available, every call Hermes makes
- *      internally is invisible to our egress ledger — a real gap in the
- *      privacy/audit story, not a cosmetic one. Say so rather than leaving it
- *      silently empty.
- *   3. Base URL                 -> HERMES_BASE_URL
- *   4. Auth header shape        -> Authorization: Bearer? X-API-Key? something else?
- *   5. Start a task             -> map to startTask({ goal, context, tools })
- *   6. Poll / stream a task     -> map to pollTask(taskId)
- *   7. Cancel a task            -> map to cancelTask(taskId)
+ *   1. Tool restriction is BEST-EFFORT, NOT ENFORCED. `_meta.enabled_toolsets`
+ *      below is a documented ACP extension point, but empirically it did NOT
+ *      change Hermes's own tool_search "kept" count in testing. Real
+ *      enforcement of "only Jev-approved tools" has to happen upstream — Jev
+ *      must not hand this adapter a tool list wider than what's actually
+ *      safe, because this adapter cannot currently guarantee Hermes will
+ *      respect a narrower one.
  *
- * Map THEIR shapes onto OUR AgentRuntimeAdapter interface. Do not let their types
- * leak past this file — that is the whole point of the adapter.
+ *   2. Permission requests are DENIED BY DEFAULT, not routed to our own
+ *      approval gate. Hermes's ACP server asks the client for permission
+ *      before some tool calls; the correct integration is to route that
+ *      callback through core/risk.ts's classify() and, when it lands on
+ *      ask_human, the real Approval flow (waitForApproval). That wiring does
+ *      not exist yet. Auto-approving in the meantime would violate the
+ *      stated invariant "irreversible tools never enter an unattended
+ *      harness allowlist" — denying by default is the safe placeholder.
+ *      Fixing this is the next real step, not a nice-to-have.
  *
- * SAFETY RULE — do not violate this when wiring the real thing: any tool
- * classified irreversible must never appear in the `tools` list handed to
- * startTask for unattended execution. Hermes proposes; our own orchestrator,
- * outside Hermes's loop, performs the irreversible call after our existing
- * approval gate. Filter irreversible tools out at the call site that builds
- * the `availableTools` list, before it ever reaches route() or startTask.
- *
- * Until then: HERMES_MODE=mock (the default) and everything works.
+ * `startTask`/`pollTask` bridge ACP's session+event model onto this
+ * interface's start/poll/cancel shape: startTask opens a session and returns
+ * immediately with sessionId-as-taskId; a background drain loop updates an
+ * in-memory record; pollTask just reads that record. This deliberately keeps
+ * core/orchestrator.ts's existing bounded-polling loop untouched — see its
+ * `pollIntervalMs`/`maxPolls` defaults, sized for real Hermes latency
+ * (several seconds per call, 40+ seconds observed for a slow tool call).
  * ============================================================================
  */
 
-import type { AgentRuntimeAdapter, ProviderResult } from '@htn/shared';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { Readable, Writable } from 'node:stream';
+import * as acp from '@agentclientprotocol/sdk';
+import type { AgentRuntimeAdapter, ProviderErrorCode, ProviderResult } from '@htn/shared';
 import type { ProviderConfig } from '../../config.js';
 
-function notImplemented<T>(op: string): ProviderResult<T> {
+interface TaskRecord {
+  status: 'running' | 'done' | 'failed';
+  log: string[];
+  toolCalls: { tool: string; args?: unknown; at: string }[];
+  result?: unknown;
+  error?: string;
+  session: Awaited<ReturnType<acp.SessionBuilder['start']>>;
+}
+
+function meta(op: string, started: number, destination: string | null) {
   return {
-    ok: false,
-    error: {
-      code: 'NOT_IMPLEMENTED',
-      message: `hermes.${op} live adapter is not implemented yet. See providers/hermes/live.ts.`,
-      retryable: false,
-    },
-    meta: { provider: 'hermes', op, mode: 'live', latencyMs: 0, destination: null },
+    provider: 'hermes' as const,
+    op,
+    mode: 'live' as const,
+    latencyMs: Date.now() - started,
+    destination,
   };
 }
 
-export function createLiveHermes(_cfg: ProviderConfig): AgentRuntimeAdapter {
+function failure<T>(op: string, started: number, code: ProviderErrorCode, message: string): ProviderResult<T> {
+  return {
+    ok: false,
+    error: { code, message, retryable: code === 'UPSTREAM' || code === 'TIMEOUT' },
+    meta: meta(op, started, null),
+  };
+}
+
+export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
+  const tasks = new Map<string, TaskRecord>();
+  let connection: acp.ClientConnection | null = null;
+  let connecting: Promise<acp.ClientConnection> | null = null;
+  let hermesProc: ChildProcess | null = null;
+
+  async function connect(): Promise<acp.ClientConnection> {
+    if (connection) return connection;
+    if (connecting) return connecting;
+
+    connecting = (async () => {
+      if (!cfg.cwd) throw new Error('HERMES_CWD is not set');
+
+      hermesProc = spawn('uv', ['run', 'hermes-acp'], {
+        cwd: cfg.cwd,
+        stdio: ['pipe', 'pipe', 'inherit'], // stderr inherited: Hermes's own logs stay visible
+        shell: true, // Windows needs this to resolve `uv` via PATH
+      });
+      hermesProc.on('exit', (code) => {
+        console.error('[hermes:live] hermes-acp exited (code ' + code + ')');
+        connection = null;
+        connecting = null;
+      });
+
+      const input = Writable.toWeb(hermesProc.stdin!);
+      const output = Readable.toWeb(hermesProc.stdout!);
+      const stream = acp.ndJsonStream(input, output);
+
+      const conn = acp
+        .client({ name: 'htn-agentos' })
+        .onRequest(acp.methods.client.session.requestPermission, (ctx) => {
+          // FAIL CLOSED — see the file header. Never silently approve here.
+          const options = ctx.params.options;
+          console.warn(
+            '[hermes:live] DENYING permission request (approval-gate wiring not built yet): ' +
+              ctx.params.toolCall.title,
+          );
+          const deny = options.find((o) => o.optionId === 'deny') ?? options[options.length - 1];
+          return Promise.resolve({ outcome: { outcome: 'selected' as const, optionId: deny.optionId } });
+        })
+        .onRequest(acp.methods.client.fs.writeTextFile, async () => ({}))
+        .onRequest(acp.methods.client.fs.readTextFile, async () => ({ content: '' }))
+        .connect(stream);
+
+      await conn.agent.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+
+      connection = conn;
+      return conn;
+    })();
+
+    try {
+      return await connecting;
+    } catch (err) {
+      connecting = null;
+      throw err;
+    }
+  }
+
+  /** Runs in the background from startTask; pollTask only ever reads `record`. */
+  async function drain(record: TaskRecord): Promise<void> {
+    const chunks: string[] = [];
+    try {
+      for (;;) {
+        const message = await record.session.nextUpdate();
+        if (message.kind === 'stop') {
+          record.result = { text: chunks.join('') };
+          record.log.push('stop: ' + message.stopReason);
+          record.status = 'done';
+          return;
+        }
+        const update = message.notification.update;
+        if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
+          chunks.push(update.content.text);
+        } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+          record.toolCalls.push({
+            tool: 'title' in update ? (update.title ?? update.toolCallId) : update.toolCallId,
+            at: new Date().toISOString(),
+          });
+        }
+      }
+    } catch (err) {
+      record.status = 'failed';
+      record.error = (err as Error).message;
+    }
+  }
+
   return {
     id: 'hermes',
     mode: 'live',
     capabilities: ['agent.runtime'],
+
     async health() {
-      return notImplemented('health');
+      const started = Date.now();
+      if (!cfg.cwd) return failure('health', started, 'AUTH', 'HERMES_CWD is not set');
+      try {
+        await connect();
+        return { ok: true, data: {}, meta: meta('health', started, 'hermes-acp://local') };
+      } catch (err) {
+        return failure('health', started, 'UPSTREAM', (err as Error).message);
+      }
     },
+
     async invoke(op) {
-      return notImplemented(op);
+      return failure(op, Date.now(), 'BAD_INPUT', 'No generic invoke() op is defined for hermes.');
     },
-    async startTask() {
-      return notImplemented('startTask');
+
+    async startTask(input) {
+      const started = Date.now();
+      try {
+        const conn = await connect();
+
+        // Best-effort only — see file header limit #1. Never treat this as
+        // an enforced boundary.
+        const request = conn.agent.buildSession(cfg.cwd as string).toRequest();
+        request._meta = { enabled_toolsets: input.tools ?? [] };
+        const session = await conn.agent.buildSession(request).start();
+
+        const record: TaskRecord = { status: 'running', log: ['started'], toolCalls: [], session };
+        tasks.set(session.sessionId, record);
+
+        session.prompt(input.context ? input.goal + '\n\nContext:\n' + JSON.stringify(input.context) : input.goal);
+        void drain(record);
+
+        return { ok: true, data: { taskId: session.sessionId }, meta: meta('startTask', started, 'hermes-acp://local') };
+      } catch (err) {
+        return failure('startTask', started, 'UPSTREAM', (err as Error).message);
+      }
     },
-    async pollTask() {
-      return notImplemented('pollTask');
+
+    async pollTask(taskId) {
+      const started = Date.now();
+      const record = tasks.get(taskId);
+      if (!record) return failure('pollTask', started, 'BAD_INPUT', 'Unknown taskId: ' + taskId);
+
+      if (record.status === 'running') {
+        return {
+          ok: true,
+          data: { status: 'running', log: record.log },
+          meta: meta('pollTask', started, 'hermes-acp://local'),
+        };
+      }
+      return {
+        ok: true,
+        data: {
+          status: record.status,
+          result: record.result,
+          log: record.error ? [...record.log, record.error] : record.log,
+          toolCalls: record.toolCalls,
+        },
+        meta: meta('pollTask', started, 'hermes-acp://local'),
+      };
     },
-    async cancelTask() {
-      return notImplemented('cancelTask');
+
+    async cancelTask(taskId) {
+      const started = Date.now();
+      const record = tasks.get(taskId);
+      if (!record) return { ok: true, data: null, meta: meta('cancelTask', started, null) };
+
+      try {
+        const conn = await connect();
+        // Verified real: Hermes logs "Interrupt requested" / "Cancelled
+        // session" in direct response to this. A client-side give-up alone
+        // does NOT stop the turn on Hermes's side — this does.
+        await conn.agent.notify(acp.methods.agent.session.cancel, { sessionId: taskId });
+      } catch (err) {
+        console.error('[hermes:live] session/cancel failed:', err);
+      }
+      record.session.dispose();
+      tasks.delete(taskId);
+      return { ok: true, data: null, meta: meta('cancelTask', started, 'hermes-acp://local') };
     },
   };
 }

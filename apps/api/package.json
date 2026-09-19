@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0",
     "@browserbasehq/stagehand": "^4.1.0",
     "@htn/shared": "workspace:*",
     "express": "^5.2.1",

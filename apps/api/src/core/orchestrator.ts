@@ -322,8 +322,13 @@ export class Orchestrator {
           providerId: 'hermes',
         });
 
-        const pollIntervalMs = spec.pollIntervalMs ?? 400;
-        const maxPolls = spec.maxPolls ?? 20;
+        // 1.5s x 40 = 60s total budget. A real Hermes turn commonly takes
+        // several seconds per model call and 40+ seconds for a slow tool call
+        // (observed directly against a live install) — the old 400ms x 20
+        // (~8s) default was sized for the mock and would cancel a real,
+        // healthy call almost immediately.
+        const pollIntervalMs = spec.pollIntervalMs ?? 1500;
+        const maxPolls = spec.maxPolls ?? 40;
 
         try {
           // 1. Route BEFORE starting the task. This is where tool/model
@@ -335,13 +340,19 @@ export class Orchestrator {
             buildCallContext({ stepId: step.id, policyRule: 'subtask-routing' }),
           );
 
+          // FAIL CLOSED, not open — docs/agentos-design.md is explicit:
+          // "Routing... failures fail closed; failure never exposes all
+          // tools." A Jev outage must narrow what the harness can touch, not
+          // widen it. The task still runs (as a tool-less LLM turn) rather
+          // than aborting outright — that's a judgment call, not a spec
+          // requirement, and worth revisiting if it turns out to be wrong.
           const routeResult = routed.ok
             ? routed.data
             : {
                 modelTier: 'standard' as const,
-                exposedTools: spec.availableTools,
+                exposedTools: [] as string[],
                 confidence: 0,
-                rationale: 'Routing failed (' + routed.error.code + '); using the full tool list.',
+                rationale: 'Routing failed (' + routed.error.code + '); exposing no tools (fail closed).',
               };
 
           const decision: ScheduleDecision = {
@@ -355,7 +366,7 @@ export class Orchestrator {
             exposedTools: routeResult.exposedTools,
             confidence: routeResult.confidence,
             escalated: false,
-            rule: routed.ok ? 'jev-routed' : 'route-failed-fallback-full-toolset',
+            rule: routed.ok ? 'jev-routed' : 'route-failed-fallback-no-tools',
             at: nowIso(),
           };
           await store.createScheduleDecision(decision);
