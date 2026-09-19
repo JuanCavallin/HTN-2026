@@ -12,6 +12,9 @@ export function Nav() {
           Agent Runtime
           <span className="ml-2 font-normal text-slate-600">HTN 2026</span>
         </Link>
+        <Link to="/graphs" className="text-xs text-slate-400 hover:text-slate-200">
+          Graphs
+        </Link>
         <div className="ml-auto">
           <ProviderBadges providers={providers} />
         </div>
