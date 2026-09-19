@@ -1,7 +1,7 @@
 Milestone 1 — Working baseline + infrastructure [P0]
 Person 1 — Runtime: Get Hermes → AgentOS → model → response working; define ScheduleDecision, StepEvent, and adapter interfaces.
 Person 2 — Jev/optimization: Create mocked scheduler first; establish frontier-for-everything baseline; implement metric collection for model calls/tokens.
-Person 3 — Tools: Build tool registry with 50+ real/simulated tools; implement common tool interface and read/write classification.
+Person 3 — Tools/Browser (split across two people: 3A registry+MCP, 3B browser+Browserbase): Build tool registry with 50+ real/simulated tools; implement common tool interface and read/write classification; stand up the browser tool family.
 Person 4 — Dashboard: Build basic live execution timeline; display model, tools, latency, tokens, and estimated cost.
 Checkpoint: One baseline task runs end-to-end and produces a complete trace.
 Milestone 2 — Tool optimization [P1]
@@ -12,8 +12,8 @@ Person 4: Visualize 50+ tools → 3–8 tools, confidence, schema/token reductio
 Checkpoint: Same task succeeds while dramatically reducing tool context. This matches the document's 50+ → 3–8 acceptance target.
 Milestone 3 — Adaptive model execution + completion [P2]
 Person 1: Build model gateway supporting cheap + frontier models.
-Person 2: Implement Jev model routing, confidence-based escalation, fallback, and the done / continue / blocked completion decision over sanitized session state.
-Person 3: Create deterministic/task-specific verification checks and failure signals; Jev cannot mark a task done unless these checks pass.
+Person 2: Implement Jev model routing, confidence-based escalation, fallback, and the done / continue / blocked completion decision over sanitized session state; create deterministic/task-specific verification checks and failure signals; Jev cannot mark a task done unless these checks pass.
+Person 3: Run the live browser through the executor; build both backends (Browserbase and local) so policy can choose the destination.
 Person 4: Show model choice, escalation, and completion visually: cheap → verification failure → frontier → verified done.
 Checkpoint: Agent starts cheaply, escalates when necessary, and completes only after Jev and deterministic verification agree.
 Milestone 4 — Killer demo + benchmarks [P3]
@@ -24,14 +24,14 @@ Person 4: Finish profiler showing latency, tokens, cost, LLM calls, frontier cal
 Checkpoint: Freeze here if short on time. You now have a strong complete project demonstrating measurable optimization, matching the evaluation goals in the document.
 Milestone 5 — Safety + human approval [P4]
 Person 1: Add pause/resume execution.
-Person 2: Add Jev risk classification.
-Person 3: Implement READ_ONLY / WRITE / DESTRUCTIVE policies and approval gate.
+Person 2: Add Jev risk classification; implement READ_ONLY / WRITE / DESTRUCTIVE policies and the approval gate.
+Person 3: Call authorize_action before every tool run and execute only on an explicit allow; surface the proposed action for approval.
 Person 4: Build approve/reject modal and display blocked actions in trace.
 Checkpoint: Read operations happen automatically; one external side effect visibly requires approval.
 Milestone 6 — Stretch features [P5+]
 Person 1: Result caching + concurrency infrastructure.
-Person 2: Confidence-driven speculative execution of safe read-only tools.
-Person 3: Public/private/secret context routing and sanitization.
+Person 2: Confidence-driven speculative execution of safe read-only tools; public/private/secret context routing and sanitization.
+Person 3: Broaden the tool catalog and browser capability coverage beyond the demo path.
 Person 4: Visualize cache hits, speculative calls, privacy boundaries, and additional savings.
 Checkpoint: These become the technically impressive extras, but none are required for the core demo.
 How I'd parallelize the team
@@ -40,8 +40,8 @@ The key is that each person owns a vertical specialty for the entire hackathon r
 
 Person 1: Runtime/Integration → Hermes adapter, API, model gateway, event system, execution.
 
-Person 2: Intelligence/Optimization → Jev, routing, confidence, escalation, completion decisions, benchmarking.
+Person 2: Intelligence/Optimization/Safety → Jev, routing, confidence, escalation, completion decisions, benchmarking, verification, policies, privacy, authorize_action.
 
-Person 3: Tools/Safety → registry, tool execution, verification, policies, privacy.
+Person 3: Tools/Browser → registry, MCP, tool execution, browser and Browserbase. Split across two people: 3A (registry + MCP) and 3B (browser + Browserbase). See person-3.md.
 
 Person 4: Frontend/Observability → live trace, profiler, metrics, comparison, demo UX.
