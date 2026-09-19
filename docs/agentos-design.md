@@ -182,6 +182,43 @@ Required tests cover fail-closed routing, unavailable/unselected tools, exact-ac
 approval, revised-action authorization, secret leakage, policy injection through tool
 output, verification-protected completion, and task success after schema filtering.
 
+## Team Work Split
+
+Agree `ScheduleDecision`, `ToolDescriptor`, `ToolAction`, the event schema, and mock
+responses first. Each owner then builds against those contracts so all four tracks
+progress in parallel.
+
+| Owner | Scope | Components owned | Deliverables | Integration contract |
+| --- | --- | --- | --- | --- |
+| Person 1 | Core runtime and harness | API, session state, harness adapter | Run API; Hermes adapter and compatibility spike; model/tool interception; SSE; pause/resume/cancel; approval and revision endpoints; context persistence plumbing | Consumes `ScheduleDecision`; emits events and proposed `ToolAction` |
+| Person 2 | Jev, model routing, safety and privacy | Jev scheduler and completion judge, model gateway, context builder, policy gate | Jev schemas and deterministic fallback; hierarchical selection; tier and route selection; context ranking; bounded escalation; completion decision and verification gating; baseline evaluation; privacy labeling and secret handling; hard risk rules; exact-action authorization, revision reauthorization and approval enforcement; leakage and permission-bypass tests | Implements `schedule(state)` with a deterministic mock fallback, `build_context`, and `authorize_action` |
+| Person 3 | Tools and browser | Tool registry, executors, browser | MCP setup; `ToolDescriptor` registry; plugin manifests; tool metadata search; browser adapter and Browserbase integration, including a local-browser path; tool execution; simulated tool fixtures, clearly labeled non-executable | Implements `select_tool_metadata`; executes tools through each descriptor's executor reference |
+| Person 4 | Dashboard, metrics and demo | Dashboard | Live trace UI; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints |
+
+### Handoffs
+
+- **Authorization before execution.** Person 3's executor calls Person 2's
+  `authorize_action` with the exact `ToolAction` before every run and executes only on
+  an allow. A failed or missing check blocks execution.
+- **Tool selection.** Jev (Person 2) chooses tool families and the final set. Person 3's
+  `select_tool_metadata` retrieves candidates within the chosen families from the
+  registry.
+- **Browser destination.** Person 2's policy decides whether a step may use Browserbase.
+  Local-only data never goes there, per the safety invariants. Person 3 implements both
+  Browserbase and the local-browser path and uses whichever policy allows. If policy
+  allows neither, the step is blocked.
+- **Approvals.** Person 1 owns pause/resume and the approval endpoints. Person 2
+  authorizes each action and reauthorizes any revision. Person 4 renders the controls.
+
+### Required test ownership
+
+| Owner | Tests |
+| --- | --- |
+| Person 1 | Run reliability; pause/resume and cancellation |
+| Person 2 | Fail-closed routing; exact-action approval; revised-action authorization; secret leakage; policy injection through tool output; verification-protected completion |
+| Person 3 | Unavailable and unselected tools blocked; task success after schema filtering; browser and tool reliability |
+| Person 4 | Metrics accuracy; error and empty states; truthful live/mock/replay labels |
+
 ## Pitch
 
 **AgentOS gives every agent step the cheapest safe model, the smallest useful context,
