@@ -88,6 +88,40 @@ export const demoPlaybook = definePlaybook<DemoInput>({
       },
     );
 
+    /* 3.5. Delegate a bounded subtask to the agent runtime (Hermes). ------ */
+    // CANDIDATE_TOOLS stands in for the real 50+ tool registry (a separate
+    // workstream — see docs/implementation_plan.md M1 Person 3). Jev filters
+    // this list down before the agent runtime ever sees it; swap this for the
+    // real registry's tool names once it exists, nothing else here changes.
+    const CANDIDATE_TOOLS = [
+      'browser.navigate',
+      'browser.extract',
+      'forms.submit',
+      'mail.send',
+      'sheets.append',
+      'calendar.create',
+      'notify.slack',
+      'notify.sms',
+    ];
+
+    const agentTask = await ctx.runAgentTask({
+      label: 'Delegate follow-up analysis to the agent runtime',
+      goal: 'Given the case summary, identify what follow-up action, if any, is warranted.',
+      context: { summary },
+      availableTools: CANDIDATE_TOOLS,
+    });
+
+    await ctx.log(
+      'info',
+      'Agent runtime exposed ' +
+        agentTask.scheduleDecision.exposedTools.length +
+        ' of ' +
+        agentTask.scheduleDecision.availableTools.length +
+        ' candidate tools (tier: ' +
+        agentTask.scheduleDecision.modelTier +
+        ').',
+    );
+
     /* 4. Swarm: independent verification across N sources. --------------- */
     const targets = SOURCES.slice(0, input.workerCount);
 

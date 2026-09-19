@@ -6,7 +6,7 @@
  * never await a run.
  */
 
-import type { Approval, EgressEvent, Json, PiiSpan, Run, Step } from '@htn/shared';
+import type { Approval, EgressEvent, Json, PiiSpan, Run, ScheduleDecision, Step } from '@htn/shared';
 import { stripPiiValue } from '@htn/shared';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
 import { newId, nowIso } from '../lib/ids.js';
@@ -31,6 +31,7 @@ export interface RunDetail {
   egress: EgressEvent[];
   /** Values are stripped — the client only ever sees placeholders and classes. */
   piiSpans: PiiSpan[];
+  scheduleDecisions: ScheduleDecision[];
 }
 
 export function availablePlaybooks(): { kind: string; title: string }[] {
@@ -90,14 +91,22 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
   const run = await store.getRun(id);
   if (!run) return null;
 
-  const [steps, approvals, egress, piiWithValues] = await Promise.all([
+  const [steps, approvals, egress, piiWithValues, scheduleDecisions] = await Promise.all([
     store.listSteps(id),
     store.listApprovals(id),
     store.listEgress(id),
     store.listPiiSpans(id),
+    store.listScheduleDecisions(id),
   ]);
 
-  return { run, steps, approvals, egress, piiSpans: piiWithValues.map(stripPiiValue) };
+  return {
+    run,
+    steps,
+    approvals,
+    egress,
+    piiSpans: piiWithValues.map(stripPiiValue),
+    scheduleDecisions,
+  };
 }
 
 export async function cancelRun(id: string): Promise<Run | null> {

@@ -15,6 +15,7 @@ import type {
   PiiSpanWithValue,
   Run,
   RunEvent,
+  ScheduleDecision,
   Step,
   StoredEvent,
 } from '@htn/shared';
@@ -27,6 +28,7 @@ interface Snapshot {
   approvals: Approval[];
   egress: EgressEvent[];
   pii: PiiSpanWithValue[];
+  scheduleDecisions: ScheduleDecision[];
   events: StoredEvent[];
 }
 
@@ -40,6 +42,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   const approvals = new Map<string, Approval>();
   const egress = new Map<string, EgressEvent[]>();
   const pii = new Map<string, PiiSpanWithValue[]>();
+  const scheduleDecisions = new Map<string, ScheduleDecision[]>();
   const events = new Map<string, StoredEvent[]>();
   /** Monotonic step counter per run, so Step.seq is stable and gap-free. */
   const stepSeq = new Map<string, number>();
@@ -63,6 +66,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
       approvals: [...approvals.values()],
       egress: [...egress.values()].flat(),
       pii: [...pii.values()].flat(),
+      scheduleDecisions: [...scheduleDecisions.values()].flat(),
       events: [...events.values()].flat(),
     };
     try {
@@ -86,6 +90,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
       for (const a of snap.approvals) approvals.set(a.id, a);
       for (const e of snap.egress) push(egress, e.runId, e);
       for (const p of snap.pii) push(pii, p.runId, p);
+      for (const d of snap.scheduleDecisions) push(scheduleDecisions, d.runId, d);
       for (const e of snap.events) push(events, e.runId, e);
       console.log('[store] hydrated ' + snap.runs.length + ' run(s) from snapshot');
     } catch {
@@ -192,6 +197,16 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
     },
     async listPiiSpans(runId) {
       return [...(pii.get(runId) ?? [])];
+    },
+
+    /* --------------------------------------------------- Schedule decisions */
+    async createScheduleDecision(decision) {
+      push(scheduleDecisions, decision.runId, decision);
+      scheduleSave();
+      return decision;
+    },
+    async listScheduleDecisions(runId) {
+      return [...(scheduleDecisions.get(runId) ?? [])];
     },
 
     /* -------------------------------------------------------------- Events */

@@ -18,6 +18,7 @@ import type {
   Run,
   RunEvent,
   RunStatus,
+  ScheduleDecision,
   Step,
   StoredEvent,
 } from '@htn/shared';
@@ -50,6 +51,10 @@ export interface Store {
   // Egress ledger (append-only)
   appendEgress(event: EgressEvent): Promise<EgressEvent>;
   listEgress(runId: string): Promise<EgressEvent[]>;
+
+  // Schedule decisions (append-only, one per routed subtask — see scheduler.ts)
+  createScheduleDecision(decision: ScheduleDecision): Promise<ScheduleDecision>;
+  listScheduleDecisions(runId: string): Promise<ScheduleDecision[]>;
 
   // PII spans. Values stay server-side; never returned to the client as-is.
   appendPiiSpan(span: PiiSpanWithValue): Promise<PiiSpanWithValue>;

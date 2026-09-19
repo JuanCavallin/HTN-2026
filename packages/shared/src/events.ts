@@ -6,6 +6,7 @@
  */
 
 import type { Approval, EgressEvent, Iso, PiiSpan, Run, Step } from './domain.js';
+import type { ScheduleDecision } from './scheduling.js';
 
 export type RunEvent =
   | { type: 'run.updated'; run: Run }
@@ -14,6 +15,7 @@ export type RunEvent =
   | { type: 'approval.resolved'; approval: Approval }
   | { type: 'egress.logged'; egress: EgressEvent }
   | { type: 'pii.detected'; span: PiiSpan }
+  | { type: 'schedule.decided'; decision: ScheduleDecision }
   | { type: 'log'; runId: string; level: 'info' | 'warn' | 'error'; message: string; at: Iso };
 
 export type RunEventType = RunEvent['type'];
@@ -36,6 +38,7 @@ export interface RunView {
   approvals: Approval[];
   egress: EgressEvent[];
   piiSpans: PiiSpan[];
+  scheduleDecisions: ScheduleDecision[];
   logs: { level: 'info' | 'warn' | 'error'; message: string; at: Iso }[];
   /** Highest `seq` applied. Used as the replay cursor on reconnect. */
   lastSeq: number;
@@ -47,6 +50,7 @@ export const emptyRunView: RunView = {
   approvals: [],
   egress: [],
   piiSpans: [],
+  scheduleDecisions: [],
   logs: [],
   lastSeq: 0,
 };

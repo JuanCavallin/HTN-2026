@@ -12,4 +12,5 @@ export * from './domain.js';
 export * from './events.js';
 export * from './policy.js';
 export * from './providers.js';
+export * from './scheduling.js';
 export * from './schemas/index.js';

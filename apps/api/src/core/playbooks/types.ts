@@ -17,6 +17,7 @@ import type {
   ProposedAction,
   ProviderCallContext,
   ProviderId,
+  ScheduleDecision,
   Step,
 } from '@htn/shared';
 import type { FanOutOutcome } from '../swarm.js';
@@ -49,6 +50,36 @@ export interface RedactionOutput {
   hadSensitive: boolean;
 }
 
+export interface AgentTaskSpec {
+  /** Step label shown in the timeline. */
+  label: string;
+  /** The goal handed to the agent runtime. */
+  goal: string;
+  /** Extra context passed through untouched — redact it first if it might be sensitive. */
+  context?: unknown;
+  /**
+   * Full candidate tool list BEFORE Jev filters it. Not tied to any one
+   * provider's tool-name format — the harness-specific `live.ts` is
+   * responsible for translating these into whatever that runtime expects.
+   * Do NOT include tools classified irreversible; see hermes/live.ts's safety
+   * rule for why.
+   */
+  availableTools: string[];
+  parentStepId?: string | null;
+  /** How often to poll while the task runs. Default 400ms. */
+  pollIntervalMs?: number;
+  /** Give up and cancel after this many polls, so a stuck task can't hang the run. Default 20. */
+  maxPolls?: number;
+}
+
+export interface AgentTaskResult {
+  result: unknown;
+  /** The routing decision Jev made before this task started. */
+  scheduleDecision: ScheduleDecision;
+  /** Self-reported by the runtime; our only post-hoc visibility into its internal loop. */
+  toolCalls: { tool: string; args?: unknown; at: string }[];
+}
+
 export interface PlaybookContext {
   readonly runId: string;
   readonly signal: AbortSignal;
@@ -79,6 +110,17 @@ export interface PlaybookContext {
 
   /** Detect PII, pin it locally, and return cloud-safe text. */
   redact(text: string, field: string): Promise<RedactionOutput>;
+
+  /**
+   * Run one subtask on the harness bound to 'agent.runtime' (Hermes today,
+   * but never mentioned by name here — that's what makes this harness
+   * agnostic). Jev decides the model tier and filters `availableTools` down
+   * BEFORE the task starts; this is where tool/model optimization actually
+   * happens, at subtask granularity rather than per literal model turn,
+   * because the runtime's own internal loop is opaque to us once running.
+   * Blocks until the task reports done, fails, or maxPolls is exceeded.
+   */
+  runAgentTask(spec: AgentTaskSpec): Promise<AgentTaskResult>;
 
   /** Build the context every provider call requires. */
   callContext(args: {

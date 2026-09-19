@@ -11,10 +11,20 @@
  *   1. Base URL              -> JEV_BASE_URL
  *   2. Auth header shape
  *   3. A single cheap classify/route call -> map to decide({ question, options, evidence })
+ *   4. A routing call        -> map to route({ task, availableTools, context })
  *
  * The `decide` signature is deliberately tiny: a question, a closed set of
  * options, and optional evidence. Keep it that way. If Jev is used as a router,
  * the options are model tiers; if as a classifier, they are labels. Same shape.
+ *
+ * `route` IS THE MECHANISM behind "expose only Jev-selected tools" — it is
+ * called ONCE before an agent-runtime subtask starts (see
+ * core/orchestrator.ts's runAgentTask), not per model turn inside that
+ * runtime's own loop, because we have no visibility into that loop once it's
+ * running. If Jev's real API instead expects to be called per-turn or wired
+ * in as a genuine middleware/plugin, that changes this file's shape
+ * meaningfully — confirm which one their API actually supports before
+ * assuming the per-subtask model below.
  *
  * NOTE ON CONFIDENCE: `confidence` is returned but the risk gate does NOT consume
  * it. Approval is decided by reversibility in core/risk.ts, never by a model's
@@ -52,6 +62,9 @@ export function createLiveJev(_cfg: ProviderConfig): DecisionAdapter {
     },
     async decide() {
       return notImplemented('decide');
+    },
+    async route() {
+      return notImplemented('route');
     },
   };
 }

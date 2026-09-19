@@ -14,6 +14,7 @@ import type {
   ProposedAction,
   ProviderCallContext,
   Run,
+  ScheduleDecision,
   Step,
 } from '@htn/shared';
 import { stripPiiValue } from '@htn/shared';
@@ -21,11 +22,23 @@ import type { Store } from '../store/types.js';
 import { newId, nowIso } from '../lib/ids.js';
 import { ApprovalRejectedError, waitForApproval } from './approvalGate.js';
 import type { RunBus } from './bus.js';
+import { buildEgressEvent } from './ledger.js';
 import { detectPii } from './redaction.js';
 import { classify } from './risk.js';
 import { fanOut, type FanOutOutcome } from './swarm.js';
 import { getPlaybook } from './playbooks/registry.js';
-import type { FanOutSpec, PlaybookContext, RedactionOutput, StepSpec } from './playbooks/types.js';
+import type {
+  AgentTaskResult,
+  AgentTaskSpec,
+  FanOutSpec,
+  PlaybookContext,
+  RedactionOutput,
+  StepSpec,
+} from './playbooks/types.js';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface OrchestratorDeps {
   store: Store;
@@ -133,6 +146,19 @@ export class Orchestrator {
     const { store, bus, provider } = this.deps;
     /** Keeps placeholder numbering unique across every field in this run. */
     let piiCounter = 0;
+
+    /** Shared by ctx.callContext and runAgentTask's own internal provider calls. */
+    const buildCallContext = (args: {
+      stepId?: string;
+      policyRule: string;
+      redactions?: { placeholder: string; type: string }[];
+    }): ProviderCallContext => ({
+      runId,
+      stepId: args.stepId,
+      policyRule: args.policyRule,
+      redactions: args.redactions,
+      signal,
+    });
 
     const createStep = async (spec: StepSpec): Promise<Step> => {
       const step = await store.appendStep({
@@ -283,13 +309,137 @@ export class Orchestrator {
         };
       },
 
-      callContext: ({ stepId, policyRule, redactions }): ProviderCallContext => ({
-        runId,
-        stepId,
-        policyRule,
-        redactions,
-        signal,
-      }),
+      callContext: buildCallContext,
+
+      runAgentTask: async (spec: AgentTaskSpec): Promise<AgentTaskResult> => {
+        const step = await createStep({
+          label: spec.label,
+          kind: 'agent_task',
+          parentStepId: spec.parentStepId ?? null,
+          // Hardcoded rather than read from the registry's actual binding —
+          // correct today ('agent.runtime' -> hermes) but worth revisiting if
+          // that binding ever becomes dynamic per call.
+          providerId: 'hermes',
+        });
+
+        const pollIntervalMs = spec.pollIntervalMs ?? 400;
+        const maxPolls = spec.maxPolls ?? 20;
+
+        try {
+          // 1. Route BEFORE starting the task. This is where tool/model
+          //    optimization actually happens — see AgentTaskSpec's doc comment
+          //    for why it's subtask-granularity, not per-turn.
+          const decider = provider('decision');
+          const routed = await decider.route(
+            { task: spec.goal, availableTools: spec.availableTools },
+            buildCallContext({ stepId: step.id, policyRule: 'subtask-routing' }),
+          );
+
+          const routeResult = routed.ok
+            ? routed.data
+            : {
+                modelTier: 'standard' as const,
+                exposedTools: spec.availableTools,
+                confidence: 0,
+                rationale: 'Routing failed (' + routed.error.code + '); using the full tool list.',
+              };
+
+          const decision: ScheduleDecision = {
+            id: newId('sch'),
+            runId,
+            stepId: step.id,
+            requestedCapability: 'agent.runtime',
+            selectedProvider: 'hermes',
+            modelTier: routeResult.modelTier,
+            availableTools: spec.availableTools,
+            exposedTools: routeResult.exposedTools,
+            confidence: routeResult.confidence,
+            escalated: false,
+            rule: routed.ok ? 'jev-routed' : 'route-failed-fallback-full-toolset',
+            at: nowIso(),
+          };
+          await store.createScheduleDecision(decision);
+          await bus.emit(runId, { type: 'schedule.decided', decision });
+
+          // 2. Start the task with ONLY the tools Jev exposed.
+          const runtime = provider('agent.runtime');
+          const started = await runtime.startTask(
+            { goal: spec.goal, context: spec.context, tools: decision.exposedTools },
+            buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
+          );
+          if (!started.ok) throw new Error('Failed to start agent task: ' + started.error.message);
+          const taskId = started.data.taskId;
+
+          // 3. Poll to completion, bounded so a stuck task cannot hang the run.
+          let toolCalls: { tool: string; args?: unknown; at: string }[] = [];
+          let finalResult: unknown = null;
+          let completed = false;
+
+          for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+            if (signal.aborted) throw new Error('Run aborted while awaiting agent task');
+
+            const polled = await runtime.pollTask(
+              taskId,
+              buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
+            );
+            if (!polled.ok) throw new Error('Agent task polling failed: ' + polled.error.message);
+            if (polled.data.status === 'failed') throw new Error('Agent task ' + taskId + ' failed');
+
+            if (polled.data.status === 'done') {
+              finalResult = polled.data.result ?? null;
+              toolCalls = polled.data.toolCalls ?? [];
+              completed = true;
+              break;
+            }
+            await sleep(pollIntervalMs);
+          }
+
+          if (!completed) {
+            await runtime.cancelTask(
+              taskId,
+              buildCallContext({ stepId: step.id, policyRule: 'poll-timeout-cancel' }),
+            );
+            throw new Error('Agent task ' + taskId + ' did not complete within ' + maxPolls + ' polls');
+          }
+
+          // 4. Post-hoc audit. The runtime ran its own loop internally, so this
+          //    is our only visibility into what it touched — recorded into the
+          //    SAME ledger real provider calls go through, so "every outbound
+          //    call is logged" still holds, just after the fact rather than
+          //    gated in real time.
+          for (const call of toolCalls) {
+            const egress = buildEgressEvent(
+              {
+                id: newId('egr'),
+                runId,
+                stepId: step.id,
+                providerId: 'hermes',
+                op: 'internal.tool_call:' + call.tool,
+                destination: 'hermes-internal://' + call.tool,
+                policyRule: 'reported-post-hoc-by-hermes',
+              },
+              call.at,
+            );
+            await store.appendEgress(egress);
+            await bus.emit(runId, { type: 'egress.logged', egress });
+          }
+
+          await this.upsertStep(step.id, {
+            status: 'succeeded',
+            output: toJson({ result: finalResult, toolCallCount: toolCalls.length, toolCalls }),
+            endedAt: nowIso(),
+          });
+
+          return { result: finalResult, scheduleDecision: decision, toolCalls };
+        } catch (err) {
+          await this.upsertStep(step.id, {
+            status: 'failed',
+            error: { code: 'AGENT_TASK_FAILED', message: (err as Error).message },
+            endedAt: nowIso(),
+          });
+          throw err;
+        }
+      },
     };
 
     return ctx;

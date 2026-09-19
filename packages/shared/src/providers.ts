@@ -26,6 +26,14 @@ export const PROVIDER_IDS = [
 export type ProviderMode = 'mock' | 'live' | 'disabled';
 
 /**
+ * Cost/capability tier for a text-model or agent-runtime call. Advisory only
+ * until Milestone 3's model gateway actually switches providers per tier —
+ * for now it is recorded on every ScheduleDecision so the UI and benchmark
+ * script have something real to show before it is functionally enforced.
+ */
+export type ModelTier = 'cheap' | 'standard' | 'frontier';
+
+/**
  * What a provider can do, in our terms. Playbooks ask for a CAPABILITY, never a
  * vendor — so re-pointing 'decision' from jev to anthropic is a one-line change.
  */
@@ -53,6 +61,15 @@ export interface ProviderMeta {
   latencyMs: number;
   /** Host actually contacted. `mock://<id>` when mocked. */
   destination: string | null;
+  /**
+   * Optional cost accounting. Reuses this existing meta -> egress ledger
+   * pipeline rather than a second channel — a provider that knows its token
+   * usage (or a rough cost estimate) just fills these in, and withEgress
+   * forwards them onto the stored EgressEvent automatically.
+   */
+  tokensIn?: number;
+  tokensOut?: number;
+  estimatedCostCents?: number;
 }
 
 export type ProviderErrorCode =
@@ -100,6 +117,14 @@ export interface AgentRuntimeAdapter extends ProviderAdapter {
       partial?: unknown;
       result?: unknown;
       log?: string[];
+      /**
+       * Self-reported: what the runtime actually invoked internally while it
+       * ran its own loop. This is our ONLY post-hoc visibility into that loop —
+       * we cannot gate these individually in real time, only audit them after
+       * the fact. If the real runtime cannot report this, the field stays
+       * empty and that blind spot should be called out, not hidden.
+       */
+      toolCalls?: { tool: string; args?: unknown; at: string }[];
     }>
   >;
   cancelTask(taskId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
@@ -111,6 +136,25 @@ export interface DecisionAdapter extends ProviderAdapter {
     input: { question: string; options: string[]; evidence?: string },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<{ choice: string; confidence: number; rationale?: string }>>;
+
+  /**
+   * Route a subtask BEFORE it starts: pick a model tier and filter the
+   * candidate tool list down to what the agent runtime is allowed to see.
+   * This is the actual mechanism behind "expose only Jev-selected tools" —
+   * filtering happens here, at subtask granularity, not by intercepting the
+   * runtime's internal per-turn loop (which we have no visibility into).
+   */
+  route(
+    input: { task: string; availableTools: string[]; context?: string },
+    ctx: ProviderCallContext,
+  ): Promise<
+    ProviderResult<{
+      modelTier: ModelTier;
+      exposedTools: string[];
+      confidence: number;
+      rationale?: string;
+    }>
+  >;
 }
 
 export interface BrowserAdapter extends ProviderAdapter {
