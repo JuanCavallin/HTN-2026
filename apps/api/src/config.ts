@@ -30,6 +30,10 @@ const envSchema = z.object({
   MOCK_MAX_LATENCY_MS: z.coerce.number().int().min(0).default(900),
 
   HERMES_MODE: modeEnum.default('mock'),
+  // Hermes is driven as a local subprocess over ACP (`uv run hermes-acp`), not
+  // an HTTP API — there is no bearer key. What live mode actually needs is the
+  // absolute path to a `hermes-agent` checkout with the `acp` extra installed.
+  HERMES_CWD: z.string().optional(),
   HERMES_API_KEY: z.string().optional(),
   HERMES_BASE_URL: z.string().optional(),
 
@@ -68,6 +72,8 @@ export interface ProviderConfig {
   apiKey?: string;
   baseUrl?: string;
   projectId?: string;
+  /** Absolute path to a local checkout the provider drives as a subprocess (Hermes only). */
+  cwd?: string;
   /** Name of the env var that would enable live mode. Shown in health detail. */
   keyVar: string;
 }
@@ -89,10 +95,16 @@ function resolve(
   return { mode, apiKey, keyVar, ...extra };
 }
 
+/** Hermes gates on HERMES_CWD (a local subprocess needs a checkout, not a key). */
+function resolveHermes(): ProviderConfig {
+  let mode: ProviderMode = env.HERMES_MODE;
+  if (env.MOCK_ALL) mode = 'mock';
+  else if (mode === 'live' && !env.HERMES_CWD) mode = 'mock';
+  return { mode, cwd: env.HERMES_CWD, baseUrl: env.HERMES_BASE_URL, keyVar: 'HERMES_CWD' };
+}
+
 const providers: Record<ProviderId, ProviderConfig> = {
-  hermes: resolve(env.HERMES_MODE, env.HERMES_API_KEY, 'HERMES_API_KEY', {
-    baseUrl: env.HERMES_BASE_URL,
-  }),
+  hermes: resolveHermes(),
   jev: resolve(env.JEV_MODE, env.JEV_API_KEY, 'JEV_API_KEY', { baseUrl: env.JEV_BASE_URL }),
   browserbase: resolve(env.BROWSERBASE_MODE, env.BROWSERBASE_API_KEY, 'BROWSERBASE_API_KEY', {
     projectId: env.BROWSERBASE_PROJECT_ID,

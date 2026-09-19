@@ -20,7 +20,9 @@ function createMock(cfg: ProviderConfig): TextModelAdapter {
         // Echoing the placeholder count proves, in the demo, that what reached the
         // "cloud" model was the redacted text and not the values.
         const text =
-          'Mock summary of a ' +
+          'Mock summary (tier=' +
+          (input.tier ?? 'standard') +
+          ') of a ' +
           input.prompt.length +
           '-char prompt containing ' +
           placeholders +

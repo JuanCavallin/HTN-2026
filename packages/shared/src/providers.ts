@@ -186,7 +186,14 @@ export interface ToolboxAdapter extends ProviderAdapter {
 
 export interface TextModelAdapter extends ProviderAdapter {
   complete(
-    input: { system?: string; prompt: string; maxTokens?: number; json?: boolean },
+    input: {
+      system?: string;
+      prompt: string;
+      maxTokens?: number;
+      json?: boolean;
+      /** Jev's model-tier recommendation. Defaults to 'standard' if omitted. */
+      tier?: ModelTier;
+    },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<{ text: string; tokensIn: number; tokensOut: number }>>;
 }
