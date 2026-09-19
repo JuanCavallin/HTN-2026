@@ -9,6 +9,7 @@ import type {
   EgressEvent,
   PiiSpan,
   Run,
+  RunAnalytics,
   Step,
   ProviderStatus,
   Capability,
@@ -62,6 +63,17 @@ export const api = {
     ),
 
   playbooks: () => request<{ playbooks: { kind: string; title: string }[] }>('/playbooks'),
+
+  /** The node tool-picker's catalog. Served by whatever backs `toolbox`. */
+  tools: () =>
+    request<{ tools: { name: string; description: string }[]; cached: boolean }>('/tools'),
+
+  /**
+   * Server-computed run metrics. For a LIVE run prefer calling rollup() from
+   * @htn/shared directly over the useRunStream state — same function, no
+   * request, and it updates with the stream.
+   */
+  analytics: (id: string) => request<RunAnalytics>('/runs/' + id + '/analytics'),
 
   listRuns: () => request<{ runs: Run[] }>('/runs'),
 

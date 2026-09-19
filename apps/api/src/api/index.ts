@@ -10,6 +10,7 @@ import { approvalsRouter } from './approvals.routes.js';
 import { providersRouter } from './providers.routes.js';
 import { runsRouter } from './runs.routes.js';
 import { streamRouter } from './stream.routes.js';
+import { toolsRouter } from './tools.routes.js';
 
 export function mountRoutes(app: Express): void {
   const api = Router();
@@ -22,6 +23,7 @@ export function mountRoutes(app: Express): void {
   api.use(runsRouter);
   api.use(approvalsRouter);
   api.use(streamRouter);
+  api.use(toolsRouter);
 
   app.use('/api', api);
 }

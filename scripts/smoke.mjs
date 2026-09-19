@@ -161,7 +161,50 @@ async function main() {
   );
   check('summary reports zero raw values sent', egress.body?.summary?.rawValuesSent === 0);
 
-  console.log('\n6. Rejection path');
+  console.log('\n6. Tool catalog and analytics');
+  const tools = await api('/api/tools');
+  check('GET /api/tools is 200', tools.status === 200, 'status ' + tools.status);
+  const catalog = tools.body?.tools ?? [];
+  check('catalog returned tools', catalog.length > 0, catalog.length + ' tools');
+  check(
+    'every tool has a name and a description',
+    catalog.every((t) => Boolean(t.name) && Boolean(t.description)),
+  );
+  const cachedRead = await api('/api/tools');
+  check('a second read is served from cache', cachedRead.body?.cached === true);
+
+  const analytics = await api('/api/runs/' + runId + '/analytics');
+  check('GET analytics is 200', analytics.status === 200, 'status ' + analytics.status);
+  const totals = analytics.body?.totals ?? {};
+
+  // REGRESSION GUARD. Before the ProviderMeta fix these were all zero: the
+  // anthropic and jev adapters reported usage in `data` but never in `meta`,
+  // and withEgress only reads `meta`. If these fail, check the adapter, not
+  // the rollup.
+  check('tokens reached the egress ledger', totals.tokensIn > 0 && totals.tokensOut > 0,
+    totals.tokensIn + ' in / ' + totals.tokensOut + ' out');
+  check('model calls were counted', totals.llmCalls > 0, totals.llmCalls + ' calls');
+  check('a cost was estimated', totals.estimatedCostCents > 0,
+    totals.estimatedCostCents + ' cents');
+
+  check('wall-clock time was measured', totals.wallMs > 0, totals.wallMs + 'ms');
+  check(
+    'tool reduction is visible in the totals',
+    totals.toolsAvailable > totals.toolsExposed,
+    totals.toolsExposed + ' of ' + totals.toolsAvailable,
+  );
+  check(
+    'the demo playbook rolls up as unattributed (its steps carry no nodeId)',
+    analytics.body?.unattributed !== null && (analytics.body?.nodes ?? []).length === 0,
+    (analytics.body?.nodes ?? []).length + ' attributed node(s)',
+  );
+  check(
+    'no step was dropped from the rollup',
+    analytics.body?.unattributed?.stepIds?.length === totals.stepCount,
+    analytics.body?.unattributed?.stepIds?.length + ' of ' + totals.stepCount,
+  );
+
+  console.log('\n7. Rejection path');
   const second = await api('/api/runs', {
     method: 'POST',
     body: JSON.stringify({ kind: 'demo', input: { workerCount: 2 } }),

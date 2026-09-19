@@ -65,6 +65,17 @@ export interface Step {
   parentStepId: string | null;
   /** Monotonic within a run. Drives timeline ordering. */
   seq: number;
+  /**
+   * Which graph node produced this step, when the run came from a graph.
+   * THE join key: it is what lets the canvas highlight a live node
+   * (`steps.find(s => s.nodeId === node.id)?.status`) and what groups steps
+   * into per-node metrics in `analytics.ts`. Undefined for a hand-written
+   * playbook like `demo`, whose steps roll up as `unattributed`.
+   *
+   * A swarm's parent and all of its children share one nodeId, so a fan-out
+   * reports as the single node the author drew.
+   */
+  nodeId?: string;
   /** 'fetch' | 'worker' | 'judge' | 'browse' | 'decide' | ... */
   kind: string;
   /** Human string shown in the timeline. */

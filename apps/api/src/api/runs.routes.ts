@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   createRunRequestSchema,
   listRunsQuerySchema,
+  rollup,
   type CreateRunRequest,
   type ListRunsQuery,
 } from '@htn/shared';
@@ -49,4 +50,17 @@ runsRouter.post('/runs/:id/cancel', async (req, res) => {
 
 runsRouter.get('/runs/:id/egress', async (req, res) => {
   res.json(await listEgress(param(req, 'id')));
+});
+
+/**
+ * Per-node and total tokens, time and cost.
+ *
+ * getRunDetail already returns exactly rollup()'s inputs, and rollup lives in
+ * @htn/shared so the web app runs the SAME function over the SSE stream for
+ * live numbers. One implementation, two callers.
+ */
+runsRouter.get('/runs/:id/analytics', async (req, res) => {
+  const detail = await getRunDetail(param(req, 'id'));
+  if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json(rollup(detail));
 });

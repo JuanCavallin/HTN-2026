@@ -46,24 +46,44 @@ the product.
 
 ### 3.1 The graph document
 
-`packages/shared/src/graph.ts` (additive only — see the rule at the top of
-`domain.ts`):
+`packages/shared/src/schemas/graph.ts` — **zod is the source of truth and the
+TypeScript types are inferred**, so the validator guarding the API boundary can
+never drift from the types the editor codes against. There is deliberately no
+separate `graph.ts`. Additive only, per the rule at the top of `domain.ts`.
 
 ```
-GraphNode  = { id, type, label, position: {x,y}, config }
+GraphNode  = { id, type, label, position: {x,y}, background?, config }
 GraphEdge  = { id, source, target, sourceHandle? }   // sourceHandle = decision branch
-AgentGraph = { id, name, nodes, edges, version, updatedAt, assertions? }
+AgentGraph = { id, name, description?, nodes, edges, version,
+               createdAt, updatedAt, assertions? }
 ```
 
-`GraphNode.type` uses the **same vocabulary as `StepSpec.kind`**:
-`fetch | redact | decide | swarm | agent_task | judge | submit | approval`.
-That buys the icon map in `components/runs/StepRow.tsx` for free in the editor,
-and means graph nodes and timeline steps speak one language.
+`GraphNode.type` uses the **same vocabulary as `StepSpec.kind`**, which buys the
+icon map in `components/runs/StepRow.tsx` for free in the editor:
 
-`config` is a **zod discriminated union keyed on `type`**, in
-`packages/shared/src/schemas/graph.ts`. This is what stops the editor being an
-arbitrary-code-execution surface — the interpreter only ever reads validated,
-typed config.
+| type | LLM? | maps to |
+|---|---|---|
+| `fetch` | no | `ctx.step` — load a source |
+| `tool` | **no** | `ctx.step` + `provider('toolbox').callTool` |
+| `redact` | no | `ctx.redact` |
+| `decide` | yes | `provider('text.model').complete` |
+| `agent_task` | yes | `ctx.runAgentTask` |
+| `swarm` | either | `ctx.fanOut` |
+| `judge` | yes | `provider('decision').decide` |
+| `submit` | no | `callTool` **behind** `ctx.requireApproval` |
+| `approval` | no | `ctx.requireApproval` standalone |
+
+**`tool` is first class: a deterministic tool call with no model in the loop.**
+Distinct from `submit` (same call, approval-gated because it is irreversible)
+and from `agent_task` (a model chooses the tools). It contributes zero tokens
+and zero `llmCalls`, which is exactly the argument for a graph over one large
+prompt — and it keeps the `llmCalls` heuristic in §3.6 honest for free.
+
+`config` is a **discriminated union keyed on `type`**. This is what stops the
+editor being an arbitrary-code-execution surface — the interpreter only ever
+reads validated, typed config. `agentGraphSchema.superRefine` additionally
+rejects duplicate node ids, edges pointing at missing nodes, and cycles;
+`findGraphCycle` is exported so the interpreter and editor share one answer.
 
 ### 3.2 `Step.nodeId` — the whole visualisation story, in one field
 
@@ -144,14 +164,19 @@ new events.
 Put the types *and* the rollup function in `packages/shared/src/analytics.ts`:
 
 ```
-NodeMetrics  = { nodeId, stepIds[], status, wallMs, providerLatencyMs,
+NodeMetrics  = { nodeId, label?, stepIds[], status, wallMs, providerLatencyMs,
                  llmCalls, tokensIn, tokensOut, estimatedCostCents,
-                 toolsAvailable?, toolsExposed?, toolCallsActual? }
+                 toolsAvailable?, toolsExposed?, toolCallsActual?, modelTier? }
 
-RunAnalytics = { runId, kind, nodes: NodeMetrics[], totals: {...} }
+RunAnalytics = { runId, kind, status, nodes: NodeMetrics[], unattributed, totals }
 
-rollup(run, steps, egress, scheduleDecisions) => RunAnalytics   // pure
+rollup({ run, steps, egress, scheduleDecisions, approvals }, now?) => RunAnalytics
 ```
+
+`unattributed` collects steps with no `nodeId` — every step of a hand-written
+playbook like `demo` — so totals always reconcile against the ledger instead of
+silently dropping work. `now` is injectable so a running run reports a live
+`wallMs` while tests stay deterministic.
 
 Shared is already browser-bundled and forbids Node built-ins, so **one
 implementation serves both**: the API serves it at
@@ -237,21 +262,52 @@ capability, but have the interpreter accept only `hermes` for now. Costs
 nothing, demonstrates the abstraction, and commits us to no second adapter —
 there is not enough time to bring one up late.
 
+**Hermes reports no token usage — confirmed against a live session.** `meta()` in
+`providers/hermes/live.ts` carries no token fields, so a live `agent_task` node
+contributes **zero** to every cost and token number. Verified empirically by
+`scripts/live-check.mjs` against a real ACP session: eleven hermes ledger rows,
+zero tokens, while the same run's live Anthropic call reported 62 in / 214 out.
+
+This is a real blind spot in the ledger, not a cosmetic gap, and it biases the
+Phase 5 baseline comparison in the graph's favour — agent work looks free. Two
+things follow: the UI must render it as an explicit "not reported" rather than a
+silent `0`, and someone should check whether ACP surfaces usage at all before we
+claim a total cost number on stage. Note it next to the two limits above, which
+come from `hermes/live.ts`'s own header comment.
+
 ---
 
 ## 5. Build order
 
-### Phase 0 — contract (~2h, blocks everyone, land it first)
+### Phase 0 — contract — **DONE**
 
-1. `Step.nodeId?` + `StepSpec.nodeId`, threaded through `createStep`
-2. `shared/graph.ts` + `shared/schemas/graph.ts` (node config discriminated union)
-3. `shared/analytics.ts` — `NodeMetrics`, `RunAnalytics`, pure `rollup()`
-4. Fix the mock cost gap in the anthropic and jev mocks (§3.6)
-5. `GET /api/tools` wrapping `listTools`
+1. `Step.nodeId?` on `Step`, `StepSpec`, `FanOutSpec`, `AgentTaskSpec`, threaded
+   through `createStep` (a swarm's parent and children share one nodeId)
+2. `shared/schemas/graph.ts` — zod is the source of truth, types inferred; nine
+   node types including a no-LLM `tool` node; refinements reject duplicate ids,
+   dangling edges and cycles
+3. `shared/analytics.ts` — `NodeMetrics`, `RunTotals`, `RunAnalytics`, pure
+   `rollup()`; `summarise()` moved here from `core/ledger.ts`, which re-exports it
+4. Cost-reporting fixes in `anthropic/live.ts` (the important one — real
+   `message.usage` never reached `meta`), plus the anthropic and jev mocks
+5. `GET /api/tools` (60s cache) and `GET /api/runs/:id/analytics`
+6. `runReducer` now handles `schedule.decided`, which it previously dropped
+
+Verified by `pnpm check:graph` (15 schema checks), `pnpm smoke` in forced-mock
+mode (40 checks), and `pnpm smoke:live` against live Anthropic + Hermes.
+
+**Graph persistence and node/edge CRUD were deliberately deferred to Phase 1**
+so Phase 0 did not block the team for half a day.
 
 ### Phase 1 — the loop, headless (~4h) — highest risk, front-load it
 
-6. Store methods + `api/graphs.routes.ts` + `graphs` in the `memory.ts` snapshot
+6. Store methods (`saveGraph`/`getGraph`/`listGraphs`/`deleteGraph`) + `graphs` in
+   the `memory.ts` snapshot + `api/graphs.routes.ts`, including node/edge-level
+   add, update and remove. Every granular endpoint must go through ONE
+   whole-graph validate-and-save helper (`mutateGraph(id, fn)`) so node edits
+   cannot bypass the cycle/reference checks; deleting a node cascades to its
+   edges; `PUT`/`PATCH` take a `version` and return 409 on mismatch, because
+   chat and the canvas will both write to the same graph
 7. `core/graph/interpreter.ts` — promise-per-node, `{{ref}}` resolution
 8. `core/playbooks/graph.playbook.ts` + one line in `registry.ts`
 9. Port `demo.playbook.ts` into a seeded `demo.graph.json`

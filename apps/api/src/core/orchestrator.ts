@@ -164,6 +164,7 @@ export class Orchestrator {
       const step = await store.appendStep({
         id: newId('step'),
         runId,
+        nodeId: spec.nodeId,
         parentStepId: spec.parentStepId ?? null,
         kind: spec.kind ?? 'task',
         label: spec.label,
@@ -205,7 +206,7 @@ export class Orchestrator {
       },
 
       fanOut: async <I, O>(spec: FanOutSpec<I, O>): Promise<FanOutOutcome<O>[]> => {
-        const parent = await createStep({ label: spec.label, kind: 'swarm' });
+        const parent = await createStep({ label: spec.label, kind: 'swarm', nodeId: spec.nodeId });
 
         const outcomes = await fanOut<I, O>(
           spec.items,
@@ -213,6 +214,8 @@ export class Orchestrator {
             const child = await createStep({
               label: spec.workerLabel(item, index),
               kind: 'worker',
+              // Same nodeId as the parent: the whole fan-out is one graph node.
+              nodeId: spec.nodeId,
               parentStepId: parent.id,
             });
             try {
@@ -315,6 +318,7 @@ export class Orchestrator {
         const step = await createStep({
           label: spec.label,
           kind: 'agent_task',
+          nodeId: spec.nodeId,
           parentStepId: spec.parentStepId ?? null,
           // Hardcoded rather than read from the registry's actual binding —
           // correct today ('agent.runtime' -> hermes) but worth revisiting if
@@ -352,7 +356,8 @@ export class Orchestrator {
                 modelTier: 'standard' as const,
                 exposedTools: [] as string[],
                 confidence: 0,
-                rationale: 'Routing failed (' + routed.error.code + '); exposing no tools (fail closed).',
+                rationale:
+                  'Routing failed (' + routed.error.code + '); exposing no tools (fail closed).',
               };
 
           const decision: ScheduleDecision = {
@@ -394,7 +399,8 @@ export class Orchestrator {
               buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
             );
             if (!polled.ok) throw new Error('Agent task polling failed: ' + polled.error.message);
-            if (polled.data.status === 'failed') throw new Error('Agent task ' + taskId + ' failed');
+            if (polled.data.status === 'failed')
+              throw new Error('Agent task ' + taskId + ' failed');
 
             if (polled.data.status === 'done') {
               finalResult = polled.data.result ?? null;
@@ -410,7 +416,9 @@ export class Orchestrator {
               taskId,
               buildCallContext({ stepId: step.id, policyRule: 'poll-timeout-cancel' }),
             );
-            throw new Error('Agent task ' + taskId + ' did not complete within ' + maxPolls + ' polls');
+            throw new Error(
+              'Agent task ' + taskId + ' did not complete within ' + maxPolls + ' polls',
+            );
           }
 
           // 4. Post-hoc audit. The runtime ran its own loop internally, so this

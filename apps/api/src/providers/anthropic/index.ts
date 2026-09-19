@@ -2,6 +2,7 @@ import type { Capability, TextModelAdapter } from '@htn/shared';
 import type { ProviderConfig } from '../../config.js';
 import { mockBase, mockCall } from '../_mock.js';
 import { createLiveAnthropic } from './live.js';
+import { estimateCostCents } from './pricing.js';
 
 const CAPABILITIES: readonly Capability[] = ['text.model'];
 
@@ -15,24 +16,36 @@ function createMock(cfg: ProviderConfig): TextModelAdapter {
   return {
     ...base,
     async complete(input, ctx) {
-      return mockCall('anthropic', 'complete', cfg.mode, ctx, () => {
-        const placeholders = (ctx.redactions ?? []).length;
-        // Echoing the placeholder count proves, in the demo, that what reached the
-        // "cloud" model was the redacted text and not the values.
-        const text =
-          'Mock summary (tier=' +
-          (input.tier ?? 'standard') +
-          ') of a ' +
-          input.prompt.length +
-          '-char prompt containing ' +
-          placeholders +
-          ' redacted span(s). Three line items require verification.';
-        return {
-          text,
-          tokensIn: Math.ceil(input.prompt.length / 4),
-          tokensOut: Math.ceil(text.length / 4),
-        };
-      });
+      const placeholders = (ctx.redactions ?? []).length;
+      // Echoing the placeholder count proves, in the demo, that what reached the
+      // "cloud" model was the redacted text and not the values.
+      const text =
+        'Mock summary (tier=' +
+        (input.tier ?? 'standard') +
+        ') of a ' +
+        input.prompt.length +
+        '-char prompt containing ' +
+        placeholders +
+        ' redacted span(s). Three line items require verification.';
+
+      // Computed out here rather than inside `produce`, so the same numbers can
+      // go on BOTH the data and the meta. meta is the half the egress ledger
+      // reads; returning them only in data records nothing.
+      const tokensIn = Math.ceil(input.prompt.length / 4);
+      const tokensOut = Math.ceil(text.length / 4);
+
+      return mockCall(
+        'anthropic',
+        'complete',
+        cfg.mode,
+        ctx,
+        () => ({ text, tokensIn, tokensOut }),
+        {
+          tokensIn,
+          tokensOut,
+          estimatedCostCents: estimateCostCents(input.tier ?? 'standard', tokensIn, tokensOut),
+        },
+      );
     },
   };
 }

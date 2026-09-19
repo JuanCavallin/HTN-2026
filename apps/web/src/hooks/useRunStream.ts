@@ -37,6 +37,15 @@ export function runReducer(state: RunView, event: RunEvent): RunView {
     case 'pii.detected':
       return { ...state, piiSpans: upsert(state.piiSpans, event.span) };
 
+    // Without this case the field stays empty forever and every tool-reduction
+    // number (availableTools vs exposedTools) is invisible to the UI, even
+    // though the server emits the event and RunView declares the field.
+    case 'schedule.decided':
+      return {
+        ...state,
+        scheduleDecisions: upsert(state.scheduleDecisions, event.decision),
+      };
+
     case 'log':
       return {
         ...state,
