@@ -193,6 +193,10 @@ progress in parallel.
 | Person 1 | Core runtime and harness | API, session state, harness adapter | Run API; Hermes adapter and compatibility spike; model/tool interception; SSE; pause/resume/cancel; approval and revision endpoints; context persistence plumbing | Consumes `ScheduleDecision`; emits events and proposed `ToolAction` |
 | Person 2 | Jev, model routing, safety and privacy | Jev scheduler and completion judge, model gateway, context builder, policy gate | Jev schemas and deterministic fallback; hierarchical selection; tier and route selection; context ranking; bounded escalation; completion decision and verification gating; baseline evaluation; privacy labeling and secret handling; hard risk rules; exact-action authorization, revision reauthorization and approval enforcement; leakage and permission-bypass tests | Implements `schedule(state)` with a deterministic mock fallback, `build_context`, and `authorize_action` |
 | Person 3 | Tools and browser | Tool registry, executors, browser | MCP setup; `ToolDescriptor` registry; plugin manifests; tool metadata search; browser adapter and Browserbase integration, including a local-browser path; tool execution; simulated tool fixtures, clearly labeled non-executable | Implements `select_tool_metadata`; executes tools through each descriptor's executor reference |
+
+Person 3's scope is split across two people — **3A (tool registry and MCP)** and
+**3B (browser and Browserbase)**. See [person-3.md](./person-3.md) for that breakdown,
+the seam between the two tracks, and the files each one owns.
 | Person 4 | Dashboard, metrics and demo | Dashboard | Live trace UI; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints |
 
 ### Handoffs
