@@ -46,6 +46,16 @@ export function GraphEditor() {
     if (!id && !graph && graphs.length > 0) setGraph(graphs[0] as AgentGraph);
   }, [id, graph, graphs]);
 
+  // A DELIBERATE navigation to a different graph (the dropdown, or a link from
+  // elsewhere) must drop any active conversation. Without this, an existing
+  // conversation keeps the `graphId` it was seeded with, and a message typed
+  // after switching would silently edit the graph you navigated AWAY from
+  // while the canvas shows the one you switched TO. This does not fire when
+  // the chat itself updates `graph` in place -- only when the URL's :id changes.
+  useEffect(() => {
+    setConversation(null);
+  }, [id]);
+
   const launch = async () => {
     if (!graph) return;
     setLaunching(true);
@@ -94,6 +104,7 @@ export function GraphEditor() {
       <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
         <ChatPanel
           conversation={conversation}
+          graphId={graph?.id}
           onConversation={setConversation}
           onGraph={(next) => {
             setGraph(next);

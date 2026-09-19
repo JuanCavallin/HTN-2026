@@ -42,6 +42,15 @@ export class SynthesisError extends Error {
   }
 }
 
+function debug(...args: unknown[]): void {
+  console.log('[synthesis]', ...args);
+}
+
+function preview(text: string, n = 300): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > n ? flat.slice(0, n) + '…' : flat;
+}
+
 export interface SynthesisResult {
   graph: AgentGraph;
   delegation: GraphDelegation;
@@ -65,6 +74,16 @@ export async function synthesiseGraph(args: {
   request: string;
   currentGraph: AgentGraph | null;
 }): Promise<SynthesisResult> {
+  const startedAt = Date.now();
+  debug(
+    args.conversationId,
+    args.currentGraph
+      ? 'EDIT of ' + args.currentGraph.id + ' v' + args.currentGraph.version
+      : 'BUILD new',
+    '| request:',
+    preview(args.request, 150),
+  );
+
   const catalogResult = await providers.provider('toolbox').listTools({
     runId: args.conversationId,
     policyRule: 'tool-catalog-for-synthesis',
@@ -72,6 +91,13 @@ export async function synthesiseGraph(args: {
   // A synthesiser with no catalog would invent tool names, and every one of
   // them would fail classification at run time. Better to say so now.
   const tools = catalogResult.ok ? catalogResult.data : [];
+  debug(
+    args.conversationId,
+    'tool catalog:',
+    tools.length,
+    'tool(s)',
+    catalogResult.ok ? '' : '(catalog read failed, using empty list)',
+  );
 
   const system = buildSynthesisSystemPrompt(tools);
   const model = providers.provider('text.model');
@@ -81,6 +107,7 @@ export async function synthesiseGraph(args: {
   // Two attempts: one to write it, one to repair it against the real error.
   // More than that and the model is usually failing at the task, not the format.
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const callStarted = Date.now();
     const completion = await model.complete(
       {
         system,
@@ -101,14 +128,47 @@ export async function synthesiseGraph(args: {
     );
 
     if (!completion.ok) {
+      debug(
+        args.conversationId,
+        'attempt',
+        attempt,
+        'FAILED: model call error',
+        completion.error.code + ':',
+        completion.error.message,
+        '(' + (Date.now() - callStarted) + 'ms)',
+      );
       throw new SynthesisError('Model call failed: ' + completion.error.message);
     }
+
+    debug(
+      args.conversationId,
+      'attempt',
+      attempt,
+      'model replied in',
+      Date.now() - callStarted,
+      'ms |',
+      completion.data.tokensIn,
+      'in /',
+      completion.data.tokensOut,
+      'out |',
+      completion.data.text.length,
+      'chars',
+    );
 
     const at = nowIso();
     let candidate: unknown;
     try {
       candidate = JSON.parse(extractJson(completion.data.text));
-    } catch {
+    } catch (err) {
+      debug(
+        args.conversationId,
+        'attempt',
+        attempt,
+        'REJECTED: not valid JSON:',
+        (err as Error).message,
+        '\n  raw reply:',
+        preview(completion.data.text),
+      );
       repairHint = 'Your reply was not valid JSON. Return ONLY the JSON object.';
       continue;
     }
@@ -125,12 +185,28 @@ export async function synthesiseGraph(args: {
 
     const parsed = agentGraphSchema.safeParse(draft);
     if (!parsed.success) {
-      repairHint =
-        'The document failed validation:\n' +
-        parsed.error.issues
-          .slice(0, 8)
-          .map((issue) => '- ' + issue.path.join('.') + ': ' + issue.message)
-          .join('\n');
+      const draftNodes = (draft as { nodes?: unknown }).nodes;
+      const nodes = Array.isArray(draftNodes) ? (draftNodes as { type?: string }[]) : [];
+      const lines = parsed.error.issues.slice(0, 8).map((issue) => {
+        // Cross-reference back to the offending node's TYPE, not just its
+        // index -- "nodes.3.config.question" tells you a path; "node[3]
+        // (type=judge)" tells you what actually needs fixing.
+        const nodeIndex =
+          issue.path[0] === 'nodes' && typeof issue.path[1] === 'number' ? issue.path[1] : null;
+        const nodeType = nodeIndex !== null ? nodes[nodeIndex]?.type : undefined;
+        const where = nodeType
+          ? issue.path.join('.') + ' (node type=' + nodeType + ')'
+          : issue.path.join('.');
+        return '- ' + where + ': ' + issue.message;
+      });
+      debug(
+        args.conversationId,
+        'attempt',
+        attempt,
+        'REJECTED: failed schema validation (' + parsed.error.issues.length + ' issue(s)):\n ',
+        lines.join('\n  '),
+      );
+      repairHint = 'The document failed validation:\n' + lines.join('\n');
       continue;
     }
 
@@ -140,6 +216,14 @@ export async function synthesiseGraph(args: {
     // decision at authoring time -- it runs, but the decision layer has nothing
     // to route and the harness nothing to plan.
     if (!hasRuntimeDelegation(graph)) {
+      debug(
+        args.conversationId,
+        'attempt',
+        attempt,
+        'REJECTED: fully pinned —',
+        delegationOf(graph).pinnedCalls,
+        'pinned call(s), 0 left for the decision layer or harness',
+      );
       repairHint =
         'Every tool call in that graph was pinned, which leaves the decision layer ' +
         'and the agent harness with nothing to do. Convert at least one step whose ' +
@@ -149,6 +233,23 @@ export async function synthesiseGraph(args: {
     }
 
     const delegation = delegationOf(graph);
+    debug(
+      args.conversationId,
+      'attempt',
+      attempt,
+      'ACCEPTED |',
+      graph.nodes.length,
+      'nodes |',
+      delegation.pinnedCalls,
+      'pinned,',
+      delegation.deferredToolChoices,
+      'dispatch,',
+      delegation.agentSubtasks,
+      'agent |',
+      'total',
+      Date.now() - startedAt,
+      'ms',
+    );
 
     return {
       graph,
@@ -158,6 +259,11 @@ export async function synthesiseGraph(args: {
     };
   }
 
+  debug(
+    args.conversationId,
+    'FAILED after 2 attempts (' + (Date.now() - startedAt) + 'ms). Last repair hint:\n ',
+    repairHint,
+  );
   throw new SynthesisError('Could not produce a valid graph in two attempts', { repairHint });
 }
 

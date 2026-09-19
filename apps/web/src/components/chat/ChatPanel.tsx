@@ -6,12 +6,18 @@
  * graph existing, and the reason this is not just a prompt box wired to an
  * agent.
  *
+ * EDITING THE GRAPH ON SCREEN, NOT A DIFFERENT ONE: a lazily-created
+ * conversation must be seeded with `graphId` -- the graph currently loaded on
+ * the page -- or its first message has no `currentGraph` on the server and
+ * synthesis builds an unrelated new document instead of modifying what you are
+ * looking at. See conversations.routes.ts.
+ *
  * The delegation line under each reply is deliberate: it says what was left for
  * the decision layer and the harness to work out at runtime, so a graph that
  * has quietly pinned everything is visible rather than silently impressive.
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AgentGraph, Conversation, GraphDelegation } from '@htn/shared';
 import { api } from '../../lib/api';
 import { Button } from '../ui/Button';
@@ -24,19 +30,42 @@ const EXAMPLES = [
 
 export function ChatPanel({
   conversation,
+  graphId,
   onGraph,
   onConversation,
   className = '',
 }: {
   conversation: Conversation | null;
+  /** The graph currently open on the page. Seeds a new conversation so its
+   *  first message edits THIS graph rather than building an unrelated one. */
+  graphId?: string;
   onGraph: (graph: AgentGraph) => void;
-  onConversation: (conversation: Conversation) => void;
+  /** Also used with `null` by the "New chat" reset below. */
+  onConversation: (conversation: Conversation | null) => void;
   className?: string;
 }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [delegation, setDelegation] = useState<GraphDelegation | null>(null);
+  // "New chat" means build something UNRELATED to whatever is on screen, not
+  // just clear the transcript -- otherwise the next message would still be
+  // seeded with `graphId` and silently resume editing the same graph. Reset
+  // whenever `graphId` itself changes, so switching graphs elsewhere on the
+  // page goes back to defaulting to "edit what's now open".
+  const [detached, setDetached] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => setDetached(false), [graphId]);
+
+  const messages = conversation?.messages ?? [];
+
+  // A chat UI that does not follow its own transcript reads as broken. Scroll
+  // on every new message, not just while sending, so a page reload that
+  // restores history also lands at the bottom.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [messages.length, busy]);
 
   const send = async (message: string) => {
     if (!message.trim() || busy) return;
@@ -44,8 +73,11 @@ export function ChatPanel({
     setError(null);
     try {
       // A conversation is created lazily, so the page does not litter the store
-      // with empty ones just because someone opened it.
-      const id = conversation?.id ?? (await api.createConversation()).conversation.id;
+      // with empty ones just because someone opened it. Seeded with the graph
+      // on screen, so "add a step" edits that graph instead of forking one --
+      // unless "New chat" explicitly detached from it.
+      const seed = detached ? undefined : graphId;
+      const id = conversation?.id ?? (await api.createConversation(seed)).conversation.id;
       const result = await api.sendMessage(id, message.trim());
       onConversation(result.conversation);
       onGraph(result.graph);
@@ -58,17 +90,37 @@ export function ChatPanel({
     }
   };
 
-  const messages = conversation?.messages ?? [];
-
   return (
     <div
       className={'flex flex-col rounded-lg border border-slate-800 bg-slate-900/60 ' + className}
     >
-      <header className="border-b border-slate-800 px-4 py-2.5">
-        <h2 className="text-sm font-semibold text-slate-200">Describe a workflow</h2>
+      <header className="flex items-center justify-between border-b border-slate-800 px-4 py-2.5">
+        <h2 className="text-sm font-semibold text-slate-200">
+          {conversation?.graphId && conversation.messages.length > 0
+            ? 'Editing: ' + (conversation.title || 'this workflow')
+            : 'Describe a workflow'}
+        </h2>
+        {messages.length > 0 && (
+          <button
+            onClick={() => {
+              // Clears the transcript AND detaches from graphId -- the next
+              // message builds a fresh, unrelated document rather than
+              // continuing to edit whatever is open. The graph already built
+              // stays on the canvas; only the chat resets.
+              onConversation(null);
+              setDetached(true);
+              setDelegation(null);
+              setError(null);
+            }}
+            disabled={busy}
+            className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-50"
+          >
+            New chat
+          </button>
+        )}
       </header>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 && (
           <div className="space-y-2">
             <p className="text-sm text-slate-500">

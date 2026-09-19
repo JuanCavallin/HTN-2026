@@ -42,6 +42,17 @@
  * core/orchestrator.ts's existing bounded-polling loop untouched — see its
  * `pollIntervalMs`/`maxPolls` defaults, sized for real Hermes latency
  * (several seconds per call, 40+ seconds observed for a slow tool call).
+ *
+ * DEBUG LOGGING: every stage below logs to the terminal with a [hermes:live]
+ * prefix — spawn, connect, session start, EVERY update drain() receives from
+ * Hermes (chunk, tool call, or an unrecognised kind — see the note in drain()
+ * about why that last one matters), and every poll. This is deliberately
+ * verbose: when a task sits at "running" for a long time, the only way to
+ * tell "slow but working" from "actually stuck" apart is to watch what
+ * drain() is receiving in real time. hermes-acp's OWN stderr is also
+ * inherited (see the spawn() call below), so Hermes's internal logs are
+ * already interleaved with these — this adapter's logs are what OUR side did
+ * with what Hermes sent, not a replacement for Hermes's own output.
  * ============================================================================
  */
 
@@ -51,6 +62,16 @@ import * as acp from '@agentclientprotocol/sdk';
 import type { AgentRuntimeAdapter, ProviderErrorCode, ProviderResult } from '@htn/shared';
 import type { ProviderConfig } from '../../config.js';
 
+function debug(...args: unknown[]): void {
+  console.log('[hermes:live]', ...args);
+}
+
+/** First `n` chars, whitespace collapsed, so a log line stays one line. */
+function preview(text: string, n = 100): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > n ? flat.slice(0, n) + '…' : flat;
+}
+
 interface TaskRecord {
   status: 'running' | 'done' | 'failed';
   log: string[];
@@ -58,6 +79,14 @@ interface TaskRecord {
   result?: unknown;
   error?: string;
   session: Awaited<ReturnType<acp.SessionBuilder['start']>>;
+  /** When startTask created this record. Basis for every elapsed-time log below. */
+  startedAt: number;
+  /** Bumped on EVERY update drain() receives, of any kind. See pollTask. */
+  lastActivityAt: number;
+  /** How many updates drain() has received. A quick "is anything happening" number. */
+  updateCount: number;
+  /** Running total of streamed text, for a poll-time progress readout. */
+  chunkChars: number;
 }
 
 function meta(op: string, started: number, destination: string | null) {
@@ -70,7 +99,12 @@ function meta(op: string, started: number, destination: string | null) {
   };
 }
 
-function failure<T>(op: string, started: number, code: ProviderErrorCode, message: string): ProviderResult<T> {
+function failure<T>(
+  op: string,
+  started: number,
+  code: ProviderErrorCode,
+  message: string,
+): ProviderResult<T> {
   return {
     ok: false,
     error: { code, message, retryable: code === 'UPSTREAM' || code === 'TIMEOUT' },
@@ -90,6 +124,9 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
 
     connecting = (async () => {
       if (!cfg.cwd) throw new Error('HERMES_CWD is not set');
+
+      debug('spawning "uv run hermes-acp" in', cfg.cwd);
+      const spawnStarted = Date.now();
 
       // NOT shell:true. `uv` is a real .exe on PATH — Windows CreateProcess
       // resolves that directly. shell:true instead routes through cmd.exe
@@ -116,9 +153,22 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           resolve();
         });
       });
+      debug(
+        'hermes-acp process spawned, pid',
+        hermesProc.pid,
+        '(' + (Date.now() - spawnStarted) + 'ms)',
+      );
 
-      hermesProc.on('exit', (code) => {
-        console.error('[hermes:live] hermes-acp exited (code ' + code + ')');
+      hermesProc.on('exit', (code, signal) => {
+        console.error(
+          '[hermes:live] hermes-acp exited (code ' +
+            code +
+            ', signal ' +
+            signal +
+            ') — ' +
+            tasks.size +
+            ' task(s) were tracked at exit; any still "running" will now hang until they hit their own timeout',
+        );
         connection = null;
         connecting = null;
       });
@@ -144,16 +194,20 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
               ctx.params.toolCall.title,
           );
           const deny = options.find((o) => o.optionId === 'deny') ?? options[options.length - 1];
-          return Promise.resolve({ outcome: { outcome: 'selected' as const, optionId: deny.optionId } });
+          return Promise.resolve({
+            outcome: { outcome: 'selected' as const, optionId: deny.optionId },
+          });
         })
         .onRequest(acp.methods.client.fs.writeTextFile, async () => ({}))
         .onRequest(acp.methods.client.fs.readTextFile, async () => ({ content: '' }))
         .connect(stream);
 
+      debug('ACP stream connected, sending initialize...');
       await conn.agent.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
       });
+      debug('initialize handshake OK (' + (Date.now() - spawnStarted) + 'ms since spawn)');
 
       connection = conn;
       return conn;
@@ -167,31 +221,91 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
     }
   }
 
-  /** Runs in the background from startTask; pollTask only ever reads `record`. */
+  /**
+   * Runs in the background from startTask; pollTask only ever reads `record`.
+   *
+   * DEBUG NOTE: the `else` branch below is not decorative. Only two
+   * `sessionUpdate` kinds were ever handled (a text chunk, a tool call) — ANY
+   * other kind ACP sends (a plan update, a thought chunk, a mode change,
+   * whatever this Hermes build emits that this code was not written against)
+   * fell through both branches and vanished: no log line, no record mutation,
+   * nothing. A task that is actually making progress through updates of a
+   * kind this file does not recognise would look IDENTICAL, from the
+   * outside, to one that is truly hung — that gap is now closed by logging
+   * and counting every update kind, recognised or not.
+   */
   async function drain(record: TaskRecord): Promise<void> {
     const chunks: string[] = [];
+    const tag = record.session.sessionId.slice(0, 8);
+
+    function touch(): void {
+      record.lastActivityAt = Date.now();
+      record.updateCount += 1;
+    }
+
     try {
       for (;;) {
         const message = await record.session.nextUpdate();
+
         if (message.kind === 'stop') {
           record.result = { text: chunks.join('') };
           record.log.push('stop: ' + message.stopReason);
           record.status = 'done';
+          debug(
+            tag,
+            'stopped: reason=' + message.stopReason,
+            '| elapsed=' + (Date.now() - record.startedAt) + 'ms',
+            '| updates=' + record.updateCount,
+            '| chunkChars=' + record.chunkChars,
+            '| toolCalls=' + record.toolCalls.length,
+          );
           return;
         }
+
         const update = message.notification.update;
+
         if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
           chunks.push(update.content.text);
-        } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
-          record.toolCalls.push({
-            tool: 'title' in update ? (update.title ?? update.toolCallId) : update.toolCallId,
-            at: new Date().toISOString(),
-          });
+          record.chunkChars += update.content.text.length;
+          touch();
+          debug(
+            tag,
+            'chunk (+' + update.content.text.length + ' chars):',
+            preview(update.content.text),
+          );
+        } else if (
+          update.sessionUpdate === 'tool_call' ||
+          update.sessionUpdate === 'tool_call_update'
+        ) {
+          const tool = 'title' in update ? (update.title ?? update.toolCallId) : update.toolCallId;
+          record.toolCalls.push({ tool, at: new Date().toISOString() });
+          touch();
+          debug(tag, update.sessionUpdate + ':', tool);
+        } else {
+          // See the DEBUG NOTE above — this branch existing at all is the fix.
+          touch();
+          debug(
+            tag,
+            'unhandled update kind:',
+            update.sessionUpdate,
+            '(counted as activity, not acted on)',
+          );
         }
       }
     } catch (err) {
       record.status = 'failed';
       record.error = (err as Error).message;
+      console.error(
+        '[hermes:live]',
+        tag,
+        'drain loop failed after',
+        Date.now() - record.startedAt,
+        'ms,',
+        record.updateCount,
+        'update(s) received:',
+        (err as Error).message,
+      );
+      if ((err as Error).stack) console.error((err as Error).stack);
     }
   }
 
@@ -226,14 +340,44 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
         request._meta = { enabled_toolsets: input.tools ?? [] };
         const session = await conn.agent.buildSession(request).start();
 
-        const record: TaskRecord = { status: 'running', log: ['started'], toolCalls: [], session };
+        const now = Date.now();
+        const record: TaskRecord = {
+          status: 'running',
+          log: ['started'],
+          toolCalls: [],
+          session,
+          startedAt: now,
+          lastActivityAt: now,
+          updateCount: 0,
+          chunkChars: 0,
+        };
         tasks.set(session.sessionId, record);
 
-        session.prompt(input.context ? input.goal + '\n\nContext:\n' + JSON.stringify(input.context) : input.goal);
+        debug(
+          session.sessionId.slice(0, 8),
+          'started | goal:',
+          preview(input.goal),
+          '| tools exposed:',
+          (input.tools ?? []).length ? (input.tools ?? []).join(', ') : '(none)',
+          '| session start took',
+          Date.now() - started,
+          'ms',
+        );
+
+        session.prompt(
+          input.context
+            ? input.goal + '\n\nContext:\n' + JSON.stringify(input.context)
+            : input.goal,
+        );
         void drain(record);
 
-        return { ok: true, data: { taskId: session.sessionId }, meta: meta('startTask', started, 'hermes-acp://local') };
+        return {
+          ok: true,
+          data: { taskId: session.sessionId },
+          meta: meta('startTask', started, 'hermes-acp://local'),
+        };
       } catch (err) {
+        console.error('[hermes:live] startTask failed:', (err as Error).message);
         return failure('startTask', started, 'UPSTREAM', (err as Error).message);
       }
     },
@@ -243,10 +387,30 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       const record = tasks.get(taskId);
       if (!record) return failure('pollTask', started, 'BAD_INPUT', 'Unknown taskId: ' + taskId);
 
+      const tag = taskId.slice(0, 8);
+      const elapsedMs = Date.now() - record.startedAt;
+      const sinceActivityMs = Date.now() - record.lastActivityAt;
+
+      // THE key debug line for "is this actually stuck". Every poll from
+      // orchestrator.ts prints exactly what this adapter knows right now:
+      // how long it's been running, how long since anything actually
+      // happened, and what it has to show for it so far.
+      debug(
+        tag,
+        'poll | status=' + record.status,
+        '| elapsed=' + (elapsedMs / 1000).toFixed(1) + 's',
+        '| idle=' + (sinceActivityMs / 1000).toFixed(1) + 's',
+        '| updates=' + record.updateCount,
+        '| chunkChars=' + record.chunkChars,
+        '| toolCalls=' + record.toolCalls.length,
+      );
+
+      const lastActivityAt = new Date(record.lastActivityAt).toISOString();
+
       if (record.status === 'running') {
         return {
           ok: true,
-          data: { status: 'running', log: record.log },
+          data: { status: 'running', log: record.log, lastActivityAt },
           meta: meta('pollTask', started, 'hermes-acp://local'),
         };
       }
@@ -257,6 +421,7 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           result: record.result,
           log: record.error ? [...record.log, record.error] : record.log,
           toolCalls: record.toolCalls,
+          lastActivityAt,
         },
         meta: meta('pollTask', started, 'hermes-acp://local'),
       };
@@ -266,6 +431,18 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       const started = Date.now();
       const record = tasks.get(taskId);
       if (!record) return { ok: true, data: null, meta: meta('cancelTask', started, null) };
+
+      const tag = taskId.slice(0, 8);
+      debug(
+        tag,
+        'cancelling | elapsed=' + ((Date.now() - record.startedAt) / 1000).toFixed(1) + 's',
+        '| idle=' + ((Date.now() - record.lastActivityAt) / 1000).toFixed(1) + 's',
+        '| updates=' + record.updateCount,
+        '| toolCalls=' + record.toolCalls.length,
+        record.updateCount === 0
+          ? '<- ZERO updates ever received: likely never got a first response, not a mid-task hang'
+          : '',
+      );
 
       try {
         const conn = await connect();

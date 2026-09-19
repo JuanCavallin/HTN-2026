@@ -76,10 +76,32 @@ export interface AgentTaskSpec {
   /** The graph node this task belongs to. See Step.nodeId. */
   nodeId?: string;
   parentStepId?: string | null;
-  /** How often to poll while the task runs. Default 400ms. */
+  /** How often to poll while the task runs. Default 1500ms — see orchestrator.ts. */
   pollIntervalMs?: number;
-  /** Give up and cancel after this many polls, so a stuck task can't hang the run. Default 20. */
+  /**
+   * ABSOLUTE safety ceiling: give up after this many polls no matter what,
+   * so a genuinely hung task cannot hold a run open forever. Default 400
+   * (~10 minutes at the default interval).
+   *
+   * In practice `inactivityTimeoutMs` below is what actually ends a stuck
+   * task — it fires much sooner, because a real hang produces no new
+   * activity long before ten minutes of wall clock pass. This ceiling is the
+   * backstop for a runtime that keeps reporting fresh activity indefinitely.
+   */
   maxPolls?: number;
+  /**
+   * Give up if the runtime reports NO activity (no chunk, no tool call —
+   * see `lastActivityAt`) for this long, even though polling itself hasn't
+   * hit `maxPolls` yet. Default 120_000 (2 minutes).
+   *
+   * This is the fix for "a real task that's just slow gets killed at the same
+   * moment as one that's truly stuck" — a harness that keeps reporting
+   * progress is left alone regardless of total elapsed time, while one that
+   * goes silent is caught well before the absolute ceiling. Only enforced
+   * when the runtime actually reports `lastActivityAt`; a runtime that
+   * cannot (see AgentRuntimeAdapter.pollTask) falls back to `maxPolls` alone.
+   */
+  inactivityTimeoutMs?: number;
 }
 
 export interface AgentTaskResult {

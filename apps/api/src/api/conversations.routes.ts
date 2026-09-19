@@ -24,15 +24,36 @@ export const conversationsRouter: Router = Router();
 
 const messageSchema = z.object({ text: z.string().min(1).max(4000) });
 
+/**
+ * `graphId` is optional and, when given, SEEDS the conversation with the graph
+ * it should edit.
+ *
+ * Without this there is no way to open an existing graph, describe a change,
+ * and have the chat modify THAT graph: `graphId` is set only by the first
+ * message a conversation itself produces (see the handler below), so chatting
+ * from a page that already has a graph loaded would silently build an
+ * unrelated new one instead of editing what's on screen.
+ */
+const createConversationSchema = z.object({ graphId: z.string().min(1).optional() });
+
 conversationsRouter.get('/conversations', async (_req, res) => {
   res.json({ conversations: await store.listConversations() });
 });
 
-conversationsRouter.post('/conversations', async (_req, res) => {
+conversationsRouter.post('/conversations', validate(createConversationSchema), async (req, res) => {
+  const { graphId } = valid<z.infer<typeof createConversationSchema>>(req, 'body');
+
+  // A bad id here would otherwise surface later as a confusing 404 or,
+  // worse, be silently ignored by synthesis's own currentGraph lookup.
+  if (graphId && !(await store.getGraph(graphId))) {
+    throw new HttpError(404, 'NOT_FOUND', 'No graph with id "' + graphId + '"');
+  }
+
   const at = nowIso();
   const conversation: Conversation = {
     id: newId('conv'),
     title: 'New workflow',
+    graphId,
     messages: [],
     createdAt: at,
     updatedAt: at,

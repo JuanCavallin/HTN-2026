@@ -517,6 +517,48 @@ async function main() {
     (chatDone?.scheduleDecisions ?? []).length + ' routing decision(s)',
   );
 
+  // REGRESSION GUARD. Opening an EXISTING graph and chatting a change must
+  // edit that graph, not silently fork an unrelated new one -- the frontend
+  // has no way to seed this without POST /conversations accepting a graphId,
+  // and forgetting to wire it is invisible until someone notices their edit
+  // produced a different document than the one they were looking at.
+  console.log('\n9b. Chatting on an EXISTING graph edits that graph, not a fork of it');
+  const { body: beforeEdit } = await api('/api/graphs/graph_demo');
+  const seededConv = await api('/api/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ graphId: beforeEdit.graph.id }),
+  });
+  check(
+    'the conversation is seeded with graphId on creation',
+    seededConv.body?.conversation?.graphId === beforeEdit.graph.id,
+  );
+  const seededTurn = await api(
+    '/api/conversations/' + seededConv.body.conversation.id + '/messages',
+    {
+      method: 'POST',
+      body: JSON.stringify({ text: 'also check email for overdue notices' }),
+    },
+  );
+  check(
+    'the edit landed on the SAME graph id',
+    seededTurn.body?.graph?.id === beforeEdit.graph.id,
+    seededTurn.body?.graph?.id + ' vs ' + beforeEdit.graph.id,
+  );
+  check(
+    'and bumped its version rather than creating v1 of something new',
+    seededTurn.body?.graph?.version === beforeEdit.graph.version + 1,
+    'v' + beforeEdit.graph.version + ' -> v' + seededTurn.body?.graph?.version,
+  );
+  const badSeed = await api('/api/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ graphId: 'graph_does_not_exist' }),
+  });
+  check(
+    'seeding with an unknown graphId is rejected up front',
+    badSeed.status === 404,
+    'status ' + badSeed.status,
+  );
+
   console.log('\n10. Rejection path');
   const second = await api('/api/runs', {
     method: 'POST',

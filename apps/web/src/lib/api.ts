@@ -139,8 +139,12 @@ export const api = {
 
   /* --------------------------------------------------------- Conversations */
 
-  createConversation: () =>
-    request<{ conversation: Conversation }>('/conversations', { method: 'POST' }),
+  /** `graphId` seeds the conversation so its first message EDITS that graph. */
+  createConversation: (graphId?: string) =>
+    request<{ conversation: Conversation }>('/conversations', {
+      method: 'POST',
+      body: JSON.stringify({ graphId }),
+    }),
 
   conversation: (id: string) =>
     request<{ conversation: Conversation; graph: AgentGraph | null }>('/conversations/' + id),

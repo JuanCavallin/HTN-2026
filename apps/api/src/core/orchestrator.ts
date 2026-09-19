@@ -342,13 +342,28 @@ export class Orchestrator {
           providerId: providerFor('agent.runtime'),
         });
 
-        // 1.5s x 40 = 60s total budget. A real Hermes turn commonly takes
-        // several seconds per model call and 40+ seconds for a slow tool call
-        // (observed directly against a live install) — the old 400ms x 20
-        // (~8s) default was sized for the mock and would cancel a real,
-        // healthy call almost immediately.
+        // TWO SEPARATE BUDGETS, not one:
+        //
+        //   maxPolls           absolute safety ceiling. 1.5s x 400 ~= 10 min.
+        //                      This almost never fires — see below.
+        //   inactivityTimeoutMs  the one that actually ends a stuck task. A
+        //                      harness that keeps reporting fresh activity
+        //                      (see AgentRuntimeAdapter.pollTask.lastActivityAt)
+        //                      is left running regardless of total elapsed
+        //                      time; one that goes silent is cut off long
+        //                      before the absolute ceiling.
+        //
+        // Previously this was a single 1.5s x 40 (~60s) poll-count cutoff,
+        // which killed a real, healthy-but-slow Hermes task (several seconds
+        // per model call, 40+ seconds observed for a single slow tool call)
+        // at the exact same moment it would have killed one that was
+        // genuinely hung — there was no way to tell the two apart from the
+        // terminal. A harness that cannot report lastActivityAt (see the mock,
+        // or a future non-Hermes adapter) falls back to maxPolls alone,
+        // unchanged from before.
         const pollIntervalMs = spec.pollIntervalMs ?? 1500;
-        const maxPolls = spec.maxPolls ?? 40;
+        const maxPolls = spec.maxPolls ?? 400;
+        const inactivityTimeoutMs = spec.inactivityTimeoutMs ?? 120_000;
 
         try {
           // 1. Route BEFORE starting the task. This is where tool/model
@@ -406,6 +421,14 @@ export class Orchestrator {
           let toolCalls: { tool: string; args?: unknown; at: string }[] = [];
           let finalResult: unknown = null;
           let completed = false;
+          let stopReason: 'inactive' | 'max_polls' | null = null;
+
+          const pollingStartedAt = Date.now();
+          // Anchors the inactivity clock until the harness reports its own
+          // lastActivityAt (see below) — without this, a harness that DOES
+          // report activity but hasn't sent its first update yet would look
+          // "inactive since forever" on attempt 0 and time out instantly.
+          let lastKnownActivityAt = pollingStartedAt;
 
           for (let attempt = 0; attempt < maxPolls; attempt += 1) {
             if (signal.aborted) throw new Error('Run aborted while awaiting agent task');
@@ -424,16 +447,59 @@ export class Orchestrator {
               completed = true;
               break;
             }
+
+            if (polled.data.lastActivityAt) {
+              lastKnownActivityAt = Date.parse(polled.data.lastActivityAt);
+            }
+            const elapsedMs = Date.now() - pollingStartedAt;
+            const idleMs = Date.now() - lastKnownActivityAt;
+
+            // Terminal visibility into the poll loop itself, independent of
+            // whatever the harness adapter logs on its own side (Hermes's
+            // live adapter logs its own detailed line per poll too — this one
+            // is what the ORCHESTRATOR sees and is deciding on).
+            console.log(
+              '[agent_task]',
+              step.id,
+              'poll ' + (attempt + 1) + '/' + maxPolls,
+              '| elapsed=' + (elapsedMs / 1000).toFixed(1) + 's',
+              '| idle=' + (idleMs / 1000).toFixed(1) + 's',
+              '| toolCalls=' + (polled.data.toolCalls?.length ?? 0),
+            );
+
+            if (idleMs >= inactivityTimeoutMs) {
+              stopReason = 'inactive';
+              break;
+            }
+
             await sleep(pollIntervalMs);
           }
 
           if (!completed) {
+            stopReason ??= 'max_polls';
             await runtime.cancelTask(
               taskId,
               buildCallContext({ stepId: step.id, policyRule: 'poll-timeout-cancel' }),
             );
             throw new Error(
-              'Agent task ' + taskId + ' did not complete within ' + maxPolls + ' polls',
+              stopReason === 'inactive'
+                ? 'Agent task ' +
+                    taskId +
+                    ' produced no activity for ' +
+                    (inactivityTimeoutMs / 1000).toFixed(0) +
+                    's and was treated as stuck (' +
+                    ((Date.now() - pollingStartedAt) / 1000).toFixed(0) +
+                    's total). Check the terminal for [hermes:live] logs around this task — ' +
+                    'an "unhandled update kind" line there means Hermes was actually active but ' +
+                    'sending something this adapter did not recognise, not that it was truly idle.'
+                : 'Agent task ' +
+                    taskId +
+                    ' did not complete within ' +
+                    maxPolls +
+                    ' polls (' +
+                    ((Date.now() - pollingStartedAt) / 1000).toFixed(0) +
+                    's) despite ongoing activity — raise maxPolls if this task is legitimately ' +
+                    'this long-running, or investigate why it never converges.',
             );
           }
 
