@@ -22,6 +22,7 @@ import {
   removeEdge,
   removeNode,
 } from '../services/graphs.service.js';
+import { optimizeGraph } from '../services/optimization.service.js';
 import { HttpError, param, valid, validate } from './middleware/validate.js';
 
 export const graphsRouter: Router = Router();
@@ -86,6 +87,16 @@ graphsRouter.delete('/graphs/:id', async (req, res) => {
   const removed = await deleteGraph(param(req, 'id'));
   if (!removed) throw new HttpError(404, 'NOT_FOUND', 'Graph not found');
   res.status(204).end();
+});
+
+/**
+ * Self-improving graph generation. Critiques this graph's own run history,
+ * asks the existing synthesiser for an improvement, and lands the result as a
+ * NEW forked graph -- this graph itself is never mutated, never auto-applied.
+ */
+graphsRouter.post('/graphs/:id/optimize', async (req, res) => {
+  const result = await optimizeGraph(param(req, 'id'));
+  res.status(201).json(result);
 });
 
 /* ------------------------------------------------------------------- Nodes */

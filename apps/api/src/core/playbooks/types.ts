@@ -91,6 +91,10 @@ export interface AgentTaskSpec {
   maxPolls?: number;
   /** Maximum Hermes turns in the AgentOS outer loop. Defaults to 3. */
   maxTurns?: number;
+  /** Give up once the task has run this long overall, regardless of poll/turn budget. */
+  maxDurationMs?: number;
+  /** Give up once this many of the task's tool calls have failed. */
+  maxFailedToolCalls?: number;
 }
 
 export interface AgentTaskResult {

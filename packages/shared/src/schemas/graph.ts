@@ -171,6 +171,10 @@ export const dispatchNodeSchema = nodeVariant(
      * whole job to a harness.
      */
     argsFrom: z.enum(['static', 'model']).default('static'),
+    /** Only used when argsFrom is 'model'. Defaults to 'cheap', same as before. */
+    argsModelTier: modelTierSchema.optional(),
+    /** Only used when argsFrom is 'model'; has no effect on tool selection. */
+    argsTemperature: z.number().min(0).max(1).optional(),
     evidence: z.string().optional(),
     /** See toolNodeSchema.actionKind. Applies to whichever tool is chosen. */
     actionKind: z.string().min(1).optional(),
@@ -193,6 +197,7 @@ export const decideNodeSchema = nodeVariant(
     system: z.string().optional(),
     tier: modelTierSchema.optional(),
     maxTokens: z.number().int().min(1).max(8192).optional(),
+    temperature: z.number().min(0).max(1).optional(),
   }),
 );
 

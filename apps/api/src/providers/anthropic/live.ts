@@ -110,6 +110,7 @@ export function createLiveAnthropic(cfg: ProviderConfig): TextModelAdapter {
           max_tokens: input.maxTokens ?? 1024,
           system: input.system,
           messages: [{ role: 'user', content: input.prompt }],
+          ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
         });
 
         const text = message.content

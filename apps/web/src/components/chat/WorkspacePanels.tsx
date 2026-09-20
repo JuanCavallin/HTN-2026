@@ -13,6 +13,13 @@ import {
   type Trace,
 } from '../../lib/workspace';
 
+/**
+ * preview  - synthetic, labelled walkthrough; no network.
+ * backend  - one supervised `agent` run from the goal.
+ * workflow - chat-to-graph: drafts a workflow document to review before anything runs.
+ */
+export type ComposerMode = 'preview' | 'backend' | 'workflow';
+
 export function TaskComposer({
   onSend,
   busy = false,
@@ -25,8 +32,8 @@ export function TaskComposer({
   onSend: (text: string) => Promise<boolean>;
   busy?: boolean;
   disabled?: boolean;
-  mode: 'preview' | 'backend';
-  onModeChange?: (mode: 'preview' | 'backend') => void;
+  mode: ComposerMode;
+  onModeChange?: (mode: ComposerMode) => void;
   placeholder?: string;
   hint?: string;
 }) {
@@ -65,10 +72,11 @@ export function TaskComposer({
                 aria-label="Execution mode"
                 value={mode}
                 disabled={busy}
-                onChange={(event) => onModeChange(event.target.value as 'preview' | 'backend')}
+                onChange={(event) => onModeChange(event.target.value as ComposerMode)}
               >
                 <option value="preview">Preview mode</option>
-                <option value="backend">Use backend</option>
+                <option value="backend">Run as agent task</option>
+                <option value="workflow">Build a workflow</option>
               </select>
             ) : (
               <span>Backend run</span>
@@ -89,7 +97,9 @@ export function TaskComposer({
         {hint ??
           (mode === 'preview'
             ? 'Preview uses synthetic data. No models or tools are called.'
-            : 'Sending starts a workflow. Required action approvals still apply.')}
+            : mode === 'workflow'
+              ? 'Drafts a workflow graph you can review and edit. Nothing runs until you press Run.'
+              : 'Sending starts a supervised agent run. Required action approvals still apply.')}
       </p>
     </div>
   );

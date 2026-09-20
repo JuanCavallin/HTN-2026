@@ -139,7 +139,10 @@ export function useRunStream(runId: string | undefined, reconnectKey = 0): RunSt
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+    // reconnectKey too: a manual reconnect resets the view below, and if the stream then
+    // replays nothing the run -- and with it the graph snapshot the canvas is drawn from --
+    // would stay gone. Refetching here is what brings the graph back.
+  }, [runId, reconnectKey]);
 
   useEffect(() => {
     dispatch({ type: 'reset' });

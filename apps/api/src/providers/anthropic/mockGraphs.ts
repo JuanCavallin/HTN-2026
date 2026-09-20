@@ -199,6 +199,71 @@ function requestPortion(prompt: string): string {
 }
 
 /**
+ * Self-improvement requests (see optimization.service.ts) are marked with a
+ * literal `OPTIMIZE: ` prefix so the mock never mistakes one for a fresh
+ * synthesis request and swaps in an unrelated fixture. buildSynthesisUserPrompt
+ * embeds the current graph as a JSON blob right before the "REQUEST: " marker,
+ * so it is parsed back out of the prompt here rather than threaded through a
+ * new field on the model call -- keeps this change to one file.
+ */
+function extractCurrentGraphFromPrompt(prompt: string): Record<string, unknown> | null {
+  const marker = prompt.lastIndexOf('REQUEST: ');
+  const head = marker === -1 ? prompt : prompt.slice(0, marker);
+  const start = head.indexOf('{');
+  const end = head.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) return null;
+  try {
+    return JSON.parse(head.slice(start, end + 1)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+const DEFAULT_MAX_TOKENS = 2048;
+/** A quarter off, never below a usable floor: 256 -> 1 would propose a broken node. */
+const MAX_TOKENS_FACTOR = 0.75;
+const MIN_MAX_TOKENS = 128;
+const DEFAULT_MAX_DURATION_MS = 300_000;
+const MAX_DURATION_STEP_MS = 60_000;
+const MIN_MAX_DURATION_MS = 60_000;
+
+/**
+ * Exactly ONE small, deterministic tune -- never a fixture swap. Tries the
+ * cheapest lever first: a `decide` node's tier, then its token budget, then an
+ * `agent_task`'s time budget, and finally a no-op-looking description tweak so
+ * there is always SOME visible diff even on a graph with neither node type.
+ */
+function applyOptimizeMutation(current: Record<string, unknown>): Record<string, unknown> {
+  const nodes = Array.isArray(current.nodes) ? (current.nodes as Record<string, unknown>[]) : [];
+
+  const decideNode = nodes.find((n) => n.type === 'decide');
+  if (decideNode) {
+    const config = { ...(decideNode.config as Record<string, unknown>) };
+    if (config.tier !== 'cheap') {
+      config.tier = 'cheap';
+    } else {
+      const maxTokens = typeof config.maxTokens === 'number' ? config.maxTokens : DEFAULT_MAX_TOKENS;
+      config.maxTokens = Math.max(MIN_MAX_TOKENS, Math.round(maxTokens * MAX_TOKENS_FACTOR));
+    }
+    decideNode.config = config;
+    return current;
+  }
+
+  const agentTaskNode = nodes.find((n) => n.type === 'agent_task');
+  if (agentTaskNode) {
+    const config = { ...(agentTaskNode.config as Record<string, unknown>) };
+    const maxDurationMs =
+      typeof config.maxDurationMs === 'number' ? config.maxDurationMs : DEFAULT_MAX_DURATION_MS;
+    config.maxDurationMs = Math.max(MIN_MAX_DURATION_MS, maxDurationMs - MAX_DURATION_STEP_MS);
+    agentTaskNode.config = config;
+    return current;
+  }
+
+  const description = typeof current.description === 'string' ? current.description : '';
+  return { ...current, description: description + ' (tuned)' };
+}
+
+/**
  * Deterministic keyword match. No randomness anywhere: the same request always
  * produces the same graph, which is what makes the demo rehearsable.
  *
@@ -208,7 +273,14 @@ function requestPortion(prompt: string): string {
  * demoing an edit without keys.
  */
 export function mockGraphFor(prompt: string): string {
-  const haystack = requestPortion(prompt).toLowerCase();
+  const request = requestPortion(prompt);
+
+  if (request.trimStart().toUpperCase().startsWith('OPTIMIZE:')) {
+    const current = extractCurrentGraphFromPrompt(prompt);
+    if (current) return JSON.stringify(applyOptimizeMutation(current));
+  }
+
+  const haystack = request.toLowerCase();
   const hit = FIXTURES.find((fixture) => fixture.match.some((word) => haystack.includes(word)));
   return JSON.stringify(hit ? hit.body : DEFAULT_FIXTURE);
 }

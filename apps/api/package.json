@@ -8,6 +8,7 @@
     "start": "tsx --env-file-if-exists=../../.env src/index.ts",
     "typecheck": "tsc --noEmit",
     "check:graph": "tsx scripts/graph-schema.check.ts",
+    "check:graph-critique": "tsx scripts/graph-critique.check.ts",
     "check:analytics": "tsx scripts/analytics-parity.check.ts",
     "check:jev:decisions": "tsx scripts/jev-decisions.check.ts",
     "check:model-gateway": "tsx scripts/model-gateway.check.ts",

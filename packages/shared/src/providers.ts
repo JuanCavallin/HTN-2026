@@ -348,6 +348,8 @@ export interface TextModelAdapter extends ProviderAdapter {
       json?: boolean;
       /** Jev's model-tier recommendation. Defaults to 'standard' if omitted. */
       tier?: ModelTier;
+      /** 0-1. Omit to use the provider's own default. */
+      temperature?: number;
     },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<{ text: string; tokensIn: number; tokensOut: number }>>;

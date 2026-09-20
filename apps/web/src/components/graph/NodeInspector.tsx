@@ -332,6 +332,43 @@ function TypeFields({
               <option value="model">model -- one extra completion infers the args</option>
             </select>
           </Field>
+          {node.config.argsFrom === 'model' && (
+            <>
+              <Field
+                label="Argument model tier"
+                hint="Only affects how arguments are generated, not which tool is picked."
+              >
+                <select
+                  className={inputClass}
+                  value={node.config.argsModelTier ?? ''}
+                  onChange={(e) => onCommit({ argsModelTier: e.target.value || undefined })}
+                >
+                  <option value="">default (cheap)</option>
+                  <option value="cheap">cheap</option>
+                  <option value="standard">standard</option>
+                  <option value="frontier">frontier</option>
+                </select>
+              </Field>
+              <Field
+                label="Argument temperature (optional)"
+                hint="Only affects how arguments are generated, not which tool is picked."
+              >
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  className={inputClass}
+                  defaultValue={node.config.argsTemperature ?? ''}
+                  onBlur={(e) =>
+                    onCommit({
+                      argsTemperature: e.target.value ? Number(e.target.value) : undefined,
+                    })
+                  }
+                />
+              </Field>
+            </>
+          )}
           <JsonField
             label="Args per candidate tool"
             value={node.config.args}
@@ -406,6 +443,19 @@ function TypeFields({
               defaultValue={node.config.maxTokens ?? ''}
               onBlur={(e) =>
                 onCommit({ maxTokens: e.target.value ? Number(e.target.value) : undefined })
+              }
+            />
+          </Field>
+          <Field label="Temperature (optional)">
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.1}
+              className={inputClass}
+              defaultValue={node.config.temperature ?? ''}
+              onBlur={(e) =>
+                onCommit({ temperature: e.target.value ? Number(e.target.value) : undefined })
               }
             />
           </Field>
@@ -493,6 +543,34 @@ function TypeFields({
                   onBlur={(e) =>
                     onCommit({
                       inactivityTimeoutMs: e.target.value ? Number(e.target.value) : undefined,
+                    })
+                  }
+                />
+              </Field>
+              <Field label="Max duration (ms)" hint="Stop the task after this many ms">
+                <input
+                  type="number"
+                  min={1000}
+                  max={1_800_000}
+                  className={inputClass}
+                  defaultValue={node.config.maxDurationMs ?? ''}
+                  onBlur={(e) =>
+                    onCommit({
+                      maxDurationMs: e.target.value ? Number(e.target.value) : undefined,
+                    })
+                  }
+                />
+              </Field>
+              <Field label="Max failed tool calls" hint="Stop after this many failed tool calls">
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  className={inputClass}
+                  defaultValue={node.config.maxFailedToolCalls ?? ''}
+                  onBlur={(e) =>
+                    onCommit({
+                      maxFailedToolCalls: e.target.value ? Number(e.target.value) : undefined,
                     })
                   }
                 />

@@ -28,7 +28,8 @@ authorized, and what needs a human first.
 pnpm install && pnpm dev
 ```
 
-Open http://localhost:5173. Type a goal, or go to **Runs** and launch the **Demo run**.
+Open http://localhost:5173. Pick a composer mode and type a goal, or go to **Runs** and launch
+the **Demo run**.
 
 There is no `.env` step. With no API keys at all, every provider falls back to a mock and
 the full demo runs end to end — deliberately, not as a placeholder. To go live, copy
@@ -39,7 +40,7 @@ the full demo runs end to end — deliberately, not as a placeholder. To go live
 | ----------------------- | ----------------------------------------------------------------- |
 | `pnpm dev`              | api on :8787 and web on :5173                                     |
 | `pnpm typecheck`        | all three packages                                                |
-| `pnpm test`             | the 11 `check:*` invariant suites + web unit tests (what CI runs) |
+| `pnpm test`             | the 12 `check:*` invariant suites + web unit tests (what CI runs) |
 | `pnpm build`            | production build of the web app                                   |
 | `pnpm smoke`            | end-to-end test against a running api                             |
 | `pnpm smoke:live`       | same, against live providers (costs real money)                   |
@@ -81,6 +82,14 @@ flowchart LR
 6. Jev judges completion from canonical session state: `done`, `continue`, or `blocked`
    (which pauses the run for you rather than failing it).
 
+**Self-improving workflows.** `POST /api/graphs/:id/optimize` (the editor's **Suggest an
+improvement**) critiques a workflow's own run history — failing checks, per-node cost and
+latency outliers, tool-selection divergence, and the gap to its single-call baseline — and
+feeds that to the same synthesiser that drafts workflows from chat. The result always lands as
+a **new forked graph** to review: the source is never modified, nothing runs, fewer than three
+runs is flagged low-confidence, and any success check the proposal tries to add is stripped
+(a proposal may not grade itself).
+
 Playbook kinds (`apps/api/src/core/playbooks/registry.ts`): **`agent`** — the main composer,
 one supervised task from a plain goal · **`demo`** — scripted tour of every subsystem, works
 with zero keys · **`graph`** — run a workflow authored on the canvas · **`baseline`** — a
@@ -90,11 +99,11 @@ single LLM call, the control for the Compare page.
 
 | Route          | What it is                                                                                 |
 | -------------- | ------------------------------------------------------------------------------------------ |
-| `/`            | Composer. Starts a supervised `agent` run. A labelled preview mode uses synthetic data.    |
+| `/`            | Composer, three modes: **Run as agent task** (one supervised `agent` run), **Build a workflow** (chat-to-graph: drafts a graph to review, runs nothing), **Preview** (labelled, synthetic) |
 | `/runs`        | History, live status, launch a playbook directly                                           |
 | `/runs/:id`    | Live trace: decisions, model calls, tool lifecycle, approvals, egress, pause/resume/cancel |
 | `/compare`     | Run vs baseline: tokens, cost, latency                                                     |
-| `/graphs`      | Workflow canvas                                                                            |
+| `/graphs`      | Workflow editor: canvas, per-node tuning, a chat panel that edits the open graph, **Run graph**, **Run + compare to baseline** |
 | `/connections` | Provider mode + health, Composio, generic MCP servers, reviewed tool inventory             |
 
 ## Providers

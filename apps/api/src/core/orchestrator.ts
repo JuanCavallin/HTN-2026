@@ -535,6 +535,11 @@ export class Orchestrator {
         const pollIntervalMs = spec.pollIntervalMs ?? 1500;
         const maxPolls = spec.maxPolls ?? 40;
         const maxTurns = spec.maxTurns ?? 3;
+        // Both undefined by default -- no wall-clock or failure ceiling beyond
+        // maxPolls/maxTurns unless the graph author opts in.
+        const maxDurationMs = spec.maxDurationMs;
+        const maxFailedToolCalls = spec.maxFailedToolCalls;
+        const startedAt = Date.now();
         let sessionStateId: string | undefined;
 
         try {
@@ -813,6 +818,29 @@ export class Orchestrator {
             let pollAttempts = 0;
             while (pollAttempts < maxPolls) {
               if (signal.aborted) throw new Error('Run aborted while awaiting agent task');
+
+              if (maxDurationMs !== undefined && Date.now() - startedAt >= maxDurationMs) {
+                await ctx.log(
+                  'warn',
+                  'Agent task ' + taskId + ' hit its maxDurationMs budget; stopping.',
+                );
+                break;
+              }
+              if (maxFailedToolCalls !== undefined) {
+                const failedCount = (await store.eventsSince(runId, 0)).filter(
+                  ({ event }) =>
+                    event.type === 'tool.lifecycle' &&
+                    event.lifecycle.stepId === step.id &&
+                    event.lifecycle.phase === 'failed',
+                ).length;
+                if (failedCount > maxFailedToolCalls) {
+                  await ctx.log(
+                    'warn',
+                    'Agent task ' + taskId + ' exceeded its maxFailedToolCalls budget; stopping.',
+                  );
+                  break;
+                }
+              }
 
               const polled = await runtime.pollTask(
                 taskId,

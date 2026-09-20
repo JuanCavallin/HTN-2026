@@ -53,6 +53,12 @@ supervised task:
   approval, plus a side-by-side comparison against a single-LLM-call baseline (tokens, cost,
   latency). You can pause, resume and cancel any run.
 
+- **Builds and improves its own workflows.** Describe a job in chat and Zephyr drafts a
+  workflow graph you can edit node by node (model tier, temperature, budgets) before anything
+  runs. After a few runs it critiques its own history — failing checks, cost and latency
+  outliers, the gap to a single-call baseline — and proposes an improved copy for you to
+  review. It never edits the original and never invents its own success criteria.
+
 It drives real browsers (Browserbase in the cloud, local Chrome for private data), and runs
 parallel browser workers as a swarm.
 
@@ -79,7 +85,7 @@ of zod schemas that both sides import, so the event stream is one contract.
   of crashing, so the full demo runs from a fresh clone with no keys at all.
 - **Streaming and persistence.** Runs stream over SSE with monotonic ids and `Last-Event-ID`
   replay; events persist to SQLite so a finished run rebuilds from history.
-- **Invariants as tests.** Eleven `check:*` suites pin the safety properties (secret egress
+- **Invariants as tests.** Twelve `check:*` suites pin the safety properties (secret egress
   blocked, revised approvals re-authorized, fail-closed tools, outbound-text check is
   escalate-only), run in CI with the typecheck and web tests.
 

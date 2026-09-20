@@ -362,6 +362,7 @@ async function runDecide(
           system: cfg.system,
           tier: cfg.tier,
           maxTokens: cfg.maxTokens ?? 512,
+          temperature: cfg.temperature,
         },
         ctx.callContext({
           stepId: step.id,
@@ -552,6 +553,46 @@ async function runTool(
 }
 
 /**
+ * Resolve the args for the tool `dispatch` selected. 'static' (default) costs
+ * zero extra tokens; 'model' spends one extra completion to infer them.
+ * argsModelTier/argsTemperature only reach THIS call — tool selection above
+ * goes through DecisionAdapter.decide() (Jev), which has no such knobs.
+ */
+async function dispatchArgs(
+  ctx: PlaybookContext,
+  cfg: Extract<GraphNode, { type: 'dispatch' }>['config'],
+  tool: string,
+  stepId: string,
+): Promise<Record<string, Json>> {
+  const staticArgs = (cfg.args[tool] ?? {}) as Record<string, Json>;
+  if (cfg.argsFrom !== 'model') return staticArgs;
+
+  const model = ctx.provider('text.model');
+  const res = await model.complete(
+    {
+      prompt:
+        'Goal: ' +
+        cfg.goal +
+        '\nSelected tool: ' +
+        tool +
+        '\nReturn ONLY a JSON object of arguments for this tool call.' +
+        (cfg.evidence ? '\nEvidence: ' + cfg.evidence : ''),
+      json: true,
+      maxTokens: 512,
+      tier: cfg.argsModelTier ?? 'cheap',
+      temperature: cfg.argsTemperature,
+    },
+    ctx.callContext({ stepId, policyRule: 'dispatch-arg-inference' }),
+  );
+  if (!res.ok) return staticArgs;
+  try {
+    return { ...staticArgs, ...(JSON.parse(res.data.text) as Record<string, Json>) };
+  } catch {
+    return staticArgs;
+  }
+}
+
+/**
  * THE CHEAP MIDDLE RUNG. The decision layer picks one tool from the candidate
  * set and we call it directly — no agent harness, so no multi-turn model loop.
  * One cheap decide plus one tool call.
@@ -609,7 +650,7 @@ async function runDispatch(
         rule: 'dispatch-selected-single-tool',
       });
 
-      const toolArgs = (cfg.args[tool] ?? {}) as Record<string, Json>;
+      const toolArgs = await dispatchArgs(ctx, cfg, tool, step.id);
 
       const result = await callToolGated(ctx, {
         stepId: step.id,
@@ -682,6 +723,8 @@ async function runAgentTaskNode(
     availableTools: cfg.availableTools,
     pollIntervalMs: cfg.pollIntervalMs,
     maxPolls: cfg.maxPolls,
+    maxDurationMs: cfg.maxDurationMs,
+    maxFailedToolCalls: cfg.maxFailedToolCalls,
   });
 
   return {

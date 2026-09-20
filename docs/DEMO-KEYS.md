@@ -96,7 +96,8 @@ BROWSER_MAX_SESSIONS=2        # raise to 3 if you want all three swarm workers a
    plan to mention must read **Live** and **Healthy**. Composio must show Gmail connected,
    and the tool inventory must list `mail.send` as `available`.
 3. Header button reads **Hermes** with a green dot (not "Hermes · Mock").
-4. On `/`, switch the composer from **Preview mode** to **Use backend**.
+4. On `/`, switch the composer from **Preview mode** to **Run as agent task** (or **Build a
+   workflow** for the chat-to-graph opening).
 5. `pnpm test:jev` — one real Jev decision end to end.
 6. Run the **Demo run** playbook once, approve it, and leave that finished run open in a tab.
 7. Do one full email rehearsal to an address you own.

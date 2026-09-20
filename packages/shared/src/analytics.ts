@@ -17,9 +17,9 @@
  * the bug is upstream in a provider adapter's `meta`, not in this file.
  */
 
-import type { Approval, EgressEvent, PauseSpan, Run, Step, StepStatus } from './domain.js';
+import type { Approval, EgressEvent, Json, PauseSpan, Run, Step, StepStatus } from './domain.js';
 import type { ModelTier } from './providers.js';
-import type { GraphAssertion } from './schemas/graph.js';
+import type { AgentGraph, GraphAssertion } from './schemas/graph.js';
 import type { ScheduleDecision } from './scheduling.js';
 
 /* -------------------------------------------------------------------------- */
@@ -401,4 +401,251 @@ export function evaluateAssertions(assertions: GraphAssertion[], steps: Step[]):
       passed: actual !== null && actual === assertion.expected,
     };
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Graph critique — feeds a graph's own run history back to the synthesiser   */
+/* -------------------------------------------------------------------------- */
+
+type ByRun<T> = Map<string, T[]> | Record<string, T[]>;
+
+function lookupByRun<T>(map: ByRun<T> | undefined, runId: string): T[] {
+  if (!map) return [];
+  return map instanceof Map ? (map.get(runId) ?? []) : (map[runId] ?? []);
+}
+
+export interface BuildGraphCritiqueInput {
+  graph: AgentGraph;
+  runs: Run[];
+  stepsByRun: ByRun<Step>;
+  /** rollup() needs the egress ledger for tokens/cost/latency per node. */
+  egressByRun?: ByRun<EgressEvent>;
+  scheduleDecisionsByRun?: ByRun<ScheduleDecision>;
+  approvalsByRun?: ByRun<Approval>;
+  /** Same-graph `baseline`-playbook runs, for the cost/latency/token comparison. */
+  baselineRuns?: Run[];
+  baselineStepsByRun?: ByRun<Step>;
+  baselineEgressByRun?: ByRun<EgressEvent>;
+}
+
+export interface AssertionRate {
+  id: string;
+  description: string;
+  passed: number;
+  total: number;
+}
+
+export interface NodeOutlier {
+  nodeId: string;
+  label?: string;
+  runId: string;
+  value: number;
+  median: number;
+}
+
+export interface ToolDivergenceOutlier {
+  nodeId: string;
+  label?: string;
+  runId: string;
+  tools: string[];
+}
+
+/** A failed agent_task step's self-reported partial progress, when present. */
+export interface FailureEvidence {
+  runId: string;
+  stepId: string;
+  nodeId?: string;
+  toolCallCount?: number;
+  toolCalls?: Json;
+}
+
+export interface BaselineComparison {
+  baselineRunsAnalyzed: number;
+  medianTokens: { graph: number; baseline: number };
+  medianCostCents: { graph: number; baseline: number };
+  medianLatencyMs: { graph: number; baseline: number };
+}
+
+export interface GraphCritique {
+  graphId: string;
+  runsAnalyzed: number;
+  /** Fewer than 3 runs analysed — treat every finding below as a hunch, not a trend. */
+  lowConfidence: boolean;
+  assertionFailures: AssertionRate[];
+  costOutliers: NodeOutlier[];
+  latencyOutliers: NodeOutlier[];
+  toolDivergenceOutliers: ToolDivergenceOutlier[];
+  failureEvidence: FailureEvidence[];
+  baselineComparison?: BaselineComparison;
+}
+
+/**
+ * A node's cost/latency counts as an outlier only when it clears BOTH bars: a
+ * relative jump over its OWN median across the analysed runs, and an absolute
+ * floor so noise on a near-free node (2 cents vs a median of 1) never reports
+ * as "a 2x outlier".
+ */
+const OUTLIER_RATIO = 1.5;
+const COST_OUTLIER_FLOOR_CENTS = 5;
+const LATENCY_OUTLIER_FLOOR_MS = 500;
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
+
+/**
+ * Feed a graph's own run results back to the synthesiser as a critique it can
+ * act on. PURE — no store access, no provider call. The caller (optimization
+ * service) does the fetching; this just reduces what it hands over.
+ */
+export function buildGraphCritique(input: BuildGraphCritiqueInput): GraphCritique {
+  const { graph, runs } = input;
+
+  const bundles: RollupInput[] = runs.map((run) => ({
+    run,
+    steps: lookupByRun(input.stepsByRun, run.id),
+    egress: lookupByRun(input.egressByRun, run.id),
+    scheduleDecisions: lookupByRun(input.scheduleDecisionsByRun, run.id),
+    approvals: lookupByRun(input.approvalsByRun, run.id),
+  }));
+  const analyzed = bundles.map((bundle) => ({
+    run: bundle.run,
+    steps: bundle.steps,
+    analytics: rollup(bundle),
+  }));
+
+  // Assertions: pass/total per assertion id, across every analysed run.
+  const assertions = graph.assertions ?? [];
+  const tally = new Map<string, { description: string; passed: number; total: number }>();
+  for (const { steps } of analyzed) {
+    for (const result of evaluateAssertions(assertions, steps)) {
+      const entry = tally.get(result.id) ?? { description: result.description, passed: 0, total: 0 };
+      entry.total += 1;
+      if (result.passed) entry.passed += 1;
+      tally.set(result.id, entry);
+    }
+  }
+  const assertionFailures: AssertionRate[] = [...tally.entries()]
+    .filter(([, t]) => t.passed < t.total)
+    .map(([id, t]) => ({ id, description: t.description, passed: t.passed, total: t.total }));
+
+  // Per-node cost/latency/tool-divergence, grouped so each node is judged
+  // against its OWN history rather than against every other node's scale.
+  const byNode = new Map<
+    string,
+    { runId: string; cost: number; latency: number; label?: string; toolDivergence?: string[] }[]
+  >();
+  for (const { run, analytics } of analyzed) {
+    for (const node of analytics.nodes) {
+      if (!node.nodeId) continue;
+      const list = byNode.get(node.nodeId) ?? [];
+      list.push({
+        runId: run.id,
+        cost: node.estimatedCostCents,
+        latency: node.wallMs,
+        label: node.label,
+        toolDivergence: node.toolDivergence,
+      });
+      byNode.set(node.nodeId, list);
+    }
+  }
+
+  const costOutliers: NodeOutlier[] = [];
+  const latencyOutliers: NodeOutlier[] = [];
+  const toolDivergenceOutliers: ToolDivergenceOutlier[] = [];
+
+  for (const [nodeId, samples] of byNode) {
+    const costMedian = median(samples.map((s) => s.cost));
+    const latencyMedian = median(samples.map((s) => s.latency));
+    for (const sample of samples) {
+      if (sample.cost > costMedian * OUTLIER_RATIO && sample.cost > COST_OUTLIER_FLOOR_CENTS) {
+        costOutliers.push({
+          nodeId,
+          label: sample.label,
+          runId: sample.runId,
+          value: sample.cost,
+          median: costMedian,
+        });
+      }
+      if (sample.latency > latencyMedian * OUTLIER_RATIO && sample.latency > LATENCY_OUTLIER_FLOOR_MS) {
+        latencyOutliers.push({
+          nodeId,
+          label: sample.label,
+          runId: sample.runId,
+          value: sample.latency,
+          median: latencyMedian,
+        });
+      }
+      if (sample.toolDivergence && sample.toolDivergence.length > 0) {
+        toolDivergenceOutliers.push({
+          nodeId,
+          label: sample.label,
+          runId: sample.runId,
+          tools: sample.toolDivergence,
+        });
+      }
+    }
+  }
+
+  // A failed agent_task's output MAY carry partial progress the harness
+  // reported before it died -- surface it as evidence when it is there.
+  const failureEvidence: FailureEvidence[] = [];
+  for (const { run, steps } of analyzed) {
+    for (const step of steps) {
+      if (step.status !== 'failed' || step.kind !== 'agent_task') continue;
+      const output = step.output;
+      if (!output || typeof output !== 'object' || Array.isArray(output)) continue;
+      const record = output as Record<string, unknown>;
+      if (record.partial !== true) continue;
+      failureEvidence.push({
+        runId: run.id,
+        stepId: step.id,
+        nodeId: step.nodeId,
+        toolCallCount: typeof record.toolCallCount === 'number' ? record.toolCallCount : undefined,
+        toolCalls: 'toolCalls' in record ? (record.toolCalls as Json) : undefined,
+      });
+    }
+  }
+
+  // Baseline comparison: same-graph naive-run medians vs this graph's medians.
+  let baselineComparison: BaselineComparison | undefined;
+  if (input.baselineRuns && input.baselineRuns.length > 0) {
+    const baselineAnalytics = input.baselineRuns.map((run) =>
+      rollup({
+        run,
+        steps: lookupByRun(input.baselineStepsByRun, run.id),
+        egress: lookupByRun(input.baselineEgressByRun, run.id),
+      }),
+    );
+    const graphTokens = analyzed.map((a) => a.analytics.totals.tokensIn + a.analytics.totals.tokensOut);
+    const baselineTokens = baselineAnalytics.map((a) => a.totals.tokensIn + a.totals.tokensOut);
+
+    baselineComparison = {
+      baselineRunsAnalyzed: input.baselineRuns.length,
+      medianTokens: { graph: median(graphTokens), baseline: median(baselineTokens) },
+      medianCostCents: {
+        graph: median(analyzed.map((a) => a.analytics.totals.estimatedCostCents)),
+        baseline: median(baselineAnalytics.map((a) => a.totals.estimatedCostCents)),
+      },
+      medianLatencyMs: {
+        graph: median(analyzed.map((a) => a.analytics.totals.wallMs)),
+        baseline: median(baselineAnalytics.map((a) => a.totals.wallMs)),
+      },
+    };
+  }
+
+  return {
+    graphId: graph.id,
+    runsAnalyzed: runs.length,
+    lowConfidence: runs.length < 3,
+    assertionFailures,
+    costOutliers,
+    latencyOutliers,
+    toolDivergenceOutliers,
+    failureEvidence,
+    baselineComparison,
+  };
 }

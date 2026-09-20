@@ -7,8 +7,13 @@ import type {
   AgentGraph,
   Approval,
   ApprovalDecision,
+  Conversation,
+  ConversationMessage,
   CreateMcpConnectionInput,
   EgressEvent,
+  GraphAssertion,
+  GraphCritique,
+  GraphDelegation,
   GraphEdge,
   GraphNode,
   McpConnection,
@@ -150,6 +155,41 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify({ version }),
     }),
+
+  /* --------------------------------------------------------- Conversations */
+
+  /**
+   * Chat that AUTHORS a workflow graph; it never launches a run. `graphId` seeds the
+   * conversation so its first message EDITS that graph instead of building a new one.
+   */
+  createConversation: (graphId?: string) =>
+    request<{ conversation: Conversation }>('/conversations', {
+      method: 'POST',
+      body: JSON.stringify({ graphId }),
+    }),
+
+  /** One endpoint for both building and editing; an edit bumps the graph's version. */
+  sendMessage: (id: string, text: string) =>
+    request<{
+      conversation: Conversation;
+      message: ConversationMessage;
+      graph: AgentGraph;
+      delegation: GraphDelegation;
+    }>('/conversations/' + id + '/messages', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+
+  /**
+   * Self-improvement: critiques this graph's own runs and asks the synthesiser for a better
+   * version. Always lands as a NEW forked graph to review; the source is never modified.
+   */
+  optimizeGraph: (graphId: string) =>
+    request<{
+      graph: AgentGraph;
+      critique: GraphCritique;
+      suggestedAssertions: GraphAssertion[];
+    }>('/graphs/' + graphId + '/optimize', { method: 'POST' }),
 
   /** Launch a run of a graph. The run snapshots the graph as it is right now. */
   runGraph: (graphId: string, variables: Record<string, unknown> = {}) =>

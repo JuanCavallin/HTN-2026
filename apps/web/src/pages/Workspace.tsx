@@ -18,7 +18,12 @@ import { useRunGraph } from '../hooks/useGraph';
 import { useTools } from '../hooks/useTools';
 import { useHarness } from '../components/layout/AppShell';
 import { DecisionCanvas } from '../components/graph/DecisionCanvas';
-import { MetricsStrip, RunInspector, TaskComposer } from '../components/chat/WorkspacePanels';
+import {
+  MetricsStrip,
+  RunInspector,
+  TaskComposer,
+  type ComposerMode,
+} from '../components/chat/WorkspacePanels';
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel';
 import { handoffSessionIdFor } from '../lib/handoff';
 import { EgressLedger } from '../components/egress/EgressLedger';
@@ -266,7 +271,7 @@ export function Workspace() {
   const [playing, setPlaying] = useState(true);
   const [approval, setApproval] = useState<'approved' | 'rejected'>();
   const [selected, setSelected] = useState<string>();
-  const [mode, setMode] = useState<'preview' | 'backend'>('preview');
+  const [mode, setMode] = useState<ComposerMode>('preview');
   const [prompt, setPrompt] = useState(SCENARIOS[scenario].prompt);
   const [customPreview, setCustomPreview] = useState(false);
   const [overrides, setOverrides] = useState<RouteOverrides>({});
@@ -349,6 +354,30 @@ export function Workspace() {
       setOverrides({});
       return true;
     }
+    if (mode === 'workflow') {
+      // Chat-to-graph. Synthesis needs no harness, so there is no Hermes gate here.
+      setStarted(true);
+      setPrompt(text);
+      setBusy('Drafting the workflow');
+      try {
+        // A NEW conversation on every send, deliberately unseeded: reusing one would
+        // edit the previous workflow instead of starting a fresh document. Editing an
+        // existing workflow happens from the chat panel inside the workflow editor.
+        const { conversation } = await api.createConversation();
+        const { graph } = await api.sendMessage(conversation.id, text);
+        navigate('/graphs/' + graph.id);
+        return true;
+      } catch (issue) {
+        setError(
+          issue instanceof Error
+            ? issue.message
+            : 'Could not draft the workflow. Check the API and try again.',
+        );
+        return false;
+      } finally {
+        setBusy('');
+      }
+    }
     if (!providers.some((provider) => provider.id === 'hermes' && provider.healthy)) {
       setError(
         'Connect the configured Hermes adapter before starting a backend run. Your message has been kept.',
@@ -360,9 +389,8 @@ export function Workspace() {
     setPrompt(text);
     setBusy('Starting execution');
     try {
-      // One supervised `agent` run per goal. The old createConversation ->
-      // sendMessage -> runGraph sequence targeted graph-synthesis endpoints the
-      // AgentOS backend no longer has; see docs/frontend-handoff.md.
+      // One supervised `agent` run per goal (docs/frontend-handoff.md). Drafting a
+      // reviewable workflow graph instead is the composer's 'workflow' mode above.
       const { run } = await api.startAgentTask(text);
       navigate('/runs/' + run.id);
       return true;
@@ -389,7 +417,9 @@ export function Workspace() {
               <h1>
                 {mode === 'backend'
                   ? 'Your next task'
-                  : customPreview
+                  : mode === 'workflow'
+                    ? 'Your next workflow'
+                    : customPreview
                     ? 'Exploring a workflow'
                     : sample.title}
               </h1>
@@ -425,9 +455,11 @@ export function Workspace() {
                 ? customPreview
                   ? 'I can show you how this workspace behaves. This is the sample workflow, not a generated answer to your message. Switch to the backend to execute your own task.'
                   : sample.intro
-                : busy
-                  ? 'Turning your request into a workflow. Execution will start as soon as it is ready.'
-                  : 'Your task will run through the configured backend.'}
+                : mode === 'workflow'
+                  ? 'Drafting a workflow you can review and edit. Nothing runs until you press Run.'
+                  : busy
+                    ? 'Starting your task. The live trace opens as soon as the run exists.'
+                    : 'Your task will run through the configured backend.'}
             </p>
             {mode === 'preview' && trace.nodes.length > 0 && (
               <div className="routing-summary">
@@ -556,7 +588,7 @@ export function Workspace() {
           onModeChange={(next) => {
             setMode(next);
             setError('');
-            if (next === 'backend') setStarted(false);
+            if (next !== 'preview') setStarted(false);
           }}
           onSend={send}
         />

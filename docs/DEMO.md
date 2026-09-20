@@ -31,8 +31,8 @@ pnpm dev                  # api :8787, web :5173
 
 ### Act 1 — Ask for something (30 s)
 
-On `/`, switch the composer from **Preview mode** to **Use backend** (preview is a labelled,
-synthetic walkthrough), type a plain goal and send:
+On `/`, switch the composer from **Preview mode** (a labelled, synthetic walkthrough) to
+**Run as agent task**, type a plain goal and send:
 
 > Send an email to judge@example.com saying: Zephyr demo is ready
 
@@ -72,6 +72,18 @@ The agent proposes the exact send. The run **pauses**:
   tokens, cost, latency.
 - **Pause / resume / cancel** from the run header. When the completion judge says `blocked`,
   the run pauses for you instead of failing.
+
+## Alternative opening: build the workflow first (works with mock Hermes)
+
+Composer mode **Build a workflow** → describe the job ("Check our vendor portals for overdue
+invoices and email me a summary"). Zephyr drafts a **graph** and opens it in the editor; nothing
+has run. Point at what was left to runtime (the agent and decision nodes), tune a node in the
+inspector (model tier, temperature, budgets), or tell the chat panel to change the graph — it
+edits the open workflow and bumps its version. Then **Run graph** for the live trace, or
+**Run + compare to baseline** for the cost/latency comparison. After a few runs, press
+**Suggest an improvement**: Zephyr critiques that workflow's own run history and opens a
+_forked_ proposal with the reasons in a banner — the original is untouched and nothing runs. Each send from `/` starts a new
+workflow; **+ New task** in the editor opens an empty one.
 
 ## Backup path: the Demo run playbook (works with zero keys)
 
