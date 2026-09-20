@@ -11,6 +11,7 @@ export * from './authorize.js';
 export * from './browser.js';
 export * from './browserDecision.js';
 export * from './browserDescriptors.js';
+export * from './composeText.js';
 export * from './elementTable.js';
 export * from './executor.js';
 export * from './manifest.js';
@@ -23,6 +24,7 @@ import { createBrowserExecutor, type BrowserExecutorDeps } from './browser.js';
 import {
   createDeterministicDecider,
   createResolutionCache,
+  withFallback,
   withResolutionCache,
   type BrowserDecider,
   type ResolutionCache,
@@ -73,7 +75,14 @@ export async function createToolPlane(options: ToolPlaneOptions): Promise<ToolPl
   registry.registerAll(plugins.descriptors);
 
   const cache = createResolutionCache();
-  const base = options.jevDecider ?? createDeterministicDecider();
+  const deterministic = createDeterministicDecider();
+  // A Jev outage degrades to the deterministic decider rather than failing the
+  // step. See withFallback — this is a weaker DECISION, not a weaker gate.
+  const base = options.jevDecider
+    ? withFallback(options.jevDecider, deterministic, (err) =>
+        console.warn('[browser] Jev decision failed, using the deterministic fallback:', err),
+      )
+    : deterministic;
   const decider = withResolutionCache(base, cache);
 
   const browserExecutor = createBrowserExecutor({

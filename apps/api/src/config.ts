@@ -72,6 +72,24 @@ const envSchema = z.object({
   /** Cap on element-table rows. The table IS the request state — keep it small. */
   BROWSER_MAX_ELEMENTS: z.coerce.number().int().positive().default(60),
 
+  /**
+   * Budget for ONE element action (click / fill / select), separate from
+   * BROWSER_TIMEOUT_MS which covers navigation.
+   *
+   * The element has already been proven attached, visible, enabled and
+   * unoccluded a moment earlier, so a long actionability wait buys nothing —
+   * it only decides how long a wedged click hangs the step. 30s was the wrong
+   * number for an interactive loop.
+   */
+  BROWSER_ACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(4_000),
+  /**
+   * How long to let the page settle after an action before the next snapshot.
+   * `browser-use/jev-ultrafast` uses ~200ms for combobox suggestions and ~50ms
+   * elsewhere; those are the numbers these default to.
+   */
+  BROWSER_SETTLE_MS: z.coerce.number().int().min(0).default(50),
+  BROWSER_SETTLE_SELECT_MS: z.coerce.number().int().min(0).default(200),
+
   COMPOSIO_MODE: modeEnum.default('mock'),
   COMPOSIO_API_KEY: z.string().optional(),
 
@@ -178,6 +196,9 @@ export const config = Object.freeze({
     timeoutMs: env.BROWSER_TIMEOUT_MS,
     decisionTimeoutMs: env.BROWSER_DECISION_TIMEOUT_MS,
     maxElements: env.BROWSER_MAX_ELEMENTS,
+    actionTimeoutMs: env.BROWSER_ACTION_TIMEOUT_MS,
+    settleMs: env.BROWSER_SETTLE_MS,
+    settleSelectMs: env.BROWSER_SETTLE_SELECT_MS,
   },
   // NOTE: there is no separate Jev credential. The browser decider reads
   // `providers.jev` — the same AI Gateway slot Person 2's adapter uses — so

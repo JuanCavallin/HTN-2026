@@ -160,6 +160,65 @@ const COLLECT_ROWS = `(() => {
   return out;
 })()`;
 
+/**
+ * PRE-FLIGHT VALIDATION IN ONE PROTOCOL CALL.
+ *
+ * The three checks before any action — attached, interactable, occluded — used
+ * to be four separate round trips (`count`, `isVisible`, `isEnabled`, then an
+ * `elementFromPoint` probe). Against a LOCAL browser that is merely wasteful;
+ * against Browserbase every one of them is a network RPC, so four round trips
+ * per click is a real and avoidable cost.
+ *
+ * `browser-use/jev-ultrafast` reports cutting median protocol calls from 1,092
+ * to 101 by making reads atomic like this. Same idea, same reason.
+ *
+ * The checks themselves are unchanged and still fail closed: anything this
+ * cannot positively confirm comes back as not-actionable.
+ */
+function validateTargetScript(domIndex: number): string {
+  return `(() => {
+     const SEL = ${JSON.stringify(INTERACTIVE_SELECTOR)};
+     const el = document.querySelectorAll(SEL)[${domIndex}];
+     if (!el) return { exists: false };
+
+     const rect = el.getBoundingClientRect();
+     const style = window.getComputedStyle(el);
+     const visible =
+       rect.width > 0 && rect.height > 0 &&
+       style.visibility !== 'hidden' && style.display !== 'none' &&
+       Number(style.opacity) !== 0;
+
+     const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+
+     let occluded = true;
+     if (visible) {
+       const hit = document.elementFromPoint(
+         rect.left + rect.width / 2,
+         rect.top + rect.height / 2,
+       );
+       occluded = !hit || !(hit === el || el.contains(hit) || hit.contains(el));
+     }
+
+     return { exists: true, visible, enabled, occluded };
+   })()`;
+}
+
+interface TargetState {
+  exists: boolean;
+  visible?: boolean;
+  enabled?: boolean;
+  occluded?: boolean;
+}
+
+/** Everything unproven is treated as not-actionable. */
+function rejectionFor(state: TargetState | null): TargetRejection | null {
+  if (!state || typeof state !== 'object') return 'occluded';
+  if (!state.exists) return 'detached';
+  if (!state.visible || !state.enabled) return 'not_interactable';
+  if (state.occluded !== false) return 'occluded';
+  return null;
+}
+
 /** Labels are the main table-size risk, and the table IS the request state. */
 const MAX_LABEL_CHARS = 80;
 
@@ -553,30 +612,37 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
       }
 
       try {
-        /* -- 2. ATTACHED + INTERACTABLE. ----------------------------------- */
-        const count = await locator.count();
-        if (count === 0) return rejected<BrowserPerformResult>('perform', started, 'detached');
-        if (!(await locator.isVisible()) || !(await locator.isEnabled())) {
-          return rejected<BrowserPerformResult>('perform', started, 'not_interactable');
+        /* -- 2 AND 3, IN ONE ROUND TRIP: attached, interactable, occluded. -- */
+        const domIndex = snap.domIndices.get(input.index);
+        if (domIndex === undefined) {
+          return rejected<BrowserPerformResult>('perform', started, 'unknown_index');
         }
 
-        /* -- 3. OCCLUSION. -------------------------------------------------- */
-        const domIndex = snap.domIndices.get(input.index);
-        if (domIndex === undefined || (await isOccluded(handle, domIndex))) {
-          return rejected<BrowserPerformResult>('perform', started, 'occluded');
-        }
+        const state = await handle.page
+          .evaluate<TargetState | null, undefined>(validateTargetScript(domIndex), undefined)
+          .catch(() => null);
+
+        const rejection = rejectionFor(state);
+        if (rejection) return rejected<BrowserPerformResult>('perform', started, rejection);
 
         const urlBefore = handle.page.url();
 
         if (input.operation === 'CLICK') {
-          await locator.click({ timeout: config.browser.timeoutMs });
+          await locator.click({ timeout: config.browser.actionTimeoutMs });
         } else if (input.operation === 'TYPE_TEXT') {
           // Jev picked the FIELD. `text` came from a generative model, never
           // from Jev — Jev cannot produce text at all.
-          await locator.fill(input.text ?? '', { timeout: config.browser.timeoutMs });
+          await locator.fill(input.text ?? '', { timeout: config.browser.actionTimeoutMs });
         } else {
-          await locator.selectOption(input.text ?? '', { timeout: config.browser.timeoutMs });
+          await locator.selectOption(input.text ?? '', { timeout: config.browser.actionTimeoutMs });
         }
+
+        // Let the page settle before anyone snapshots it again. A combobox
+        // needs longer than a click because its suggestions render async;
+        // these are jev-ultrafast's numbers (~200ms / ~50ms), not a guess.
+        await handle.page.waitForTimeout(
+          input.operation === 'SELECT' ? config.browser.settleSelectMs : config.browser.settleMs,
+        );
 
         const url = handle.page.url();
         // Whatever just happened, the table we decided against is now suspect.

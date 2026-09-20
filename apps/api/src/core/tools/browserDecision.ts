@@ -30,6 +30,17 @@ export interface BrowserDecisionRequest {
   table: ElementTable;
   /** Operations the caller will accept. Narrows the speculative fan-out. */
   allowedOperations?: readonly BrowserOperation[];
+  /**
+   * The value that would be typed if the operation turns out to be TYPE_TEXT.
+   *
+   * Supplied so a decider can tell "this field still needs filling" from "this
+   * field already holds exactly that". Without it a stateless decider will
+   * happily choose TYPE_TEXT on an already-filled box forever, which is what a
+   * loop driven by the deterministic fallback actually did.
+   *
+   * It is NOT sent to Jev as a question — Jev picks the field, never the text.
+   */
+  typeText?: string;
   signal?: AbortSignal;
 }
 
@@ -95,7 +106,7 @@ function scoreLabel(goal: string, label: string): number {
  * proceeding, which is the correct direction for an uncertain decision.
  */
 export function createDeterministicDecider(): BrowserDecider {
-  return async ({ goal, table, allowedOperations }) => {
+  return async ({ goal, table, allowedOperations, typeText }) => {
     const allow = (op: BrowserOperation): boolean =>
       !allowedOperations || allowedOperations.includes(op);
 
@@ -110,9 +121,17 @@ export function createDeterministicDecider(): BrowserDecider {
         ? ['SELECT', 'CLICK', 'TYPE_TEXT']
         : ['CLICK', 'TYPE_TEXT', 'SELECT'];
 
+    /** A box already holding the value we would type is not a typing target. */
+    const stillNeedsTyping = (row: { value?: string }): boolean => {
+      if (!typeText) return true;
+      const current = (row.value ?? '').trim().toLowerCase();
+      return current !== typeText.trim().toLowerCase();
+    };
+
     for (const operation of order) {
       if (!allow(operation)) continue;
-      const rows = eligibleRows(table, operation);
+      let rows = eligibleRows(table, operation);
+      if (operation === 'TYPE_TEXT') rows = rows.filter(stillNeedsTyping);
       if (rows.length === 0) continue;
 
       let best = rows[0]!;
@@ -161,6 +180,51 @@ export function createDeterministicDecider(): BrowserDecider {
       source: 'deterministic',
       rationale: 'Deterministic fallback: no eligible target on this page.',
     };
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Fallback                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Run `primary`, and fall back to `fallback` if it throws.
+ *
+ * A BROWSER DECISION MUST NOT BE ABLE TO KILL A RUN. Jev is reached over the
+ * network, so it can fail for reasons that have nothing to do with the page:
+ * an expired key, a rate limit, a 403 because the account needs a card on
+ * file, a timeout. All of those are "we did not get a recommendation", and the
+ * design spec's answer to that is the deterministic fallback — which exists
+ * and is already correct.
+ *
+ * NOTE THE DIRECTION. This is NOT a fail-open: a failed decision degrades to a
+ * weaker decision, and the weaker decision reports LOW confidence, which makes
+ * the risk gate stricter rather than laxer. Authorization is a separate
+ * concern and still fails closed.
+ *
+ * The returned decision is labelled `deterministic`, never `jev`, so the trace
+ * does not claim a model call that did not happen.
+ */
+export function withFallback(
+  primary: BrowserDecider,
+  fallback: BrowserDecider,
+  onFallback?: (error: unknown) => void,
+): BrowserDecider {
+  return async (request) => {
+    try {
+      return await primary(request);
+    } catch (error) {
+      onFallback?.(error);
+      const decision = await fallback(request);
+      return {
+        ...decision,
+        rationale:
+          'Jev was unreachable (' +
+          (error instanceof Error ? error.message.split('\n')[0] : String(error)).slice(0, 120) +
+          '); ' +
+          decision.rationale,
+      };
+    }
   };
 }
 

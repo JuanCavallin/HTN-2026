@@ -70,7 +70,12 @@ function meta(op: string, started: number, destination: string | null) {
   };
 }
 
-function failure<T>(op: string, started: number, code: ProviderErrorCode, message: string): ProviderResult<T> {
+function failure<T>(
+  op: string,
+  started: number,
+  code: ProviderErrorCode,
+  message: string,
+): ProviderResult<T> {
   return {
     ok: false,
     error: { code, message, retryable: code === 'UPSTREAM' || code === 'TIMEOUT' },
@@ -144,7 +149,9 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
               ctx.params.toolCall.title,
           );
           const deny = options.find((o) => o.optionId === 'deny') ?? options[options.length - 1];
-          return Promise.resolve({ outcome: { outcome: 'selected' as const, optionId: deny.optionId } });
+          return Promise.resolve({
+            outcome: { outcome: 'selected' as const, optionId: deny.optionId },
+          });
         })
         .onRequest(acp.methods.client.fs.writeTextFile, async () => ({}))
         .onRequest(acp.methods.client.fs.readTextFile, async () => ({ content: '' }))
@@ -182,7 +189,10 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
         const update = message.notification.update;
         if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
           chunks.push(update.content.text);
-        } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+        } else if (
+          update.sessionUpdate === 'tool_call' ||
+          update.sessionUpdate === 'tool_call_update'
+        ) {
           record.toolCalls.push({
             tool: 'title' in update ? (update.title ?? update.toolCallId) : update.toolCallId,
             at: new Date().toISOString(),
@@ -229,10 +239,18 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
         const record: TaskRecord = { status: 'running', log: ['started'], toolCalls: [], session };
         tasks.set(session.sessionId, record);
 
-        session.prompt(input.context ? input.goal + '\n\nContext:\n' + JSON.stringify(input.context) : input.goal);
+        session.prompt(
+          input.context
+            ? input.goal + '\n\nContext:\n' + JSON.stringify(input.context)
+            : input.goal,
+        );
         void drain(record);
 
-        return { ok: true, data: { taskId: session.sessionId }, meta: meta('startTask', started, 'hermes-acp://local') };
+        return {
+          ok: true,
+          data: { taskId: session.sessionId },
+          meta: meta('startTask', started, 'hermes-acp://local'),
+        };
       } catch (err) {
         return failure('startTask', started, 'UPSTREAM', (err as Error).message);
       }

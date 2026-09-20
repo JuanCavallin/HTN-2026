@@ -158,6 +158,57 @@ const COLLECT_ROWS = `(() => {
   return out;
 })()`;
 
+/**
+ * PRE-FLIGHT VALIDATION IN ONE PROTOCOL CALL — see the local adapter for the
+ * full reasoning. Against Browserbase this matters more, not less: every
+ * protocol call is a round trip to their cloud, so four checks per click is
+ * four network hops. `browser-use/jev-ultrafast` reports cutting median
+ * protocol calls from 1,092 to 101 by making reads atomic like this.
+ */
+function validateTargetScript(domIndex: number): string {
+  return `(() => {
+     const SEL = ${JSON.stringify(INTERACTIVE_SELECTOR)};
+     const el = document.querySelectorAll(SEL)[${domIndex}];
+     if (!el) return { exists: false };
+
+     const rect = el.getBoundingClientRect();
+     const style = window.getComputedStyle(el);
+     const visible =
+       rect.width > 0 && rect.height > 0 &&
+       style.visibility !== 'hidden' && style.display !== 'none' &&
+       Number(style.opacity) !== 0;
+
+     const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+
+     let occluded = true;
+     if (visible) {
+       const hit = document.elementFromPoint(
+         rect.left + rect.width / 2,
+         rect.top + rect.height / 2,
+       );
+       occluded = !hit || !(hit === el || el.contains(hit) || hit.contains(el));
+     }
+
+     return { exists: true, visible, enabled, occluded };
+   })()`;
+}
+
+interface TargetState {
+  exists: boolean;
+  visible?: boolean;
+  enabled?: boolean;
+  occluded?: boolean;
+}
+
+/** Everything unproven is treated as not-actionable. */
+function rejectionFor(state: TargetState | null): TargetRejection | null {
+  if (!state || typeof state !== 'object') return 'occluded';
+  if (!state.exists) return 'detached';
+  if (!state.visible || !state.enabled) return 'not_interactable';
+  if (state.occluded !== false) return 'occluded';
+  return null;
+}
+
 const MAX_LABEL_CHARS = 80;
 
 function truncate(text: string, max = MAX_LABEL_CHARS): string {
@@ -531,11 +582,40 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         return failure<T>('extract', started, new Error('Unknown sessionId'), null, 'BAD_INPUT');
       }
       try {
+        const page = await activePage(handle);
+
+        // DETERMINISTIC PATH, and the default. Reading a page's text needs no
+        // model, and requiring one here made this backend unusable without an
+        // LLM key while the local adapter worked fine — the two must behave the
+        // same or "local is equivalent for ordinary pages" is not a real claim.
+        //
+        // `instruction` is an optional CSS scope, matching localbrowser.extract.
+        // Natural-language extraction is opt-in via `nl:` below.
+        if (!input.instruction.startsWith('nl:')) {
+          const scope = input.instruction.trim();
+          const text = await page.evaluate<string, undefined>(
+            scope
+              ? `(() => { const el = document.querySelector(${JSON.stringify(scope)});
+                   return el ? (el.innerText || '') : ''; })()`
+              : `(() => (document.body && document.body.innerText) || '')()`,
+          );
+          return {
+            ok: true as const,
+            data: {
+              url: await page.url(),
+              title: await page.title().catch(() => ''),
+              text: truncate(text ?? '', 4000),
+            } as T,
+            meta: meta('extract', started, handle.destination),
+          };
+        }
+
+        // NATURAL-LANGUAGE PATH: only this one needs a model.
         requireModel();
         if (!handle.stagehand) throw new Error('Stagehand is not attached to this session.');
         // No zod schema -> Stagehand returns { extraction: string }. Pass a
         // schema as a second argument for structured extraction.
-        const result = await handle.stagehand.extract(input.instruction);
+        const result = await handle.stagehand.extract(input.instruction.slice(3).trim());
         return {
           ok: true as const,
           data: result.data as T,
@@ -650,22 +730,17 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
 
         const locator = page.locator(INTERACTIVE_SELECTOR).nth(domIndex);
 
-        /* -- 2. ATTACHED + INTERACTABLE. ------------------------------------ */
-        if ((await locator.count()) === 0) {
-          return rejected<BrowserPerformResult>('perform', started, 'detached', handle.destination);
-        }
-        if (!(await locator.isVisible())) {
-          return rejected<BrowserPerformResult>(
-            'perform',
-            started,
-            'not_interactable',
-            handle.destination,
-          );
-        }
+        /* -- 2 AND 3, IN ONE ROUND TRIP: attached, interactable, occluded. -- */
+        // Each of these used to be a separate call, and against a CLOUD browser
+        // every call is a network hop. Collapsing them is the single cheapest
+        // latency win available here.
+        const state = await page
+          .evaluate<TargetState | null, undefined>(validateTargetScript(domIndex))
+          .catch(() => null);
 
-        /* -- 3. OCCLUSION. -------------------------------------------------- */
-        if (await isOccluded(handle, domIndex)) {
-          return rejected<BrowserPerformResult>('perform', started, 'occluded', handle.destination);
+        const rejection = rejectionFor(state);
+        if (rejection) {
+          return rejected<BrowserPerformResult>('perform', started, rejection, handle.destination);
         }
 
         const urlBefore = await page.url();
@@ -679,6 +754,13 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         } else {
           await locator.selectOption([input.text ?? '']);
         }
+
+        // Let the page settle before anyone snapshots it again. A combobox
+        // needs longer than a click because its suggestions render async;
+        // these are jev-ultrafast's numbers (~200ms / ~50ms), not a guess.
+        await page.waitForTimeout(
+          input.operation === 'SELECT' ? config.browser.settleSelectMs : config.browser.settleMs,
+        );
 
         const url = await page.url();
         handle.snapshot = undefined;

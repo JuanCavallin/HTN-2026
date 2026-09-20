@@ -122,8 +122,10 @@ export function createJevBrowserDecider(
       operationCriteria.BLOCKED = 'The goal cannot be progressed from this page.';
     }
 
-    // A choice needs at least two options to be a question at all.
-    if (Object.keys(operationCriteria).length < 2) {
+    const viableOperations = Object.keys(operationCriteria) as BrowserOperation[];
+
+    // Nothing at all is possible here. Only now is BLOCKED the right answer.
+    if (viableOperations.length === 0) {
       return {
         operation: 'BLOCKED',
         confidence: 0,
@@ -132,19 +134,40 @@ export function createJevBrowserDecider(
       };
     }
 
+    /**
+     * ASK THE OPERATION ONLY WHEN IT IS GENUINELY IN DOUBT.
+     *
+     * A choice with one option is not a question — the SDK rejects it, and
+     * asking it would burn a round trip to be told what we already know. But
+     * "there is only one possible operation" does NOT mean there is nothing to
+     * decide: we still need the TARGET.
+     *
+     * Getting this wrong is what made a constrained call (`allowedOperations:
+     * ['TYPE_TEXT']`) return BLOCKED without ever contacting Jev — the caller
+     * narrowing the operation accidentally suppressed the whole decision.
+     */
+    const askOperation = viableOperations.length > 1;
+    const presetOperation = askOperation ? undefined : viableOperations[0];
+
     /* -- Speculative target heads, all in the SAME request. ---------------- */
-    // `questions` is intentionally loosely typed: the target heads are built
+    // `questions` is intentionally loosely typed: the heads are built
     // conditionally, so the key set is not statically known.
-    const questions: Record<string, unknown> = {
-      operation: {
+    const questions: Record<string, unknown> = {};
+
+    if (askOperation) {
+      questions.operation = {
         type: 'choice',
         instructions: 'What is the single best next action for the goal?',
         criteria: operationCriteria,
-      },
-    };
+      };
+    }
+
+    // When the operation is already known, only its own head is worth asking —
+    // the speculative heads exist to cover an operation we have not chosen yet.
+    const wants = (op: BrowserOperation): boolean => askOperation || presetOperation === op;
 
     const clickCriteria = toCriteria(clickRows);
-    if (clickCriteria && Object.keys(clickCriteria).length > 1) {
+    if (wants('CLICK') && clickCriteria && Object.keys(clickCriteria).length > 1) {
       questions.click_target = {
         type: 'choice',
         instructions: 'Which element should be clicked?',
@@ -152,7 +175,7 @@ export function createJevBrowserDecider(
       };
     }
     const typeCriteria = toCriteria(typeRows);
-    if (typeCriteria && Object.keys(typeCriteria).length > 1) {
+    if (wants('TYPE_TEXT') && typeCriteria && Object.keys(typeCriteria).length > 1) {
       questions.type_text_target = {
         type: 'choice',
         instructions: 'Which field should be typed into?',
@@ -160,11 +183,37 @@ export function createJevBrowserDecider(
       };
     }
     const selectCriteria = toCriteria(selectRows);
-    if (selectCriteria && Object.keys(selectCriteria).length > 1) {
+    if (wants('SELECT') && selectCriteria && Object.keys(selectCriteria).length > 1) {
       questions.select_target = {
         type: 'choice',
         instructions: 'Which dropdown should be used?',
         criteria: selectCriteria,
+      };
+    }
+
+    // Operation known AND only one eligible target: there is nothing left to
+    // ask. Answer locally rather than making a pointless round trip.
+    if (Object.keys(questions).length === 0) {
+      const soleRow =
+        presetOperation === 'CLICK'
+          ? clickRows[0]
+          : presetOperation === 'TYPE_TEXT'
+            ? typeRows[0]
+            : presetOperation === 'SELECT'
+              ? selectRows[0]
+              : undefined;
+      return {
+        operation: presetOperation ?? 'BLOCKED',
+        ...(soleRow ? { index: soleRow.index } : {}),
+        confidence: 1,
+        cacheable: Boolean(soleRow),
+        source: 'jev',
+        rationale:
+          'Only one ' +
+          presetOperation +
+          ' target existed' +
+          (soleRow ? ' ("' + soleRow.label + '")' : '') +
+          ', so no question was needed.',
       };
     }
 
@@ -188,10 +237,11 @@ export function createJevBrowserDecider(
       });
 
       /* -- Use the matching head; discard the rest. ------------------------ */
-      const opAnswer = result.answers.operation;
-      const operation = (
-        opAnswer?.type === 'choice' ? opAnswer.choice : 'BLOCKED'
-      ) as BrowserOperation;
+      // When the operation was never in doubt it was not asked, so take the
+      // preset rather than reading an answer that does not exist.
+      const opAnswer = askOperation ? result.answers.operation : undefined;
+      const operation = (presetOperation ??
+        (opAnswer?.type === 'choice' ? opAnswer.choice : 'BLOCKED')) as BrowserOperation;
 
       const targetKey =
         operation === 'CLICK'
@@ -218,8 +268,11 @@ export function createJevBrowserDecider(
       const chosen = targetAnswer?.type === 'choice' ? targetAnswer.choice : undefined;
       const index = chosen !== undefined ? Number(chosen) : soleRow?.index;
 
-      const operationConfidence =
-        opAnswer?.type === 'choice'
+      // A preset operation is certain by construction — it was the only one
+      // possible — so it must not drag the combined confidence to zero.
+      const operationConfidence = presetOperation
+        ? 1
+        : opAnswer?.type === 'choice'
           ? probabilityForChoice(opAnswer.choice, opAnswer.probabilities)
           : 0;
       const targetConfidence =
