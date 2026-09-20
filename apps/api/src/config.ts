@@ -7,6 +7,7 @@
  * the full demo. A missing key downgrades live -> mock. It never throws.
  */
 
+import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { PROVIDER_IDS, type ProviderId, type ProviderMode } from '@htn/shared';
 
@@ -41,7 +42,9 @@ const envSchema = z.object({
   HERMES_CWD: z.string().optional(),
   HERMES_PROFILE_DIR: z.string().optional(),
   HERMES_API_KEY: z.string().optional(),
-  HERMES_BASE_URL: z.string().optional(),
+  // optionalUrl, not z.string(): `.env.example` ships `HERMES_BASE_URL=`, and an empty
+  // string would otherwise defeat the `??` fallback to the model gateway below.
+  HERMES_BASE_URL: optionalUrl,
 
   MODEL_GATEWAY_BASE_URL: optionalUrl,
   MODEL_GATEWAY_API_KEY: z.string().default('agentos-local'),
@@ -90,8 +93,22 @@ const envSchema = z.object({
   ANTHROPIC_MODE: modeEnum.default('mock'),
   ANTHROPIC_API_KEY: z.string().optional(),
 
-  GPTZERO_MODE: modeEnum.default('disabled'),
+  // A DIRECT Google route, deliberately separate from the OpenRouter catalog.
+  // Two distinct cloud vendors is what makes route selection a real decision
+  // rather than a label, and it gives the ledger two distinct destinations.
+  GEMINI_MODE: modeEnum.default('mock'),
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_BASE_URL: optionalUrl,
+  GEMINI_CHEAP_MODEL: z.string().default('gemini-3.5-flash-lite'),
+  GEMINI_FRONTIER_MODEL: z.string().default('gemini-3.8-flash'),
+
+  // Mock by default so a keyless clone still exercises the outbound-text check
+  // end to end; GPTZERO_API_KEY plus GPTZERO_MODE=live scores for real.
+  GPTZERO_MODE: modeEnum.default('mock'),
   GPTZERO_API_KEY: z.string().optional(),
+  GPTZERO_BASE_URL: optionalUrl,
+  /** P(ai) at or above which an authorized outbound send stops for a human. */
+  GPTZERO_ESCALATION_THRESHOLD: z.coerce.number().min(0).max(1).default(0.75),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -159,6 +176,12 @@ function resolveHermes(): ProviderConfig {
   let mode: ProviderMode = env.HERMES_MODE;
   if (env.MOCK_ALL) mode = 'mock';
   else if (mode === 'live' && !env.HERMES_CWD) mode = 'mock';
+  else if (mode === 'live' && !existsSync(env.HERMES_CWD!)) {
+    // A shared .env carries a teammate's absolute path. A checkout that is not on
+    // THIS machine is the same situation as a missing key: downgrade, never crash.
+    console.warn('[config] HERMES_CWD does not exist on this machine; hermes -> mock');
+    mode = 'mock';
+  }
   return {
     mode,
     cwd: env.HERMES_CWD,
@@ -228,7 +251,13 @@ const providers: Record<ProviderId, ProviderConfig> = {
   }),
   mcp: resolveLocal('live', 'MCP_CONNECTIONS', {}),
   anthropic: resolve(env.ANTHROPIC_MODE, env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY'),
-  gptzero: resolve(env.GPTZERO_MODE, env.GPTZERO_API_KEY, 'GPTZERO_API_KEY'),
+  gemini: resolve(env.GEMINI_MODE, env.GEMINI_API_KEY, 'GEMINI_API_KEY', {
+    baseUrl: env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta',
+    models: { cheap: env.GEMINI_CHEAP_MODEL, frontier: env.GEMINI_FRONTIER_MODEL },
+  }),
+  gptzero: resolve(env.GPTZERO_MODE, env.GPTZERO_API_KEY, 'GPTZERO_API_KEY', {
+    baseUrl: env.GPTZERO_BASE_URL,
+  }),
 };
 
 export const config = Object.freeze({
@@ -251,6 +280,9 @@ export const config = Object.freeze({
     failureRate: env.MOCK_FAILURE_RATE,
     minLatencyMs: env.MOCK_MIN_LATENCY_MS,
     maxLatencyMs: Math.max(env.MOCK_MIN_LATENCY_MS, env.MOCK_MAX_LATENCY_MS),
+  },
+  contentCheck: {
+    escalationThreshold: env.GPTZERO_ESCALATION_THRESHOLD,
   },
   browser: {
     maxSessions: env.BROWSER_MAX_SESSIONS,

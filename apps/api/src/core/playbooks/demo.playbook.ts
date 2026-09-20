@@ -14,7 +14,7 @@ import { successes } from '../swarm.js';
 import { definePlaybook } from './types.js';
 
 /** A fake case file. The SIN is a well-known test value and passes the Luhn check. */
-function caseFile(target: string, includeSensitive: boolean): string {
+export function caseFile(target: string, includeSensitive: boolean): string {
   const sensitive = includeSensitive
     ? 'Applicant SIN 046 454 286, contact avery.chen@example.edu, phone 519-555-0142.'
     : 'Applicant contact withheld.';
@@ -191,7 +191,7 @@ export const demoPlaybook = definePlaybook<DemoInput>({
         { label: 'File correction request', kind: 'submit', providerId: 'composio' },
         async (step) => {
           // Classified irreversible -> creates an Approval and BLOCKS here.
-          await ctx.requireApproval(step.id, {
+          const authorized = await ctx.requireApproval(step.id, {
             kind: 'submit_form',
             description:
               'Submit a correction request for ' +
@@ -207,9 +207,14 @@ export const demoPlaybook = definePlaybook<DemoInput>({
             },
           });
 
+          // Submit what was AUTHORIZED, which is the human's edit if they
+          // revised it. Reading `input.target` here instead would make the
+          // revision controls decorative.
+          const payload = (authorized.payload ?? {}) as { target?: string };
+
           const toolbox = ctx.provider('toolbox');
           const res = await toolbox.callTool(
-            { name: 'forms.submit', args: { target: input.target } },
+            { name: 'forms.submit', args: { target: payload.target ?? input.target } },
             ctx.callContext({ stepId: step.id, policyRule: 'human-approved-submission' }),
           );
           return res.ok ? 'submitted' : 'submission_failed';

@@ -30,6 +30,7 @@ import { newId, nowIso } from '../lib/ids.js';
 import { ApprovalRejectedError, waitForApproval } from './approvalGate.js';
 import type { RunBus } from './bus.js';
 import { buildEgressEvent } from './ledger.js';
+import { clearPause, pauseRun, waitWhilePaused } from './pauseGate.js';
 import { detectPii } from './redaction.js';
 import { classify } from './risk.js';
 import type { DecisionService } from './decisions/service.js';
@@ -86,6 +87,9 @@ export class Orchestrator {
   cancel(runId: string): boolean {
     const controller = this.inFlight.get(runId);
     if (!controller) return false;
+    // Release the pause latch first, or a paused run would sit on it and never
+    // observe the abort.
+    clearPause(runId);
     controller.abort();
     return true;
   }
@@ -128,6 +132,7 @@ export class Orchestrator {
       await this.finishWithError(run.id, err as Error, controller.signal.aborted);
     } finally {
       this.inFlight.delete(run.id);
+      clearPause(run.id);
       void bus;
       void store;
     }
@@ -151,6 +156,21 @@ export class Orchestrator {
       summary: err.message,
       error: { code: 'RUN_FAILED', message: err.message },
     });
+  }
+
+  /**
+   * Park here while the run is paused, writing 'paused' only if we actually
+   * have to wait, and putting the run back to 'running' on the way out.
+   */
+  private async holdWhilePaused(runId: string, signal: AbortSignal): Promise<void> {
+    let held = false;
+    await waitWhilePaused(runId, signal, async () => {
+      held = true;
+      await this.patchRun(runId, { status: 'paused' });
+    });
+    if (held && !signal.aborted) {
+      await this.patchRun(runId, { status: 'running' });
+    }
   }
 
   private async patchRun(runId: string, patch: Partial<Run>): Promise<Run> {
@@ -242,6 +262,9 @@ export class Orchestrator {
       },
 
       step: async (spec, fn) => {
+        // The pause checkpoint. Before a step starts is the only place a pause
+        // can take effect without leaving a half-done step behind.
+        await this.holdWhilePaused(runId, signal);
         const step = await createStep(spec);
         try {
           const output = await fn(step);
@@ -309,7 +332,10 @@ export class Orchestrator {
         const decision = classify(action);
         await this.upsertStep(stepId, { riskClass: decision.riskClass });
 
-        if (decision.riskClass !== 'ask_human') return;
+        // Ungated actions return the action unchanged, so every caller can use
+        // the return value uniformly instead of branching on whether a human
+        // was involved.
+        if (decision.riskClass !== 'ask_human') return action;
 
         const approval = {
           id: newId('apr'),
@@ -331,12 +357,29 @@ export class Orchestrator {
 
         // Blocks here. The decide endpoint patches the Approval, emits
         // approval.resolved, and calls settleApproval() to release this promise.
-        const outcome = await waitForApproval(approval.id, signal);
+        const outcome = await waitForApproval(approval.id, action, signal);
 
         await this.patchRun(runId, { status: 'running' });
         await this.upsertStep(stepId, { status: 'running' });
 
-        if (outcome === 'rejected') throw new ApprovalRejectedError(approval.id);
+        if (outcome.verdict === 'rejected') throw new ApprovalRejectedError(approval.id);
+
+        if (outcome.verdict === 'revised') {
+          await bus.emit(runId, {
+            type: 'log',
+            runId,
+            level: 'info',
+            message:
+              'Approval ' +
+              approval.id +
+              ' was revised by a human and reauthorized; executing the revised ' +
+              'payload, not the proposed one.',
+            at: nowIso(),
+          });
+        }
+
+        // The REVISED action when the human edited it. Callers execute this.
+        return outcome.action;
       },
 
       provider,
@@ -597,6 +640,11 @@ export class Orchestrator {
           const requiresToolAction = requiresExternalAction(spec.goal);
 
           for (let turn = 1; turn <= maxTurns; turn += 1) {
+            // Second pause checkpoint. An agent task is one `ctx.step`, so
+            // without this a paused run would still burn its whole turn budget
+            // before noticing.
+            await this.holdWhilePaused(runId, signal);
+
             let turnCompleted = false;
             let turnToolCalls: { tool: string; args?: unknown; at: string }[] = [];
             let pollAttempts = 0;
@@ -723,12 +771,33 @@ export class Orchestrator {
               break;
             }
             if (completionDecision.status === 'blocked') {
+              // The spec is explicit: `blocked` PAUSES for the user. Failing
+              // the run here instead would throw away a Hermes session that is
+              // still alive and still resumable, and would report a run that is
+              // merely stuck as a run that broke.
               await sessionStateService.setStatus(sessionState.id, 'blocked');
-              throw new Error(
-                'Agent task blocked: ' +
-                  (completionDecision.verificationFailures.join(', ') ||
-                    completionDecision.reasonCodes.join(', ')),
-              );
+              const reason =
+                completionDecision.verificationFailures.join(', ') ||
+                completionDecision.reasonCodes.join(', ') ||
+                'no reason given';
+              await bus.emit(runId, {
+                type: 'log',
+                runId,
+                level: 'warn',
+                message:
+                  'The completion judge returned `blocked` (' +
+                  reason +
+                  '). Pausing for you — resume the run to continue, or cancel it.',
+                at: nowIso(),
+              });
+
+              pauseRun(runId);
+              await this.holdWhilePaused(runId, signal);
+              if (signal.aborted) throw new Error('Run cancelled while blocked: ' + reason);
+
+              // Resumed by a human. Fall through to the continuation below and
+              // spend another bounded turn in the SAME Hermes session.
+              await sessionStateService.setStatus(sessionState.id, 'running');
             }
             if (turn < maxTurns) {
               await sessionStateService.beginTurn(sessionState.id);

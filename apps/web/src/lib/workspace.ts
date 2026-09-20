@@ -36,17 +36,21 @@ export type Trace = {
  * What the run API actually supports today, read by the UI to decide which controls are
  * live and which are shown disabled with their reason.
  *
+ * `pauseResume` is true: POST /runs/:id/pause and /runs/:id/resume exist, and the
+ * orchestrator parks at step boundaries rather than aborting. It is cooperative, so a
+ * pause lands at the next boundary, not mid-call.
+ *
+ * `editRunningNode` is still false, and for a different reason than it used to be.
  * `runs.service.ts` snapshots the graph document at run start on purpose, so that editing a
  * graph cannot retroactively change what an already-finished run did. A mid-run
- * `PATCH /graphs/:id/nodes/:nodeId` therefore has no effect on the running execution, and the
- * run API exposes no pause or resume route at all. Both are required before a node can be
- * edited mid-run, and a revised node must additionally clear `authorize_action`.
+ * `PATCH /graphs/:id/nodes/:nodeId` therefore still does not reach the running execution,
+ * and a revised node would additionally have to clear `authorize_action`. Pausing was
+ * necessary for that, not sufficient.
  *
- * The contract for making these true is `docs/contracts/run-intervention.md`. When the
- * endpoints land, flip these flags; no component needs rewriting.
+ * The contract for making the rest true is `docs/contracts/run-intervention.md`.
  */
 export const RUN_CAPABILITIES = {
-  pauseResume: false,
+  pauseResume: true,
   editRunningNode: false,
 } as const;
 
@@ -54,7 +58,7 @@ export const canInterveneLive = RUN_CAPABILITIES.pauseResume && RUN_CAPABILITIES
 
 /** Stated on every disabled live-intervention control. Names the missing capability, not a vibe. */
 export const LIVE_INTERVENTION_REASON =
-  'Editing a running step needs pause and resume, which this backend does not expose. A run executes a snapshot of the graph, so changing it now would not reach the running execution.';
+  'A run executes a snapshot of the graph taken when it started, so editing a node now would not reach the running execution. Pause and resume work; applying an edit to a live run does not.';
 
 /** Candidate routes offered by the inspector's edit control. Preview only. */
 export const ROUTE_OPTIONS = [

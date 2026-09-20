@@ -27,6 +27,7 @@ import { create as createOpenRouter } from './openrouter/index.js';
 import { create as createOllama } from './ollama/index.js';
 import { create as createMcp } from './mcp/index.js';
 import { create as createAnthropic } from './anthropic/index.js';
+import { create as createGemini } from './gemini/index.js';
 import { create as createGptzero } from './gptzero/index.js';
 
 type Factory = (cfg: ProviderConfig) => ProviderAdapter;
@@ -41,6 +42,7 @@ const FACTORIES: Record<ProviderId, Factory> = {
   ollama: createOllama,
   mcp: createMcp,
   anthropic: createAnthropic,
+  gemini: createGemini,
   gptzero: createGptzero,
 };
 

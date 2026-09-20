@@ -100,6 +100,7 @@ const STATUS_LABELS: Record<string, string> = {
   failed: 'Failed',
   cancelled: 'Cancelled',
   awaiting_approval: 'Needs approval',
+  paused: 'Paused',
 };
 
 /**
@@ -128,7 +129,9 @@ export function MetricsStrip({
 }) {
   const completed = trace.nodes.filter((item) => item.status === 'succeeded').length;
   const active = trace.nodes.filter((item) => item.status === 'running');
-  const running = trace.status === 'running';
+  // A paused run is still an ACTIVE run -- it is exactly the run whose pause
+  // control has to stay on screen, so that resume is reachable.
+  const running = trace.status === 'running' || trace.status === 'paused';
   const preview = trace.provenance === 'preview';
   const lastEventSeconds = lastEventAt
     ? Math.max(0, Math.floor((Date.now() - lastEventAt) / 1000))
@@ -139,7 +142,9 @@ export function MetricsStrip({
         <div className="run-status">
           <span className={`status-dot ${running && !paused ? 'live-dot' : 'quiet'}`} />
           <span className={trace.status === 'awaiting_approval' ? 'warning-text' : ''}>
-            {paused && running ? 'Paused' : (STATUS_LABELS[trace.status] ?? trace.status)}
+            {paused && trace.status === 'running'
+              ? 'Paused'
+              : (STATUS_LABELS[trace.status] ?? trace.status)}
           </span>
           <span className="subtle-tag">
             {preview ? 'Preview' : trace.provenance === 'unknown' ? 'Backend' : trace.provenance}
@@ -236,10 +241,10 @@ export function MetricsStrip({
             <button
               className="secondary-button"
               disabled
-              title="This backend does not expose pause/resume yet"
+              title="This view replays a finished run, so there is nothing to pause"
             >
               <Icon name="pause" size={15} />
-              Pause unavailable
+              Nothing to pause
             </button>
           )}
           {onCancel && !['succeeded', 'cancelled', 'failed'].includes(trace.status) && (

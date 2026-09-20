@@ -17,7 +17,8 @@ import type {
   Step,
   StoredEvent,
 } from '@htn/shared';
-import { stripPiiValue } from '@htn/shared';
+import { isTerminal, stripPiiValue } from '@htn/shared';
+import { pauseRun as gatePauseRun, resumeRun as gateResumeRun } from '../core/pauseGate.js';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
 import { GraphNotFoundError } from './graphs.service.js';
 import { newId, nowIso } from '../lib/ids.js';
@@ -144,6 +145,44 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
     scheduleDecisions,
     agentSessions,
   };
+}
+
+/**
+ * Pause and resume.
+ *
+ * Both are no-ops on a run that is not executing in THIS process: a pause latch
+ * only means something to the loop that checks it, so pretending a restarted
+ * run can be paused would be a lie the UI would then render as truth.
+ */
+export async function pauseRun(id: string): Promise<Run | null> {
+  const run = await store.getRun(id);
+  if (!run) return null;
+
+  if (isTerminal(run.status)) {
+    throw new ValidationError('Run ' + id + ' is already ' + run.status, { status: run.status });
+  }
+  if (!orchestrator.isRunning(id)) {
+    throw new ValidationError(
+      'Run ' + id + ' is not executing in this process and cannot be paused',
+      { status: run.status },
+    );
+  }
+
+  // The status flips to 'paused' when the run actually reaches a checkpoint,
+  // not here -- reporting it earlier would claim a step had stopped while it
+  // was still running.
+  gatePauseRun(id);
+  return run;
+}
+
+export async function resumeRun(id: string): Promise<Run | null> {
+  const run = await store.getRun(id);
+  if (!run) return null;
+
+  if (!gateResumeRun(id)) {
+    throw new ValidationError('Run ' + id + ' is not paused', { status: run.status });
+  }
+  return run;
 }
 
 export async function cancelRun(id: string): Promise<Run | null> {

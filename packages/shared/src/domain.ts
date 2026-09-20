@@ -22,7 +22,20 @@ export type Json = string | number | boolean | null | Json[] | { [key: string]: 
 /* -------------------------------------------------------------------------- */
 
 export type RunStatus =
-  'pending' | 'running' | 'awaiting_approval' | 'succeeded' | 'failed' | 'cancelled';
+  | 'pending'
+  | 'running'
+  /** Blocked on a human decision about one exact action. */
+  | 'awaiting_approval'
+  /**
+   * Blocked on the human generally — either they hit pause, or the completion
+   * judge returned `blocked`. Distinct from 'awaiting_approval' because there
+   * is no single action to decide, and distinct from 'failed' because the run
+   * is still resumable.
+   */
+  | 'paused'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
 
 /** A terminal status means no further events will arrive for this run. */
 export const TERMINAL_RUN_STATUSES = ['succeeded', 'failed', 'cancelled'] as const;
@@ -98,7 +111,7 @@ export interface Step {
 /* Approval                                                                   */
 /* -------------------------------------------------------------------------- */
 
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'revised' | 'expired';
 
 export interface Approval {
   id: string;
@@ -108,10 +121,22 @@ export interface Approval {
   question: string;
   /** Exactly what will be sent if approved. Shown verbatim — no summarising. */
   proposedAction: Json;
+  /**
+   * What the human edited the payload into, when `status` is 'revised'. The
+   * spec requires BOTH to survive: `proposedAction` is what the agent asked
+   * for, this is what actually ran. Never overwrite one with the other.
+   */
+  revisedAction?: Json;
   reversibility: Reversibility;
   riskClass: RiskClass;
   /** Which rule demanded a human. */
   policyRule: string;
+  /**
+   * Set on a revision: the rule that fired when the REVISED action was put
+   * back through the risk gate. A revision is never trusted because a human
+   * typed it — it is reauthorized like any other action.
+   */
+  reauthorizedRule?: string;
   status: ApprovalStatus;
   decidedAt?: Iso;
   note?: string;

@@ -3,12 +3,13 @@
 **Read this before writing any code that calls Jev.** Jev is not a chat model and does
 not behave like one. The most common mistake is asking it to generate something.
 
-> **Status of this document.** Everything here was verified against TypeSafe's published
-> docs and the `browser-use/jev-ultrafast` source. **No live Jev call has been made from
-> this repo** — we have no `TYPESAFE_API_KEY` yet. Treat request/response shapes as
-> documented-but-untested, and fix this file the first time reality disagrees with it.
-> time reality disagrees with it.
-
+> **Status of this document.** The conceptual half was verified against TypeSafe's
+> published docs and the `browser-use/jev-ultrafast` source. The call shapes were then
+> rewritten to match the adapter this repo actually ships,
+> `apps/api/src/providers/jev/live.ts`, which goes through the Vercel AI Gateway rather
+> than TypeSafe's own SDK. **That file is the source of truth** — fix this document the
+> first time reality disagrees with it, and do not reintroduce `@typesafe-ai/sdk`
+> examples here.
 
 ---
 
@@ -16,21 +17,21 @@ not behave like one. The most common mistake is asking it to generate something.
 
 **Jev returns typed, calibrated answers. It cannot generate free text.**
 
-It is TypeSafe AI's *System One* decision model. You give it state and a set of typed
+It is TypeSafe AI's _System One_ decision model. You give it state and a set of typed
 questions; it returns a choice, a score, or a probability — each with confidence and a
 full probability distribution. There is no `content` string. There is no tool calling.
 There is no loop.
 
 So:
 
-| You want | Jev? |
-| --- | --- |
-| "Which of these 12 buttons is the login button?" | **yes** — this is exactly what it's for |
-| "Is this ticket about billing?" | **yes** |
-| "How urgent is this, 0–2?" | **yes** |
-| "Write a CSS selector for the login button" | **no** — it cannot generate |
-| "Plan the next five steps of this task" | **no** — use a generative model |
-| "Fill in this form field with the user's email" | **no** — Jev picks the *field*; a small LLM supplies the *text* |
+| You want                                         | Jev?                                                            |
+| ------------------------------------------------ | --------------------------------------------------------------- |
+| "Which of these 12 buttons is the login button?" | **yes** — this is exactly what it's for                         |
+| "Is this ticket about billing?"                  | **yes**                                                         |
+| "How urgent is this, 0–2?"                       | **yes**                                                         |
+| "Write a CSS selector for the login button"      | **no** — it cannot generate                                     |
+| "Plan the next five steps of this task"          | **no** — use a generative model                                 |
+| "Fill in this form field with the user's email"  | **no** — Jev picks the _field_; a small LLM supplies the _text_ |
 
 If you catch yourself designing a prompt, stop. Jev takes `criteria`, not prompts.
 
@@ -38,24 +39,29 @@ If you catch yourself designing a prompt, stop. Jev takes `criteria`, not prompt
 
 ## Setup
 
-This repo is TypeScript. Use the JS/TS SDK.
+**We reach Jev through the Vercel AI SDK's AI Gateway. `@typesafe-ai/sdk` is NOT a
+dependency of this repo and must not become one.** One route, one credential. The
+working implementation is `apps/api/src/providers/jev/live.ts` — read it before this
+table if the two ever disagree.
 
 ```bash
-npm install @typesafe-ai/sdk          # requires Node 20+
-# TYPESAFE_API_KEY goes in the root .env
+# `ai` is already a dependency of @htn/api. Nothing else to install.
+# AI_GATEWAY_API_KEY goes in the root .env
 ```
 
-| | |
-| --- | --- |
-| Package | `@typesafe-ai/sdk` (npm; 0.6.0 at time of writing) |
-| Client | `new TypeSafeClient()` → `client.systemOne({ state, questions })` |
-| Auth | `TYPESAFE_API_KEY` environment variable |
-| Model id | `jev-latest` |
-| Raw endpoint | `POST https://api.typesafe.ai/v1/systemone` |
+|          |                                                                     |
+| -------- | ------------------------------------------------------------------- |
+| Package  | `ai` (the Vercel AI SDK)                                            |
+| Client   | `createGateway({ apiKey }).evaluationModel('typesafe-ai/jev')`      |
+| Call     | `experimental_evaluate({ model, state, questions })`                |
+| Auth     | `AI_GATEWAY_API_KEY`, read from the one slot `config.providers.jev` |
+| Model id | `typesafe-ai/jev`                                                   |
+| Base URL | `https://ai-gateway.vercel.sh/v4/ai`                                |
 
-A Python SDK (`typesafe-sdk` on PyPI, with `AsyncTypeSafeClient`) exists too, if an MCP
-server or side tool ever needs it. The SDK is a thin wrapper over that endpoint;
-`jev-ultrafast` posts raw JSON only because it predates the SDK.
+The vendor's own `@typesafe-ai/sdk` / `POST https://api.typesafe.ai/v1/systemone` route
+and its `jev-latest` model id are real, but they are a SECOND credential and a second
+code path for the same capability. Person 2's adapter settled on the gateway; anything
+in this repo that calls Jev goes through it.
 
 ---
 
@@ -64,27 +70,33 @@ server or side tool ever needs it. The SDK is a thin wrapper over that endpoint;
 All three can go in **one request**, and every answer carries calibrated probabilities.
 
 ```ts
-import { choice, noul, score, TypeSafeClient } from '@typesafe-ai/sdk';
+import { createGateway, experimental_evaluate as evaluate } from 'ai';
 
-const client = new TypeSafeClient();
-const response = await client.systemOne({
+const model = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY }) //
+  .evaluationModel('typesafe-ai/jev');
+
+const response = await evaluate({
+  model,
   state: { document: 'I was charged twice. Please fix this ASAP.' },
   questions: {
-    billing: noul('Is this ticket about billing?'),
-    tone: choice("What is the customer's tone?", {
-      calm: null,
-      frustrated: null,
-      angry: null,
-    }),
-    urgency: score('How urgent is this ticket?', ['can wait', 'this week', 'today']),
+    billing: { type: 'noul', instructions: 'Is this ticket about billing?' },
+    tone: {
+      type: 'choice',
+      instructions: "What is the customer's tone?",
+      criteria: { calm: null, frustrated: null, angry: null },
+    },
+    urgency: {
+      type: 'score',
+      instructions: 'How urgent is this ticket?',
+      criteria: ['can wait', 'this week', 'today'],
+    },
   },
 });
 
 response.answers.billing.noul; // 0..1
-response.answers.tone.choice; // one of the criteria keys — type-inferred
+response.answers.tone.choice; // one of the criteria KEYS, as a string
 response.answers.urgency.score; // float, e.g. 1.3 — interpolated, not an index
-response.answers.tone.confidence; // calibrated
-response.answers.tone.probabilities;
+response.answers.tone.probabilities; // distribution — derive confidence from this
 ```
 
 The answer type is **inferred from the questions object**, so a typo in a criteria key is
@@ -110,8 +122,8 @@ the one this repo follows.
 
 ### 1. Turn the page into an indexed element table
 
-Never hand Jev raw DOM or a screenshot. Build a numbered table of *interactive elements
-only*:
+Never hand Jev raw DOM or a screenshot. Build a numbered table of _interactive elements
+only_:
 
 ```text
 [1] button    Change ticket type · Round trip
@@ -146,11 +158,11 @@ page → element table → operation                 │
                    small LLM → text → browser
 ```
 
-Target questions are **speculative**: you ask for a click target *and* a type target,
+Target questions are **speculative**: you ask for a click target _and_ a type target,
 then discard whichever doesn't match the chosen operation. Two decisions, one round trip.
 
 **This trade is deliberate and it is not free.** The published benchmark measured tasks
-31–43% faster but inference cost 38–51% *higher*, because you pay for discarded target
+31–43% faster but inference cost 38–51% _higher_, because you pay for discarded target
 heads. Tune the number of speculative heads if cost matters more than latency for a given
 run. (That benchmark was four runs with no outcome verification, self-disclaimed by its
 authors — treat the direction as real and the magnitudes as noise.)
@@ -162,9 +174,9 @@ authors — treat the direction as real and the magnitudes as noise.)
 
 Note `DONE` / `BLOCKED` — the same vocabulary as this project's completion judge.
 
-`TYPE_TEXT` is the one that needs help: Jev picks *which field*, and a small generative
-model supplies *what to type*. Its own label says so — *"A small LLM will supply the value
-from the goal."*
+`TYPE_TEXT` is the one that needs help: Jev picks _which field_, and a small generative
+model supplies _what to type_. Its own label says so — _"A small LLM will supply the value
+from the goal."_
 
 ### 4. Validate before you execute
 
@@ -192,7 +204,7 @@ Two places where Jev's actual behaviour lines up with
 [agentos-design.md](./agentos-design.md):
 
 **1. Confidence gating is implementable, not aspirational.** The spec says AgentOS accepts
-`done` only when *"Jev clears the configured confidence threshold."* Jev returns real
+`done` only when _"Jev clears the configured confidence threshold."_ Jev returns real
 calibrated probabilities, so that threshold is a number you can actually compare against.
 
 Use it for risk too: if Jev is split 0.5/0.5 between two buttons on a `verify` action,
@@ -201,11 +213,11 @@ lower it. That's "deterministic policy overrides Jev" made concrete.
 
 **2. Jev is structurally quarantined.** The recommended defence against prompt injection
 from web pages is the dual-LLM split: a privileged planner with tools, and a quarantined
-reader that sees untrusted content but has no tool access. Jev *is* the quarantined
+reader that sees untrusted content but has no tool access. Jev _is_ the quarantined
 reader by construction — a model that can only return an index into a list you built
 cannot be talked into issuing an action, no matter what the page says.
 
-This does **not** remove the need for the gate. Page content can still steer *which*
+This does **not** remove the need for the gate. Page content can still steer _which_
 element gets picked, so `authorize_action` still runs before every execution, and
 consequential operations still need approval.
 
@@ -229,8 +241,8 @@ deterministic fallback anyway, so the stub is not throwaway work.
 - **Acting on a stale snapshot.** Check freshness and occlusion first.
 - **Trusting confidence blindly.** Low confidence is a signal to escalate to a human, not
   to retry harder.
-- **Skipping the gate because "Jev is safe."** Jev being unable to *generate* an action
-  does not mean the action it *picked* is authorized.
+- **Skipping the gate because "Jev is safe."** Jev being unable to _generate_ an action
+  does not mean the action it _picked_ is authorized.
 
 ---
 

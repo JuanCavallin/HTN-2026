@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { emptyRunView, isTerminal, type AgentGraph, type Conversation } from '@htn/shared';
 import { api } from '../lib/api';
@@ -604,6 +597,9 @@ export function LiveRunWorkspace() {
   const graph = snapshot ?? seed?.graph;
   const trace = useMemo(() => buildTrace(view, graph, now), [view, graph, now]);
   const terminal = !!view.run && isTerminal(view.run.status);
+  // Read from the run, never from a local click -- pause lands at the next step
+  // boundary, so the server is the only thing that knows when it took effect.
+  const runPaused = view.run?.status === 'paused';
 
   useEffect(() => {
     if (terminal) return;
@@ -653,6 +649,23 @@ export function LiveRunWorkspace() {
     }
   };
 
+  /**
+   * Pause is cooperative, so this does NOT set any local "paused" state: the
+   * run reports status 'paused' over SSE once it actually reaches a step
+   * boundary. Flipping a local flag here would show the run as stopped while a
+   * step was still running.
+   */
+  const togglePause = async () => {
+    if (!id) return;
+    setError('');
+    try {
+      if (runPaused) await api.resumeRun(id);
+      else await api.pauseRun(id);
+    } catch (issue) {
+      setError(issue instanceof Error ? issue.message : 'The run did not accept that request.');
+    }
+  };
+
   const lane = (
     <>
       <header className="conversation-heading">
@@ -694,13 +707,17 @@ export function LiveRunWorkspace() {
                 'Following the execution stream. Recorded steps and routing decisions will appear here as they arrive.'}
             </p>
             {!terminal && (
-              <WorkingStatus active={view.connected && view.run?.status !== 'awaiting_approval'}>
+              <WorkingStatus
+                active={view.connected && view.run?.status !== 'awaiting_approval' && !runPaused}
+              >
                 {view.run?.status === 'awaiting_approval'
                   ? 'Waiting for your approval'
-                  : !view.connected
-                    ? 'Connection interrupted — reconnecting'
-                    : (trace.nodes.find((node) => node.status === 'running')?.label ??
-                      'Waiting for a backend update')}
+                  : runPaused
+                    ? 'Paused at a step boundary — resume when you’re ready'
+                    : !view.connected
+                      ? 'Connection interrupted — reconnecting'
+                      : (trace.nodes.find((node) => node.status === 'running')?.label ??
+                        'Waiting for a backend update')}
               </WorkingStatus>
             )}
             {view.approvals
@@ -790,6 +807,8 @@ export function LiveRunWorkspace() {
       metrics={
         <MetricsStrip
           trace={trace}
+          paused={runPaused}
+          onPause={() => void togglePause()}
           onCancel={() => void cancel()}
           connected={view.connected}
           lastEventAt={view.lastEventAt}

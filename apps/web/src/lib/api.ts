@@ -188,6 +188,15 @@ export const api = {
 
   cancelRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/cancel', { method: 'POST' }),
 
+  /**
+   * Pause is cooperative: this resolves once the server has accepted the
+   * request, and the run reports status 'paused' over SSE when it actually
+   * reaches a step boundary. Do not render "paused" off this response.
+   */
+  pauseRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/pause', { method: 'POST' }),
+
+  resumeRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/resume', { method: 'POST' }),
+
   /** "Save as a new task": fork the graph THIS run executed into a new document. */
   saveRunAsGraph: (id: string) =>
     request<{ graph: AgentGraph }>('/runs/' + id + '/save-as-graph', { method: 'POST' }),

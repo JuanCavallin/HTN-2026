@@ -18,7 +18,8 @@ export type ProviderId =
   | 'ollama' // local/private model runtime
   | 'mcp' // user-configured upstream MCP connections
   | 'anthropic' // frontier text model
-  | 'gptzero'; // OUT OF SCOPE — slot only
+  | 'gemini' // direct Google cloud model route (second cloud vendor)
+  | 'gptzero'; // outbound-text authenticity check
 
 export const PROVIDER_IDS = [
   'hermes',
@@ -30,6 +31,7 @@ export const PROVIDER_IDS = [
   'ollama',
   'mcp',
   'anthropic',
+  'gemini',
   'gptzero',
 ] as const satisfies readonly ProviderId[];
 
@@ -310,7 +312,7 @@ export interface TextModelAdapter extends ProviderAdapter {
   ): Promise<ProviderResult<{ text: string; tokensIn: number; tokensOut: number }>>;
 }
 
-/** GPTZero slot. Mock only — no live.ts exists. */
+/** Outbound-text authenticity scoring. `score` is normalised to P(ai) in 0..1. */
 export interface ContentAnalysisAdapter extends ProviderAdapter {
   analyze(
     input: { text: string },

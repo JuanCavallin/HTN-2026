@@ -175,10 +175,13 @@ test('editing a route in preview changes what re-runs, and is labeled as revised
   assert.match(after.detail, /re-authorized/);
 });
 
-test('live mid-run intervention stays closed until the run API supports it', () => {
-  assert.equal(RUN_CAPABILITIES.pauseResume, false);
+test('pause/resume is live, but editing a running node stays closed', () => {
+  assert.equal(RUN_CAPABILITIES.pauseResume, true);
+  // Pausing was necessary for live editing, not sufficient -- a run executes a
+  // snapshot, so the edit still would not reach it.
+  assert.equal(RUN_CAPABILITIES.editRunningNode, false);
   assert.equal(canInterveneLive, false);
-  assert.match(LIVE_INTERVENTION_REASON, /pause and resume/);
+  assert.match(LIVE_INTERVENTION_REASON, /snapshot/);
 });
 
 test('layout is stable: adding a node never reorders the nodes already placed', () => {

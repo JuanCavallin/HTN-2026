@@ -6,7 +6,7 @@
  */
 
 import type { ErrorRequestHandler, RequestHandler } from 'express';
-import { ApprovalConflictError } from '../../services/approvals.service.js';
+import { ApprovalConflictError, ApprovalRevisionError } from '../../services/approvals.service.js';
 import {
   GraphConflictError,
   GraphNotFoundError,
@@ -43,6 +43,13 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(400).json({
       error: { code: err.code, message: err.message, details: err.details },
     });
+    return;
+  }
+
+  // A refused revision is the gate working, not a server fault. The approval is
+  // still pending, so the client can narrow the edit and try again.
+  if (err instanceof ApprovalRevisionError) {
+    res.status(422).json({ error: { code: err.code, message: err.message } });
     return;
   }
 

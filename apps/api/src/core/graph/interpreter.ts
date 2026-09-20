@@ -325,7 +325,7 @@ async function callToolGated(
     );
   }
 
-  await ctx.requireApproval(args.stepId, {
+  const authorized = await ctx.requireApproval(args.stepId, {
     kind: risk.kind,
     description: args.description,
     amountCents: args.amountCents,
@@ -334,20 +334,49 @@ async function callToolGated(
     payload: { tool: args.tool, args: args.toolArgs } as Json,
   });
 
+  // A human may have edited the arguments. Take them from the AUTHORIZED
+  // action, never from `args` -- the tool NAME still comes from `args`, because
+  // the risk classification was made against that name and a revision is not
+  // allowed to repoint the call at a different tool.
+  const authorizedArgs = authorizedToolArgs(authorized.payload, args.toolArgs);
+
   const toolbox = ctx.provider('toolbox');
   const res = await toolbox.callTool(
-    { name: args.tool, args: args.toolArgs },
+    { name: args.tool, args: authorizedArgs },
     ctx.callContext({
       stepId: args.stepId,
       policyRule:
-        risk.kind === UNKNOWN_TOOL_ACTION_KIND
-          ? 'human-approved-unclassified-tool'
-          : 'graph-node-tool-call',
+        authorizedArgs !== args.toolArgs
+          ? 'human-revised-and-reauthorized-tool-call'
+          : risk.kind === UNKNOWN_TOOL_ACTION_KIND
+            ? 'human-approved-unclassified-tool'
+            : 'graph-node-tool-call',
     }),
   );
 
   if (!res.ok) throw new Error('Tool ' + args.tool + ' failed: ' + res.error.message);
   return res.data;
+}
+
+/**
+ * Pull the tool arguments back out of an authorized action's payload.
+ *
+ * Falls back to the original arguments when the payload is not the
+ * `{ tool, args }` envelope we put in -- an unrecognised shape means we cannot
+ * tell what was revised, and guessing would be worse than running what was
+ * already classified.
+ */
+function authorizedToolArgs(
+  payload: unknown,
+  fallback: Record<string, Json>,
+): Record<string, Json> {
+  if (payload && typeof payload === 'object' && 'args' in payload) {
+    const args = (payload as { args: unknown }).args;
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+      return args as Record<string, Json>;
+    }
+  }
+  return fallback;
 }
 
 async function runTool(

@@ -7,7 +7,22 @@
  * approval is marked 'expired' rather than silently resuming.
  */
 
-export type ApprovalOutcome = 'approved' | 'rejected';
+import type { ProposedAction } from '@htn/shared';
+
+export type ApprovalVerdict = 'approved' | 'rejected' | 'revised';
+
+/**
+ * What the waiting orchestrator gets back.
+ *
+ * `action` is the action as finally authorized. For a plain approval that is
+ * the action the agent proposed; for a revision it is the human's edit, already
+ * put back through `classify()`. The caller executes THIS, never the original —
+ * that is the whole point of a revision.
+ */
+export interface ApprovalOutcome {
+  verdict: ApprovalVerdict;
+  action: ProposedAction;
+}
 
 export class ApprovalRejectedError extends Error {
   readonly code = 'APPROVAL_REJECTED';
@@ -23,6 +38,14 @@ export class ApprovalRejectedError extends Error {
 interface Waiter {
   resolve: (outcome: ApprovalOutcome) => void;
   reject: (err: Error) => void;
+  /**
+   * The action exactly as the agent proposed it. Kept here rather than on the
+   * stored Approval because reauthorizing a revision needs the classifier's
+   * INPUT (kind, amountCents, declared reversibility), not the rendered payload
+   * the panel shows. It lives with the waiter because a revision is only
+   * meaningful while the orchestrator that proposed it is still waiting.
+   */
+  action: ProposedAction;
 }
 
 const waiters = new Map<string, Waiter>();
@@ -30,6 +53,7 @@ const waiters = new Map<string, Waiter>();
 /** Block until someone decides this approval, or the run is aborted. */
 export function waitForApproval(
   approvalId: string,
+  action: ProposedAction,
   signal?: AbortSignal,
 ): Promise<ApprovalOutcome> {
   return new Promise<ApprovalOutcome>((resolve, reject) => {
@@ -38,7 +62,7 @@ export function waitForApproval(
       return;
     }
 
-    waiters.set(approvalId, { resolve, reject });
+    waiters.set(approvalId, { resolve, reject, action });
 
     signal?.addEventListener(
       'abort',
@@ -62,6 +86,11 @@ export function settleApproval(approvalId: string, outcome: ApprovalOutcome): bo
   waiters.delete(approvalId);
   waiter.resolve(outcome);
   return true;
+}
+
+/** The originally proposed action, while someone is still waiting on it. */
+export function pendingAction(approvalId: string): ProposedAction | null {
+  return waiters.get(approvalId)?.action ?? null;
 }
 
 export function isAwaiting(approvalId: string): boolean {

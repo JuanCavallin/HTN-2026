@@ -1,4 +1,10 @@
-import type { AuthorizationDecision, Json, ToolAction, ToolDescriptor } from '@htn/shared';
+import type {
+  AuthorizationDecision,
+  Json,
+  ProposedAction,
+  ToolAction,
+  ToolDescriptor,
+} from '@htn/shared';
 import type { Store } from '../../store/types.js';
 import { newId, nowIso } from '../../lib/ids.js';
 import { ApprovalRejectedError, waitForApproval } from '../approvalGate.js';
@@ -7,6 +13,13 @@ import type { SessionStateService } from '../sessions/service.js';
 
 export interface ToolApprovalReceipt {
   approvalId: string;
+  /**
+   * Set only when the human edited the exact arguments. The broker must
+   * revalidate these against the tool schema and run authorizeAction a SECOND
+   * time before executing them — a revision is a new action, not a blessed
+   * one.
+   */
+  revisedArguments?: Json;
 }
 
 export interface ToolApprovalGate {
@@ -65,7 +78,16 @@ export class RunToolApprovalGate implements ToolApprovalGate {
     await this.bus.emit(action.runId, { type: 'run.updated', run });
     await this.bus.emit(action.runId, { type: 'approval.requested', approval });
 
-    const outcome = await waitForApproval(approval.id, signal);
+    // The exact action, in the shape the deterministic gate classifies. The
+    // descriptor's reversibility is passed explicitly so a revision cannot
+    // slide the action into a laxer class by changing its arguments.
+    const proposed: ProposedAction = {
+      kind: 'tool:' + descriptor.id,
+      description: approval.question,
+      reversibility: descriptor.reversibility,
+      payload: approval.proposedAction,
+    };
+    const outcome = await waitForApproval(approval.id, proposed, signal);
 
     const resumedRun = await this.store.patchRun(action.runId, { status: 'running' });
     const step = await this.store.patchStep(action.stepId, { status: 'running' });
@@ -73,7 +95,14 @@ export class RunToolApprovalGate implements ToolApprovalGate {
     await this.bus.emit(action.runId, { type: 'run.updated', run: resumedRun });
     await this.bus.emit(action.runId, { type: 'step.upserted', step });
 
-    if (outcome === 'rejected') throw new ApprovalRejectedError(approval.id);
+    if (outcome.verdict === 'rejected') throw new ApprovalRejectedError(approval.id);
+
+    if (outcome.verdict === 'revised') {
+      return {
+        approvalId: approval.id,
+        revisedArguments: revisedArgumentsOf(outcome.action.payload, action),
+      };
+    }
     return { approvalId: approval.id };
   }
 }
@@ -93,4 +122,18 @@ function exactActionJson(action: ToolAction): Json {
     destination: action.destination ?? null,
     dataLabels: action.dataLabels,
   };
+}
+
+/**
+ * Read the edited arguments back out of a revised exact-action payload.
+ *
+ * Only `arguments` is taken. The tool id, descriptor version and destination
+ * are what the authorization was computed against, so accepting client edits to
+ * them would let a revision retarget the call instead of narrowing it.
+ */
+function revisedArgumentsOf(payload: unknown, original: ToolAction): Json {
+  if (payload && typeof payload === 'object' && 'arguments' in payload) {
+    return (payload as { arguments: Json }).arguments;
+  }
+  return original.arguments;
 }

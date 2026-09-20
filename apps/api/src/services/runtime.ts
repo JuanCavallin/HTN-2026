@@ -26,6 +26,7 @@ import { nowIso } from '../lib/ids.js';
 import { createProviderRegistry } from '../providers/registry.js';
 import { createOpenRouterBackend, openRouterModelRoutes } from '../providers/openrouter/backend.js';
 import { createOllamaBackend, ollamaModelRoutes } from '../providers/ollama/backend.js';
+import { createGeminiBackend, geminiModelRoutes } from '../providers/gemini/backend.js';
 import type { RecordEgress } from '../providers/withEgress.js';
 import { ComposioToolCatalog } from '../providers/composio/register.js';
 import { McpConnectionManager } from '../core/mcp/connections.js';
@@ -57,7 +58,14 @@ export const toolBroker = new ToolBroker(
   decisionService,
   sessionStateService,
   bus,
-  { approvalGate: toolApprovalGate },
+  {
+    approvalGate: toolApprovalGate,
+    // Escalate-only: it can stop an outbound send for a human, never permit one.
+    contentCheck: {
+      analysis: providers.provider('content.analysis'),
+      threshold: config.contentCheck.escalationThreshold,
+    },
+  },
 );
 registerCoreLocalTools(toolRegistry, toolExecutors, sessionStateService);
 export const browserTools = registerBrowserTools(toolRegistry, toolExecutors, {
@@ -87,15 +95,22 @@ export const modelGateway = new ModelGatewayService(
     modelRoutes: (adapter) => [
       ...modelRoutesFor(adapter),
       ...openRouterModelRoutes(config.providers.openrouter),
+      ...geminiModelRoutes(config.providers.gemini),
       ...ollamaModelRoutes(config.providers.ollama),
     ],
+    // Each backend handles only its own route and delegates the rest, so the
+    // chain order is irrelevant to correctness and adding a vendor is one link.
     backend: createOllamaBackend(
       config.providers.ollama,
       recordEgress,
-      createOpenRouterBackend(
-        config.providers.openrouter,
+      createGeminiBackend(
+        config.providers.gemini,
         recordEgress,
-        textAdapterBackend(boundTextModel),
+        createOpenRouterBackend(
+          config.providers.openrouter,
+          recordEgress,
+          textAdapterBackend(boundTextModel),
+        ),
       ),
     ),
   },
