@@ -7,26 +7,28 @@
  *         -> orchestrator (given store, bus, and the registry's accessor)
  */
 
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { RunBus } from '../core/bus.js';
-import { buildEgressEvent } from '../core/ledger.js';
-import { ApprovalRejectedError } from '../core/approvalGate.js';
-import { Orchestrator } from '../core/orchestrator.js';
-import { runContextFor } from '../core/runContexts.js';
-import {
-  createStopgapAuthorizeAction,
-  createToolPlane,
-  defaultActionKind,
-  type RequestApproval,
-  type ToolPlane,
-} from '../core/tools/index.js';
+import { isTerminal } from '@htn/shared';
 import { config } from '../config.js';
+import { buildEgressEvent } from '../core/ledger.js';
+import { Orchestrator } from '../core/orchestrator.js';
+import { DecisionService } from '../core/decisions/service.js';
+import { modelRoutesFor } from '../core/modelGateway/catalog.js';
+import { ModelGatewayService, textAdapterBackend } from '../core/modelGateway/service.js';
+import { RunToolApprovalGate } from '../core/tools/approval.js';
+import { ToolBroker } from '../core/tools/broker.js';
+import { InMemoryToolExecutorRegistry } from '../core/tools/executors.js';
+import { InMemoryToolRegistry } from '../core/tools/registry.js';
+import { registerCoreLocalTools } from '../core/tools/local.js';
+import { registerBrowserTools } from '../core/tools/index.js';
+import { SessionStateService } from '../core/sessions/service.js';
 import { nowIso } from '../lib/ids.js';
 import { createProviderRegistry } from '../providers/registry.js';
-import { setToolClassifications } from '../core/graph/toolRisk.js';
-import { createJevBrowserDecider } from '../providers/jev/browserDecider.js';
+import { createOpenRouterBackend, openRouterModelRoutes } from '../providers/openrouter/backend.js';
+import { createOllamaBackend, ollamaModelRoutes } from '../providers/ollama/backend.js';
 import type { RecordEgress } from '../providers/withEgress.js';
+import { ComposioToolCatalog } from '../providers/composio/register.js';
+import { McpConnectionManager } from '../core/mcp/connections.js';
 import { store } from '../store/index.js';
 
 export const bus = new RunBus((runId, event) => store.appendEvent(runId, event));
@@ -42,111 +44,176 @@ const recordEgress: RecordEgress = async (input) => {
 };
 
 export const providers = createProviderRegistry(recordEgress);
+export const decisionService = new DecisionService(providers.provider('decision'));
+export const sessionStateService = new SessionStateService(store, bus);
+export const toolRegistry = new InMemoryToolRegistry();
+/** Compatibility name retained for teammates already importing the gateway catalog. */
+export const toolDescriptorCatalog = toolRegistry;
+export const toolExecutors = new InMemoryToolExecutorRegistry();
+export const toolApprovalGate = new RunToolApprovalGate(store, bus, sessionStateService);
+export const toolBroker = new ToolBroker(
+  toolRegistry,
+  toolExecutors,
+  decisionService,
+  sessionStateService,
+  bus,
+  { approvalGate: toolApprovalGate },
+);
+registerCoreLocalTools(toolRegistry, toolExecutors, sessionStateService);
+export const browserTools = registerBrowserTools(toolRegistry, toolExecutors, {
+  provider: (capability) => providers.provider(capability),
+});
+export const composioToolCatalog = new ComposioToolCatalog(
+  providers.provider('toolbox'),
+  config.providers.composio,
+  toolRegistry,
+  toolExecutors,
+);
+export const mcpConnections = new McpConnectionManager(
+  store,
+  toolRegistry,
+  toolExecutors,
+  recordEgress,
+  [config.mcpGateway.url],
+);
+const boundTextModel = providers.provider('text.model');
+export const modelGateway = new ModelGatewayService(
+  decisionService,
+  sessionStateService,
+  boundTextModel,
+  toolRegistry,
+  bus,
+  {
+    modelRoutes: (adapter) => [
+      ...modelRoutesFor(adapter),
+      ...openRouterModelRoutes(config.providers.openrouter),
+      ...ollamaModelRoutes(config.providers.ollama),
+    ],
+    backend: createOllamaBackend(
+      config.providers.ollama,
+      recordEgress,
+      createOpenRouterBackend(
+        config.providers.openrouter,
+        recordEgress,
+        textAdapterBackend(boundTextModel),
+      ),
+    ),
+  },
+);
 
 export const orchestrator = new Orchestrator({
   store,
   bus,
   provider: (capability) => providers.provider(capability),
   providerFor: (capability) => providers.bindings()[capability],
+  decisionService,
+  sessionStateService,
+  toolRegistry,
+  toolDiscovery: composioToolCatalog,
+  localToolCandidates: async () => {
+    const [mcpToolIds, registered] = await Promise.all([
+      mcpConnections.candidateToolIds(),
+      toolRegistry.list(),
+    ]);
+    const browserToolIds = registered
+      .filter(
+        (tool) =>
+          tool.descriptor.availability === 'available' &&
+          (tool.descriptor.providerId === 'localbrowser' ||
+            tool.descriptor.providerId === 'browserbase'),
+      )
+      .map((tool) => tool.descriptor.id);
+    return [...new Set([...mcpToolIds, ...browserToolIds])];
+  },
+  releaseRunResources: ({ runId, stepId }) =>
+    browserTools.closeRunSessions(runId, {
+      runId,
+      stepId,
+      policyRule: 'agent-task-resource-release',
+    }),
 });
 
-/* -------------------------------------------------------------------------- */
-/* The tool plane (Person 3). Registry + executors, assembled once.           */
-/* -------------------------------------------------------------------------- */
+let providersInitialized = false;
 
-/**
- * Built lazily and memoised, because the Jev decider's availability is only
- * knowable asynchronously (it depends on whether the SDK resolves).
- *
- * `authorize` is 3B's STOPGAP over core/risk.ts — Person 2 owns the real
- * `authorize_action`. Swapping it is one line here and nothing else changes,
- * because every executor only ever knew the `AuthorizeAction` protocol.
- *
- * `requestApproval` bridges an `ask_human` action to the SAME approval flow a
- * hand-written playbook uses, by finding the run's own context (core/runContexts).
- * No live run to ask, or a rejection, means DENY -- failing closed is the
- * correct default, and it stays the default for anything this cannot reach.
- */
-let toolPlanePromise: Promise<ToolPlane> | undefined;
-
-const requestApproval: RequestApproval = async (action) => {
-  const run = runContextFor(action.runId);
-  if (!run) return { approved: false };
-  try {
-    await run.requireApproval(action.stepId, {
-      kind: defaultActionKind(action),
-      description: action.toolId + ' on ' + action.destination,
-      payload: action.args,
-    });
-    return { approved: true };
-  } catch (err) {
-    if (err instanceof ApprovalRejectedError) return { approved: false };
-    throw err;
-  }
-};
-
-export function toolPlane(): Promise<ToolPlane> {
-  toolPlanePromise ??= (async () => {
-    const here = dirname(fileURLToPath(import.meta.url));
-    return createToolPlane({
-      authorize: createStopgapAuthorizeAction({ requestApproval }),
-      provider: ((capability: 'browser' | 'browser.local') =>
-        providers.provider(capability)) as never,
-      // The plane is one process-wide instance, so the RUN comes from each
-      // action. The fallback only serves a caller that has no run at all.
-      callContext: ({ runId, stepId, policyRule }) => ({
-        runId: runId ?? 'run_tool_plane',
-        ...(stepId ? { stepId } : {}),
-        policyRule,
-      }),
-      // The `web` family rides on Browserbase, so it is available when that
-      // backend is (mock mode counts: it is what makes a keyless demo run).
-      web: {
-        available:
-          config.providers.browserbase.mode !== 'disabled' &&
-          (config.providers.browserbase.mode === 'mock' ||
-            Boolean(config.providers.browserbase.apiKey)),
-      },
-      // null when there is no TYPESAFE_API_KEY or no SDK, which is today's
-      // state — the deterministic fallback then takes every decision, and
-      // `decisionSource` reports that truthfully to the UI.
-      jevDecider: createJevBrowserDecider(),
-      descriptors: {
-        localAvailable: config.providers.localbrowser.mode !== 'disabled',
-        browserbaseAvailable: Boolean(config.providers.browserbase.apiKey),
-      },
-      pluginDirectory: join(here, '..', '..', '..', '..', 'config', 'plugins'),
-    });
-  })();
-  return toolPlanePromise;
+/** Discover provider schemas once, then register only tools in AgentOS's reviewed table. */
+export async function initializeRuntimeProviders(): Promise<void> {
+  if (providersInitialized) return;
+  providersInitialized = true;
+  await mcpConnections.initialize();
+  await refreshComposioTools();
 }
 
 /**
- * Seed the tool -> action-kind index the risk gate reads.
- *
- * Read through the `toolbox` CAPABILITY, not a vendor, so it picks up whatever
- * is bound — the Composio mock today, a live catalog later, without changing
- * this line. Until it runs, every tool is unclassified and stops for a human,
- * which is the safe direction.
- *
- * Failure is non-fatal for the same reason: an empty index is strict, not
- * permissive, so a catalog read that fails must not stop the server booting.
+ * A persisted run cannot resume its in-memory Hermes task or approval promise
+ * after this process exits. Close that stale state explicitly on startup so the
+ * API never presents a run as active when no worker exists to advance it.
  */
-export async function loadToolClassifications(): Promise<number> {
-  const result = await providers.provider('toolbox').listTools({
-    runId: 'sys_catalog',
-    policyRule: 'tool-catalog-read',
-  });
-  if (!result.ok) {
-    console.warn(
-      '[tools] catalog unavailable (' +
-        result.error.code +
-        '); every tool stays unclassified and will stop for a human.',
-    );
-    return 0;
+export async function recoverInterruptedRuns(): Promise<number> {
+  const interrupted = (await store.listRuns({ limit: 100_000 })).filter(
+    (run) => !isTerminal(run.status),
+  );
+
+  for (const run of interrupted) {
+    const at = nowIso();
+    for (const step of await store.listSteps(run.id)) {
+      if (!['pending', 'running', 'blocked'].includes(step.status)) continue;
+      const next = await store.patchStep(step.id, {
+        status: step.status === 'pending' ? 'skipped' : 'failed',
+        error:
+          step.status === 'pending'
+            ? undefined
+            : { code: 'PROCESS_RESTART', message: 'Execution stopped when the API restarted.' },
+        endedAt: at,
+      });
+      await bus.emit(run.id, { type: 'step.upserted', step: next });
+    }
+
+    for (const approval of await store.listApprovals(run.id)) {
+      if (approval.status !== 'pending') continue;
+      const next = await store.patchApproval(approval.id, {
+        status: 'expired',
+        decidedAt: at,
+        note: 'Expired because the API restarted before a decision was received.',
+      });
+      await bus.emit(run.id, { type: 'approval.resolved', approval: next });
+    }
+
+    for (const session of await store.listSessionStates(run.id)) {
+      if (['completed', 'failed', 'cancelled'].includes(session.status)) continue;
+      const next = await store.patchSessionState(session.id, { status: 'cancelled' });
+      await bus.emit(run.id, { type: 'session.updated', session: next });
+    }
+
+    const next = await store.patchRun(run.id, {
+      status: 'cancelled',
+      summary: 'Interrupted by an API restart; start a new run to continue.',
+      error: {
+        code: 'PROCESS_RESTART',
+        message: 'The in-memory harness task could not be resumed after the API restarted.',
+      },
+    });
+    await bus.emit(run.id, { type: 'run.updated', run: next });
   }
-  setToolClassifications(result.data);
-  return result.data.filter((t) => t.actionKind).length;
+
+  if (interrupted.length > 0) {
+    console.warn('[store] reconciled ' + interrupted.length.toString() + ' interrupted run(s)');
+  }
+  return interrupted.length;
+}
+
+/** Re-read connection state after the user completes Composio OAuth. */
+export async function refreshComposioTools(): Promise<
+  Awaited<ReturnType<ComposioToolCatalog['bootstrapReviewed']>>
+> {
+  const report = await composioToolCatalog.bootstrapReviewed();
+  if (report.registered.length > 0) {
+    console.log('[composio] registered: ' + report.registered.join(', '));
+  }
+  if (report.skipped.length > 0) {
+    console.warn('[composio] skipped unreviewed/unavailable tools: ' + report.skipped.join(', '));
+  }
+  if (report.warning) console.warn('[composio] startup warning: ' + report.warning);
+  return report;
 }
 
 export { store };

@@ -1,4 +1,4 @@
-import type { ProviderCallContext } from '@htn/shared';
+import type { ProviderCallContext, SessionCheckpoint } from '@htn/shared';
 import { config } from '../src/config.js';
 import { createLiveJev } from '../src/providers/jev/live.js';
 
@@ -71,6 +71,57 @@ async function main(): Promise<void> {
     `   PASS: privacy=${route.data.privacy} intelligence=${route.data.intelligence} ` +
       `tier=${route.data.modelTier} tools=${JSON.stringify(route.data.exposedTools)} ` +
       `confidence=${route.data.confidence.toFixed(3)}`,
+  );
+
+  console.log('4. Testing completion judgment...');
+  const checkpoint: SessionCheckpoint = {
+    runId: ctx.runId,
+    objective: 'Identify the warranted follow-up action.',
+    sanitizedObjective: 'Identify the warranted follow-up action.',
+    steps: [
+      {
+        id: 'hermes_turn',
+        label: 'Hermes analysis',
+        status: 'succeeded',
+        required: true,
+        sanitizedSummary: 'Hermes produced the requested analysis.',
+      },
+    ],
+    artifacts: [
+      {
+        id: 'analysis',
+        kind: 'harness_result',
+        required: true,
+        verified: true,
+        dataLabels: ['public'],
+        sanitizedSummary: 'The required analysis artifact is present and verified.',
+      },
+    ],
+    verifications: [
+      { id: 'result_present', passed: true, required: true, reasonCode: 'result-present' },
+    ],
+    outstandingRequirements: [],
+    pendingApprovalIds: [],
+    dataLabels: ['public'],
+    budget: { stepsRemaining: 2 },
+    at: new Date().toISOString(),
+  };
+  const completion = await jev.judgeCompletion(
+    {
+      checkpoint,
+      sanitizedState: {
+        taskSummary: checkpoint.sanitizedObjective!,
+        contextSummary:
+          'Hermes produced the requested analysis. The required artifact is verified.',
+        dataLabels: ['public'],
+        sanitizedForRemote: true,
+      },
+    },
+    ctx,
+  );
+  if (!completion.ok) fail(`${completion.error.code}: ${completion.error.message}`);
+  console.log(
+    `   PASS: status=${completion.data.status} confidence=${completion.data.confidence.toFixed(3)}`,
   );
 
   console.log('\nJev is working through Vercel AI Gateway.');

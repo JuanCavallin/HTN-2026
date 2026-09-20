@@ -1,51 +1,56 @@
 /**
  * The tool catalog, for the graph editor's per-node tool picker.
  *
- * Served through services/toolCatalog.ts: the `toolbox` CAPABILITY (not a
- * vendor) merged with the tool plane's registry, so this endpoint grows on its
- * own when a provider or a plugin manifest is added. See providers/registry.ts
- * BINDINGS.
+ * Served from AgentOS's reviewed registry. Provider-native slugs and unreviewed
+ * tools never become graph/harness candidates merely because Composio lists them.
  */
 
 import { Router } from 'express';
-import type { ToolCatalogEntry } from '@htn/shared';
-import { listToolCatalog } from '../services/toolCatalog.js';
-import { HttpError } from './middleware/validate.js';
+import { composioToolCatalog, toolRegistry } from '../services/runtime.js';
 
 export const toolsRouter: Router = Router();
 
-/**
- * The catalog is read through withEgress, which records a ledger row per call.
- * A tool picker filtering on every keystroke would otherwise write one row (and
- * one bus event) per keystroke, so hold the result briefly. Short enough that a
- * newly connected Composio account still shows up within a minute.
- */
-const TTL_MS = 60_000;
-
-let cache: { at: number; tools: ToolCatalogEntry[] } | null = null;
-
 toolsRouter.get('/tools', async (_req, res) => {
-  if (cache && Date.now() - cache.at < TTL_MS) {
-    res.json({ tools: cache.tools, cached: true });
+  const tools = (await toolRegistry.list()).map((tool) => ({
+    name: tool.descriptor.id,
+    description: tool.descriptor.description,
+    availability: tool.descriptor.availability,
+  }));
+  // Startup and connection lifecycle operations populate this registry; a
+  // catalog read never performs provider discovery itself.
+  res.json({ tools, cached: true });
+});
+
+/** Preview/register task-relevant catalog entries for the dashboard tool picker. */
+toolsRouter.post('/tools/discover', async (req, res) => {
+  const query = req.body && typeof req.body.query === 'string' ? req.body.query.trim() : '';
+  if (!query) {
+    res.status(400).json({ error: { code: 'BAD_INPUT', message: 'query is required' } });
     return;
   }
-
-  // No run owns this call, but every outbound call is logged — there is no
-  // anonymous egress. A synthetic runId keeps that invariant true; the `sys_`
-  // prefix cannot collide with a real `run_` id.
-  const result = await listToolCatalog({
-    runId: 'sys_catalog',
-    policyRule: 'tool-catalog-read',
+  const toolkits = Array.isArray(req.body?.toolkits)
+    ? req.body.toolkits.filter((item: unknown): item is string => typeof item === 'string')
+    : undefined;
+  const limit =
+    typeof req.body?.limit === 'number' && Number.isInteger(req.body.limit)
+      ? req.body.limit
+      : undefined;
+  const report = await composioToolCatalog.discoverForTask({
+    query,
+    runId: 'sys_tool_catalog_search',
+    toolkits,
+    limit,
   });
-
-  if (!result.ok) {
-    throw new HttpError(
-      502,
-      result.error.code,
-      'Tool catalog unavailable: ' + result.error.message,
-    );
-  }
-
-  cache = { at: Date.now(), tools: result.data };
-  res.json({ tools: result.data, cached: false });
+  const registered = await toolRegistry.resolve(report.registered);
+  res.status(report.warning ? 502 : 200).json({
+    ...report,
+    tools: registered.map((tool) => ({
+      id: tool.id,
+      family: tool.family,
+      effect: tool.baselineEffect,
+      reversibility: tool.reversibility,
+      availability: tool.availability,
+      description: tool.description,
+    })),
+  });
 });

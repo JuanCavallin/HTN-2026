@@ -20,8 +20,8 @@ export function createApp(): Express {
   // from somewhere else (a deployed build pointed at a local api).
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', config.webOrigin);
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     if (req.method === 'OPTIONS') {
       res.sendStatus(204);
       return;

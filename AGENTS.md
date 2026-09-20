@@ -32,36 +32,28 @@ calling, no agent loop.
 | Write a selector, plan, or any prose | **no** — use a generative model                            |
 | Decide what to type into a field     | **no** — Jev picks the field, a small LLM writes the value |
 
-**We reach Jev through the Vercel AI SDK's AI Gateway. Do NOT use `@typesafe-ai/sdk`.**
-It is the AI SDK's _evaluation_ API, not the OpenAI-compatible chat-completions endpoint.
-
-```ts
-import { createGateway, experimental_evaluate as evaluate } from 'ai';
-
-// AI_GATEWAY_API_KEY in the root .env; config.providers.jev holds it.
-const gateway = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY });
-const model = gateway.evaluationModel('typesafe-ai/jev');
-
-const r = await evaluate({
-  model,
-  state: { document: 'I was charged twice.' },
-  questions: {
-    tone: { type: 'choice', instructions: 'Tone?', criteria: { calm: '...', angry: '...' } },
-    billing: { type: 'boolean', instructions: 'Is this about billing?' },
-  },
-  maxRetries: 2,
-  abortSignal: ctx.signal,
-});
-
-r.answers.tone.choice; // a criteria key
-r.answers.tone.probabilities; // distribution -> confidence
-r.answers.billing.probability; // 0..1
-r.usage; // { inputTokens, outputTokens } -> report into ProviderMeta
+```bash
+npm install @typesafe-ai/sdk     # Node 20+; TYPESAFE_API_KEY in the root .env
 ```
 
-Both callers share one gateway and one credential slot: `providers/jev/live.ts`
-(Person 2's `decide`/`route`) and `providers/jev/browserDecider.ts` (3B's browser
-operation + target).
+```ts
+import { choice, noul, score, TypeSafeClient } from '@typesafe-ai/sdk';
+
+const client = new TypeSafeClient(); // model: "jev-latest"
+const r = await client.systemOne({
+  state: { document: 'I was charged twice.' },
+  questions: {
+    billing: noul('Is this about billing?'),
+    tone: choice('Tone?', { calm: null, angry: null }),
+    urgency: score('How urgent?', ['can wait', 'this week', 'today']),
+  },
+});
+
+r.answers.billing.noul; // 0..1
+r.answers.tone.choice; // a criteria key — type-inferred
+r.answers.urgency.score; // float, e.g. 1.3
+r.answers.tone.confidence; // calibrated
+```
 
 Many questions in one request is cheap — latency is per-request. Batch aggressively.
 
@@ -130,6 +122,9 @@ and the spec requires deterministic fallbacks anyway.
 Hermes install and merged to `main`. ACP is language-agnostic, so the control plane does
 not need to be Python.
 
+AgentOS's configured MCP interception also requires Hermes's declared `mcp` extra. Set
+up the checkout with `uv sync --extra acp --extra mcp --locked`.
+
 Older docs claimed _"the spec says FastAPI and SQLite."_ **It does not** — the design
 spec names no stack; that line was copied between documents unchecked. A Python service
 built on that false premise has been deleted; everything lives in `apps/api/`.
@@ -149,17 +144,6 @@ hook and is not yet wired to the approval flow.
   generic host). Approvals bind to destination, so bind to the per-session value.
 - **Browserbase live-view URLs expire with the session** — `sessions.debug()` returns
   `410 Gone` afterwards. Capture the URL while the session is open.
-- **Playwright/Stagehand `evaluate('el => ...')` silently returns `undefined`.** The
-  string form evaluates an **expression**; a string holding arrow-function source
-  evaluates to a function object, which is not serialisable, so you get `undefined` with
-  no error. Use a self-invoking expression: `evaluate('(() => { ... })()')`. This cost two
-  real bugs — every element role resolved to `'element'`, and an occlusion check that
-  never once returned true. Both looked like working code.
-- **Stagehand v4: `model` is OPTIONAL, but an empty one is fatal.** Passing
-  `model: { apiKey: undefined }` fails the SDK's own `min(1)` validation, so `openSession`
-  dies with a raw zod dump and _nothing_ works. Omit the key entirely when you have no LLM
-  key. Also: `Stagehand.create({ browser })` must run before `browser.context` is usable
-  at all — without it you get "Browser context is unavailable".
 
 ## Verifying your work
 

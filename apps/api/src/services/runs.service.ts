@@ -7,7 +7,7 @@
  */
 
 import type {
-  AgentGraph,
+  AgentSessionState,
   Approval,
   EgressEvent,
   Json,
@@ -15,10 +15,11 @@ import type {
   Run,
   ScheduleDecision,
   Step,
+  StoredEvent,
 } from '@htn/shared';
-import { isTerminal, stripPiiValue } from '@htn/shared';
+import { stripPiiValue } from '@htn/shared';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
-import { forkGraph, GraphNotFoundError } from './graphs.service.js';
+import { GraphNotFoundError } from './graphs.service.js';
 import { newId, nowIso } from '../lib/ids.js';
 import type { ListRunsFilter } from '../store/types.js';
 import { bus, orchestrator, store } from './runtime.js';
@@ -42,6 +43,7 @@ export interface RunDetail {
   /** Values are stripped — the client only ever sees placeholders and classes. */
   piiSpans: PiiSpan[];
   scheduleDecisions: ScheduleDecision[];
+  agentSessions: AgentSessionState[];
 }
 
 export function availablePlaybooks(): { kind: string; title: string }[] {
@@ -80,15 +82,6 @@ export async function createRun(args: {
     input = { ...requested, graphSnapshot: graph } as Json;
   }
 
-  // Hoisted out of `input` into a real column (see Run.graphId) -- any
-  // playbook whose input schema happens to carry a `graphId` (graph, baseline,
-  // ...) gets its runs linked to that task's lineage for free, with no
-  // per-kind special-casing here.
-  const graphId =
-    typeof (input as { graphId?: unknown }).graphId === 'string'
-      ? (input as { graphId: string }).graphId
-      : undefined;
-
   const at = nowIso();
   const run: Run = {
     id: newId('run'),
@@ -96,7 +89,6 @@ export async function createRun(args: {
     title: args.title ?? (args.kind === 'graph' ? playbookTitleFor(input) : playbook.title),
     status: 'pending',
     input,
-    graphId,
     createdAt: at,
     updatedAt: at,
   };
@@ -124,17 +116,24 @@ export async function getRun(id: string): Promise<Run | null> {
   return store.getRun(id);
 }
 
+export async function getRunEvents(id: string, since = 0): Promise<StoredEvent[] | null> {
+  if (!(await store.getRun(id))) return null;
+  return store.eventsSince(id, Math.max(0, since));
+}
+
 export async function getRunDetail(id: string): Promise<RunDetail | null> {
   const run = await store.getRun(id);
   if (!run) return null;
 
-  const [steps, approvals, egress, piiWithValues, scheduleDecisions] = await Promise.all([
-    store.listSteps(id),
-    store.listApprovals(id),
-    store.listEgress(id),
-    store.listPiiSpans(id),
-    store.listScheduleDecisions(id),
-  ]);
+  const [steps, approvals, egress, piiWithValues, scheduleDecisions, agentSessions] =
+    await Promise.all([
+      store.listSteps(id),
+      store.listApprovals(id),
+      store.listEgress(id),
+      store.listPiiSpans(id),
+      store.listScheduleDecisions(id),
+      store.listSessionStates(id),
+    ]);
 
   return {
     run,
@@ -143,6 +142,7 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
     egress,
     piiSpans: piiWithValues.map(stripPiiValue),
     scheduleDecisions,
+    agentSessions,
   };
 }
 
@@ -160,55 +160,4 @@ export async function cancelRun(id: string): Promise<Run | null> {
   }
   // The orchestrator's abort path writes the terminal status and emits.
   return run;
-}
-
-/**
- * Cancel every non-terminal run this process is NOT actually executing.
- *
- * `orchestrator.isRunning()` is exact, not a heuristic: `inFlight` is only
- * ever populated by THIS process's own `execute()`, so right after a boot it
- * is empty and every non-terminal run found is, by construction, orphaned --
- * left "running" forever by a previous process that died (a restart, a
- * crash, a deliberate kill) with no chance to ever mark it terminal itself.
- * A run genuinely still executing in this process is never touched: it IS in
- * `inFlight`, so it's skipped, not raced against.
- *
- * Run automatically at boot (see index.ts) and available on demand via
- * POST /runs/probe-stale, since a restart during development is routine, not
- * exceptional, and each one otherwise leaves debris that looks alarmingly
- * like a real stuck run to anyone looking at the dashboard.
- */
-export async function probeStaleRuns(): Promise<{ checked: number; staleIds: string[] }> {
-  const all = await store.listRuns({ limit: 1000 });
-  const nonTerminal = all.filter((run) => !isTerminal(run.status));
-  const stale = nonTerminal.filter((run) => !orchestrator.isRunning(run.id));
-
-  for (const run of stale) {
-    await cancelRun(run.id);
-  }
-
-  return { checked: nonTerminal.length, staleIds: stale.map((run) => run.id) };
-}
-
-/**
- * "Save as a new task": fork the exact graph a run executed into a brand-new,
- * independent graph document. Sourced from the run's own `graphSnapshot`
- * (not a live re-read of the graph by id) so it captures what THIS run
- * actually ran, even if the live document has been edited since.
- */
-export async function saveRunAsGraph(runId: string, name?: string): Promise<AgentGraph | null> {
-  const run = await store.getRun(runId);
-  if (!run) return null;
-
-  if (run.kind !== 'graph') {
-    throw new ValidationError(
-      'Only a graph run has a graph document to save -- "' + run.kind + '" has none.',
-    );
-  }
-  const snapshot = (run.input as { graphSnapshot?: AgentGraph }).graphSnapshot;
-  if (!snapshot) {
-    throw new ValidationError('Run "' + runId + '" has no graph snapshot to save.');
-  }
-
-  return forkGraph(snapshot, name);
 }

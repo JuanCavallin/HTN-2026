@@ -3,7 +3,6 @@ import type { ProviderConfig } from '../../config.js';
 import { mockBase, mockCall } from '../_mock.js';
 import { createLiveAnthropic } from './live.js';
 import { estimateCostCents } from './pricing.js';
-import { mockGraphFor } from './mockGraphs.js';
 
 const CAPABILITIES: readonly Capability[] = ['text.model'];
 
@@ -18,31 +17,6 @@ function createMock(cfg: ProviderConfig): TextModelAdapter {
     ...base,
     async complete(input, ctx) {
       const placeholders = (ctx.redactions ?? []).length;
-
-      // Graph synthesis is identified by its policyRule, not by `json: true` --
-      // that flag is now also set by other JSON-shaped callers (e.g. the
-      // baseline playbook asking for a verdict), and returning a mock GRAPH
-      // document to one of those would be actively wrong, not just untargeted.
-      // Returning prose here for a real synthesis call would make the whole
-      // chat -> graph -> run loop unusable without API keys, so THIS specific
-      // caller gets a real, runnable, DELEGATING document. See mockGraphs.ts.
-      if (input.json && ctx.policyRule === 'graph-synthesis') {
-        const graph = mockGraphFor(input.prompt);
-        const jsonIn = Math.ceil((input.prompt.length + (input.system?.length ?? 0)) / 4);
-        const jsonOut = Math.ceil(graph.length / 4);
-        return mockCall(
-          'anthropic',
-          'complete',
-          cfg.mode,
-          ctx,
-          () => ({ text: graph, tokensIn: jsonIn, tokensOut: jsonOut }),
-          {
-            tokensIn: jsonIn,
-            tokensOut: jsonOut,
-            estimatedCostCents: estimateCostCents(input.tier ?? 'standard', jsonIn, jsonOut),
-          },
-        );
-      }
       // Echoing the placeholder count proves, in the demo, that what reached the
       // "cloud" model was the redacted text and not the values.
       const text =

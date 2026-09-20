@@ -10,10 +10,11 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import type {
+  AgentSessionState,
   AgentGraph,
   Approval,
-  Conversation,
   EgressEvent,
+  McpConnection,
   PiiSpanWithValue,
   Run,
   RunEvent,
@@ -26,7 +27,8 @@ import { NotFoundError, type ListRunsFilter, type Store } from './types.js';
 
 interface Snapshot {
   graphs?: AgentGraph[];
-  conversations?: Conversation[];
+  sessionStates?: AgentSessionState[];
+  mcpConnections?: McpConnection[];
   runs: Run[];
   steps: Step[];
   approvals: Approval[];
@@ -44,12 +46,13 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   const runs = new Map<string, Run>();
   const steps = new Map<string, Step>();
   const approvals = new Map<string, Approval>();
+  const sessionStates = new Map<string, AgentSessionState>();
+  const mcpConnections = new Map<string, McpConnection>();
   const egress = new Map<string, EgressEvent[]>();
   const pii = new Map<string, PiiSpanWithValue[]>();
   const scheduleDecisions = new Map<string, ScheduleDecision[]>();
   const events = new Map<string, StoredEvent[]>();
   const graphs = new Map<string, AgentGraph>();
-  const conversations = new Map<string, Conversation>();
   /** Monotonic step counter per run, so Step.seq is stable and gap-free. */
   const stepSeq = new Map<string, number>();
 
@@ -68,7 +71,8 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   async function save(): Promise<void> {
     const snapshot: Snapshot = {
       graphs: [...graphs.values()],
-      conversations: [...conversations.values()],
+      sessionStates: [...sessionStates.values()],
+      mcpConnections: [...mcpConnections.values()],
       runs: [...runs.values()],
       steps: [...steps.values()],
       approvals: [...approvals.values()],
@@ -96,12 +100,15 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
         stepSeq.set(s.runId, Math.max(stepSeq.get(s.runId) ?? 0, s.seq));
       }
       for (const a of snap.approvals) approvals.set(a.id, a);
+      for (const state of snap.sessionStates ?? []) sessionStates.set(state.id, state);
+      for (const connection of snap.mcpConnections ?? []) {
+        mcpConnections.set(connection.id, connection);
+      }
       for (const e of snap.egress) push(egress, e.runId, e);
       for (const p of snap.pii) push(pii, p.runId, p);
       for (const d of snap.scheduleDecisions) push(scheduleDecisions, d.runId, d);
       for (const e of snap.events) push(events, e.runId, e);
       for (const g of snap.graphs ?? []) graphs.set(g.id, g);
-      for (const c of snap.conversations ?? []) conversations.set(c.id, c);
       console.log('[store] hydrated ' + snap.runs.length + ' run(s) from snapshot');
     } catch {
       // No snapshot yet, or it is unreadable. Starting empty is correct.
@@ -189,6 +196,56 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
         .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
     },
 
+    /* ---------------------------------------------- Agent session state */
+    async createSessionState(state) {
+      sessionStates.set(state.id, state);
+      scheduleSave();
+      return state;
+    },
+    async getSessionState(id) {
+      return sessionStates.get(id) ?? null;
+    },
+    async getSessionStateByHarnessSession(harnessSessionId) {
+      return (
+        [...sessionStates.values()].find((state) => state.harnessSessionId === harnessSessionId) ??
+        null
+      );
+    },
+    async patchSessionState(id, patch) {
+      const existing = sessionStates.get(id);
+      if (!existing) throw new NotFoundError('AgentSessionState', id);
+      const next: AgentSessionState = { ...existing, ...patch, id, updatedAt: nowIso() };
+      sessionStates.set(id, next);
+      scheduleSave();
+      return next;
+    },
+    async listSessionStates(runId) {
+      return [...sessionStates.values()]
+        .filter((state) => !runId || state.runId === runId)
+        .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    },
+
+    /* ------------------------------------------ Upstream MCP connections */
+    async saveMcpConnection(connection) {
+      mcpConnections.set(connection.id, structuredClone(connection));
+      scheduleSave();
+      return structuredClone(connection);
+    },
+    async getMcpConnection(id) {
+      const connection = mcpConnections.get(id);
+      return connection ? structuredClone(connection) : null;
+    },
+    async listMcpConnections() {
+      return [...mcpConnections.values()]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((connection) => structuredClone(connection));
+    },
+    async deleteMcpConnection(id) {
+      const deleted = mcpConnections.delete(id);
+      if (deleted) scheduleSave();
+      return deleted;
+    },
+
     /* -------------------------------------------------------------- Egress */
     async appendEgress(event) {
       push(egress, event.runId, event);
@@ -235,19 +292,6 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
       const existed = graphs.delete(id);
       if (existed) scheduleSave();
       return existed;
-    },
-
-    /* ------------------------------------------------------- Conversations */
-    async saveConversation(conversation) {
-      conversations.set(conversation.id, conversation);
-      scheduleSave();
-      return conversation;
-    },
-    async getConversation(id) {
-      return conversations.get(id) ?? null;
-    },
-    async listConversations() {
-      return [...conversations.values()].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
 
     /* -------------------------------------------------------------- Events */

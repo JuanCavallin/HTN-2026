@@ -1,192 +1,430 @@
-/**
- * SQLite-backed persistence for graphs, conversations, and runs.
- *
- * Everything else (steps, approvals, egress, PII spans, schedule decisions,
- * the event log) stays on the in-memory Store: it is per-run scratch data
- * written on the interpreter's hot path -- many small appends per second
- * while a run streams over SSE -- and normalizing THAT into SQL too is a
- * materially bigger schema project for no concrete need yet. PERSIST_TO_DISK's
- * JSON snapshot still covers it if a restart needs to survive; only a run's
- * own existence/summary/result is durable unconditionally now, same
- * asymmetry as before, just narrower.
- *
- * Runs moved in here (not just graphs/conversations) because "every run
- * launched against this graph" needs to be an indexed query, not a linear
- * scan of an in-memory Map -- see Run.graphId and the runs table's index below.
- *
- * Uses node's built-in `node:sqlite` (stable since Node 22.5, no native
- * addon) instead of better-sqlite3, so there is nothing to compile -- and
- * nothing new in package.json.
- */
-
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { AgentGraph, Conversation, Run } from '@htn/shared';
+import type {
+  AgentGraph,
+  AgentSessionState,
+  Approval,
+  EgressEvent,
+  McpConnection,
+  PiiSpanWithValue,
+  Run,
+  RunEvent,
+  ScheduleDecision,
+  Step,
+  StoredEvent,
+} from '@htn/shared';
 import { nowIso } from '../lib/ids.js';
-import { createMemoryStore } from './memory.js';
 import { NotFoundError, type ListRunsFilter, type Store } from './types.js';
 
-const DB_PATH = resolve(process.cwd(), '../../.data/graphs.db');
-
-interface Row {
-  data: string;
+export interface SqliteStore extends Store {
+  hydrate(): Promise<void>;
+  close(): void;
 }
 
-export function createSqliteStore(opts: { persistRunsToDisk?: boolean } = {}): Store & {
-  hydrate(): Promise<void>;
-} {
-  mkdirSync(dirname(DB_PATH), { recursive: true });
-  const db = new DatabaseSync(DB_PATH);
-
+/**
+ * Durable control-plane store. JSON payload columns preserve the published
+ * domain contracts while indexed scalar columns support the few queries the
+ * API actually performs. Schema changes therefore stay additive and cheap.
+ */
+export function createSqliteStore(path: string): SqliteStore {
+  const filename = resolve(path);
+  mkdirSync(dirname(filename), { recursive: true });
+  const db = new DatabaseSync(filename);
+  db.exec('PRAGMA journal_mode=WAL');
+  db.exec('PRAGMA synchronous=NORMAL');
+  db.exec('PRAGMA busy_timeout=5000');
   db.exec(`
-    CREATE TABLE IF NOT EXISTS graphs (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS conversations (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
-      kind TEXT NOT NULL,
-      graph_id TEXT,
       status TEXT NOT NULL,
+      kind TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      data TEXT NOT NULL
+      body TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_runs_graph_id ON runs (graph_id, created_at);
+    CREATE INDEX IF NOT EXISTS runs_status_created ON runs(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS runs_kind_created ON runs(kind, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS steps (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      UNIQUE(run_id, seq)
+    );
+    CREATE INDEX IF NOT EXISTS steps_run_seq ON steps(run_id, seq);
+
+    CREATE TABLE IF NOT EXISTS approvals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS approvals_run_created ON approvals(run_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS session_states (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      harness_session_id TEXT,
+      created_at TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS sessions_run_created ON session_states(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS sessions_harness ON session_states(harness_session_id);
+
+    CREATE TABLE IF NOT EXISTS egress (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS egress_run_at ON egress(run_id, at);
+
+    CREATE TABLE IF NOT EXISTS pii (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS pii_run ON pii(run_id);
+
+    CREATE TABLE IF NOT EXISTS schedule_decisions (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS schedule_run_at ON schedule_decisions(run_id, at);
+
+    CREATE TABLE IF NOT EXISTS graphs (
+      id TEXT PRIMARY KEY,
+      updated_at TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS events (
+      run_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      at TEXT NOT NULL,
+      body TEXT NOT NULL,
+      PRIMARY KEY(run_id, seq)
+    );
+    CREATE INDEX IF NOT EXISTS events_run_seq ON events(run_id, seq);
+
+    CREATE TABLE IF NOT EXISTS mcp_connections (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL UNIQUE,
+      updated_at TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS mcp_connections_name ON mcp_connections(name);
   `);
 
-  const upsertGraph = db.prepare(
-    'INSERT INTO graphs (id, data, updated_at) VALUES (?, ?, ?) ' +
-      'ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at',
-  );
-  const selectGraph = db.prepare('SELECT data FROM graphs WHERE id = ?');
-  const selectAllGraphs = db.prepare('SELECT data FROM graphs ORDER BY updated_at DESC');
-  const deleteGraphStmt = db.prepare('DELETE FROM graphs WHERE id = ?');
-
-  const upsertConversation = db.prepare(
-    'INSERT INTO conversations (id, data, updated_at) VALUES (?, ?, ?) ' +
-      'ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at',
-  );
-  const selectConversation = db.prepare('SELECT data FROM conversations WHERE id = ?');
-  const selectAllConversations = db.prepare(
-    'SELECT data FROM conversations ORDER BY updated_at DESC',
-  );
-
-  const upsertRun = db.prepare(
-    'INSERT INTO runs (id, kind, graph_id, status, created_at, updated_at, data) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?) ' +
-      'ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, graph_id = excluded.graph_id, ' +
-      'status = excluded.status, updated_at = excluded.updated_at, data = excluded.data',
-  );
-  const selectRun = db.prepare('SELECT data FROM runs WHERE id = ?');
-
-  function writeRun(run: Run): void {
-    upsertRun.run(
-      run.id,
-      run.kind,
-      run.graphId ?? null,
-      run.status,
-      run.createdAt,
-      run.updatedAt,
-      JSON.stringify(run),
-    );
-  }
-
-  // Backs everything that is not a graph, a conversation, or a run. Its own
-  // graphs/conversations/runs maps are simply never touched below.
-  const runtime = createMemoryStore({ persistToDisk: opts.persistRunsToDisk });
-
-  return {
-    ...runtime,
-
+  const store: SqliteStore = {
     async hydrate() {
-      // Graphs, conversations and runs live in graphs.db already -- there is
-      // no separate load step for them. Steps/egress/etc still hydrate from
-      // the JSON snapshot when PERSIST_TO_DISK is on.
-      await runtime.hydrate();
+      const row = db.prepare('SELECT COUNT(*) AS count FROM runs').get() as
+        { count?: number } | undefined;
+      console.log('[store] sqlite=' + filename + ' runs=' + Number(row?.count ?? 0).toString());
     },
 
-    /* ---------------------------------------------------------------- Runs */
-    async createRun(run: Run) {
-      writeRun(run);
-      return run;
+    close() {
+      db.close();
     },
-    async getRun(id: string) {
-      const row = selectRun.get(id) as Row | undefined;
-      return row ? (JSON.parse(row.data) as Run) : null;
+
+    async createRun(run) {
+      writeRun(db, run);
+      return clone(run);
+    },
+    async getRun(id) {
+      return readOne<Run>(db, 'SELECT body FROM runs WHERE id = ?', id);
     },
     async listRuns(filter: ListRunsFilter = {}) {
-      // Built per call rather than pre-prepared like the statements above --
-      // the filter shape is genuinely dynamic (any combination of
-      // status/kind/graphId) and this list is not the hot path a live run's
-      // step/egress writes are.
       const clauses: string[] = [];
-      const params: (string | number)[] = [];
+      const values: (string | number)[] = [];
       if (filter.status) {
         clauses.push('status = ?');
-        params.push(filter.status);
+        values.push(filter.status);
       }
       if (filter.kind) {
         clauses.push('kind = ?');
-        params.push(filter.kind);
+        values.push(filter.kind);
       }
-      if (filter.graphId) {
-        clauses.push('graph_id = ?');
-        params.push(filter.graphId);
-      }
-      const where = clauses.length > 0 ? 'WHERE ' + clauses.join(' AND ') : '';
+      values.push(filter.limit ?? 50);
       const rows = db
-        .prepare('SELECT data FROM runs ' + where + ' ORDER BY created_at DESC LIMIT ?')
-        .all(...params, filter.limit ?? 50) as unknown as Row[];
-      return rows.map((row) => JSON.parse(row.data) as Run);
+        .prepare(
+          'SELECT body FROM runs' +
+            (clauses.length > 0 ? ' WHERE ' + clauses.join(' AND ') : '') +
+            ' ORDER BY created_at DESC LIMIT ?',
+        )
+        .all(...values);
+      return readRows<Run>(rows);
     },
-    async patchRun(id: string, patch: Partial<Run>) {
-      const row = selectRun.get(id) as Row | undefined;
-      if (!row) throw new NotFoundError('Run', id);
-      const existing = JSON.parse(row.data) as Run;
+    async patchRun(id, patch) {
+      const existing = await store.getRun(id);
+      if (!existing) throw new NotFoundError('Run', id);
       const next: Run = { ...existing, ...patch, id, updatedAt: nowIso() };
-      writeRun(next);
-      return next;
+      writeRun(db, next);
+      return clone(next);
     },
 
-    /* -------------------------------------------------------------- Graphs */
-    async saveGraph(graph: AgentGraph) {
-      upsertGraph.run(graph.id, JSON.stringify(graph), graph.updatedAt);
-      return graph;
+    async appendStep(step) {
+      return transaction(db, () => {
+        const row = db
+          .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM steps WHERE run_id = ?')
+          .get(step.runId) as { seq: number };
+        const full: Step = { ...step, seq: Number(row.seq) };
+        db.prepare('INSERT INTO steps(id, run_id, seq, body) VALUES (?, ?, ?, ?)').run(
+          full.id,
+          full.runId,
+          full.seq,
+          encode(full),
+        );
+        return clone(full);
+      });
     },
-    async getGraph(id: string) {
-      const row = selectGraph.get(id) as Row | undefined;
-      return row ? (JSON.parse(row.data) as AgentGraph) : null;
+    async patchStep(id, patch) {
+      const existing = await store.getStep(id);
+      if (!existing) throw new NotFoundError('Step', id);
+      const next: Step = { ...existing, ...patch, id };
+      db.prepare('UPDATE steps SET body = ? WHERE id = ?').run(encode(next), id);
+      return clone(next);
     },
-    async listGraphs() {
-      return (selectAllGraphs.all() as unknown as Row[]).map(
-        (row) => JSON.parse(row.data) as AgentGraph,
+    async getStep(id) {
+      return readOne<Step>(db, 'SELECT body FROM steps WHERE id = ?', id);
+    },
+    async listSteps(runId) {
+      return readRows<Step>(
+        db.prepare('SELECT body FROM steps WHERE run_id = ? ORDER BY seq').all(runId),
       );
     },
-    async deleteGraph(id: string) {
-      return deleteGraphStmt.run(id).changes > 0;
+
+    async createApproval(approval) {
+      db.prepare(
+        `INSERT INTO approvals(id, run_id, created_at, body) VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,
+           created_at=excluded.created_at, body=excluded.body`,
+      ).run(approval.id, approval.runId, approval.createdAt, encode(approval));
+      return clone(approval);
+    },
+    async getApproval(id) {
+      return readOne<Approval>(db, 'SELECT body FROM approvals WHERE id = ?', id);
+    },
+    async patchApproval(id, patch) {
+      const existing = await store.getApproval(id);
+      if (!existing) throw new NotFoundError('Approval', id);
+      const next: Approval = { ...existing, ...patch, id };
+      db.prepare('UPDATE approvals SET body = ? WHERE id = ?').run(encode(next), id);
+      return clone(next);
+    },
+    async listApprovals(runId) {
+      return readRows<Approval>(
+        db.prepare('SELECT body FROM approvals WHERE run_id = ? ORDER BY created_at').all(runId),
+      );
     },
 
-    /* ------------------------------------------------------- Conversations */
-    async saveConversation(conversation: Conversation) {
-      upsertConversation.run(conversation.id, JSON.stringify(conversation), conversation.updatedAt);
-      return conversation;
+    async createSessionState(state) {
+      writeSession(db, state);
+      return clone(state);
     },
-    async getConversation(id: string) {
-      const row = selectConversation.get(id) as Row | undefined;
-      return row ? (JSON.parse(row.data) as Conversation) : null;
+    async getSessionState(id) {
+      return readOne<AgentSessionState>(db, 'SELECT body FROM session_states WHERE id = ?', id);
     },
-    async listConversations() {
-      return (selectAllConversations.all() as unknown as Row[]).map(
-        (row) => JSON.parse(row.data) as Conversation,
+    async getSessionStateByHarnessSession(harnessSessionId) {
+      return readOne<AgentSessionState>(
+        db,
+        'SELECT body FROM session_states WHERE harness_session_id = ?',
+        harnessSessionId,
+      );
+    },
+    async patchSessionState(id, patch) {
+      const existing = await store.getSessionState(id);
+      if (!existing) throw new NotFoundError('AgentSessionState', id);
+      const next: AgentSessionState = { ...existing, ...patch, id, updatedAt: nowIso() };
+      writeSession(db, next);
+      return clone(next);
+    },
+    async listSessionStates(runId) {
+      return readRows<AgentSessionState>(
+        runId
+          ? db
+              .prepare('SELECT body FROM session_states WHERE run_id = ? ORDER BY created_at')
+              .all(runId)
+          : db.prepare('SELECT body FROM session_states ORDER BY created_at').all(),
+      );
+    },
+
+    async saveMcpConnection(connection) {
+      db.prepare(
+        `INSERT INTO mcp_connections(id, name, url, updated_at, body) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name=excluded.name, url=excluded.url,
+           updated_at=excluded.updated_at, body=excluded.body`,
+      ).run(
+        connection.id,
+        connection.name,
+        connection.url,
+        connection.updatedAt,
+        encode(connection),
+      );
+      return clone(connection);
+    },
+    async getMcpConnection(id) {
+      return readOne<McpConnection>(db, 'SELECT body FROM mcp_connections WHERE id = ?', id);
+    },
+    async listMcpConnections() {
+      return readRows<McpConnection>(
+        db.prepare('SELECT body FROM mcp_connections ORDER BY name').all(),
+      );
+    },
+    async deleteMcpConnection(id) {
+      return Number(db.prepare('DELETE FROM mcp_connections WHERE id = ?').run(id).changes) > 0;
+    },
+
+    async appendEgress(event) {
+      db.prepare('INSERT INTO egress(id, run_id, at, body) VALUES (?, ?, ?, ?)').run(
+        event.id,
+        event.runId,
+        event.at,
+        encode(event),
+      );
+      return clone(event);
+    },
+    async listEgress(runId) {
+      return readRows<EgressEvent>(
+        db.prepare('SELECT body FROM egress WHERE run_id = ? ORDER BY at, rowid').all(runId),
+      );
+    },
+
+    async appendPiiSpan(span) {
+      db.prepare('INSERT INTO pii(id, run_id, body) VALUES (?, ?, ?)').run(
+        span.id,
+        span.runId,
+        encode(span),
+      );
+      return clone(span);
+    },
+    async listPiiSpans(runId) {
+      return readRows<PiiSpanWithValue>(
+        db.prepare('SELECT body FROM pii WHERE run_id = ? ORDER BY rowid').all(runId),
+      );
+    },
+
+    async createScheduleDecision(decision) {
+      db.prepare('INSERT INTO schedule_decisions(id, run_id, at, body) VALUES (?, ?, ?, ?)').run(
+        decision.id,
+        decision.runId,
+        decision.at,
+        encode(decision),
+      );
+      return clone(decision);
+    },
+    async listScheduleDecisions(runId) {
+      return readRows<ScheduleDecision>(
+        db
+          .prepare('SELECT body FROM schedule_decisions WHERE run_id = ? ORDER BY at, rowid')
+          .all(runId),
+      );
+    },
+
+    async saveGraph(graph) {
+      db.prepare(
+        `INSERT INTO graphs(id, updated_at, body) VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at, body=excluded.body`,
+      ).run(graph.id, graph.updatedAt, encode(graph));
+      return clone(graph);
+    },
+    async getGraph(id) {
+      return readOne<AgentGraph>(db, 'SELECT body FROM graphs WHERE id = ?', id);
+    },
+    async listGraphs() {
+      return readRows<AgentGraph>(
+        db.prepare('SELECT body FROM graphs ORDER BY updated_at DESC').all(),
+      );
+    },
+    async deleteGraph(id) {
+      return Number(db.prepare('DELETE FROM graphs WHERE id = ?').run(id).changes) > 0;
+    },
+
+    async appendEvent(runId: string, event: RunEvent) {
+      return transaction(db, () => {
+        const row = db
+          .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?')
+          .get(runId) as { seq: number };
+        const stored: StoredEvent = {
+          seq: Number(row.seq),
+          runId,
+          event,
+          at: nowIso(),
+        };
+        db.prepare('INSERT INTO events(run_id, seq, at, body) VALUES (?, ?, ?, ?)').run(
+          runId,
+          stored.seq,
+          stored.at,
+          encode(stored),
+        );
+        return clone(stored);
+      });
+    },
+    async eventsSince(runId, seq) {
+      return readRows<StoredEvent>(
+        db
+          .prepare('SELECT body FROM events WHERE run_id = ? AND seq > ? ORDER BY seq')
+          .all(runId, seq),
       );
     },
   };
+
+  return store;
+}
+
+function writeRun(db: DatabaseSync, run: Run): void {
+  db.prepare(
+    `INSERT INTO runs(id, status, kind, created_at, updated_at, body)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET status=excluded.status, kind=excluded.kind,
+       created_at=excluded.created_at, updated_at=excluded.updated_at, body=excluded.body`,
+  ).run(run.id, run.status, run.kind, run.createdAt, run.updatedAt, encode(run));
+}
+
+function writeSession(db: DatabaseSync, state: AgentSessionState): void {
+  db.prepare(
+    `INSERT INTO session_states(id, run_id, harness_session_id, created_at, body)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,
+       harness_session_id=excluded.harness_session_id, created_at=excluded.created_at,
+       body=excluded.body`,
+  ).run(state.id, state.runId, state.harnessSessionId ?? null, state.createdAt, encode(state));
+}
+
+function readOne<T>(db: DatabaseSync, sql: string, ...values: string[]): T | null {
+  const row = db.prepare(sql).get(...values);
+  return row ? decode<T>((row as { body: string }).body) : null;
+}
+
+function readRows<T>(rows: unknown[]): T[] {
+  return rows.map((row) => decode<T>((row as { body: string }).body));
+}
+
+function transaction<T>(db: DatabaseSync, work: () => T): T {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = work();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function encode(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function decode<T>(value: string): T {
+  return JSON.parse(value) as T;
+}
+
+function clone<T>(value: T): T {
+  return structuredClone(value);
 }

@@ -10,10 +10,9 @@ import {
   availablePlaybooks,
   cancelRun,
   createRun,
+  getRunEvents,
   getRunDetail,
   listRuns,
-  probeStaleRuns,
-  saveRunAsGraph,
 } from '../services/runs.service.js';
 import { listEgress } from '../services/egress.service.js';
 import { HttpError, param, valid, validate } from './middleware/validate.js';
@@ -44,26 +43,19 @@ runsRouter.get('/runs/:id', async (req, res) => {
   res.json(detail);
 });
 
+/** JSON replay for debugging/export; live clients should use the SSE endpoint. */
+runsRouter.get('/runs/:id/events', async (req, res) => {
+  const rawSince = Number(req.query.since ?? 0);
+  const since = Number.isFinite(rawSince) && rawSince > 0 ? rawSince : 0;
+  const events = await getRunEvents(param(req, 'id'), since);
+  if (!events) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json({ events, lastSeq: events.at(-1)?.seq ?? since });
+});
+
 runsRouter.post('/runs/:id/cancel', async (req, res) => {
   const run = await cancelRun(param(req, 'id'));
   if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
   res.json({ run });
-});
-
-/**
- * Cancel every non-terminal run this process isn't actually executing --
- * debris from a restart, a crash, or a deliberately-killed process. Also run
- * automatically at boot; exposed here for an on-demand sweep without one.
- */
-runsRouter.post('/runs/probe-stale', async (_req, res) => {
-  res.json(await probeStaleRuns());
-});
-
-/** "Save as a new task" -- fork the graph THIS run executed into a new document. */
-runsRouter.post('/runs/:id/save-as-graph', async (req, res) => {
-  const graph = await saveRunAsGraph(param(req, 'id'));
-  if (!graph) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
-  res.status(201).json({ graph });
 });
 
 runsRouter.get('/runs/:id/egress', async (req, res) => {

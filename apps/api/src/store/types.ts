@@ -12,10 +12,11 @@
  */
 
 import type {
+  AgentSessionState,
   AgentGraph,
   Approval,
-  Conversation,
   EgressEvent,
+  McpConnection,
   PiiSpanWithValue,
   Run,
   RunEvent,
@@ -28,8 +29,6 @@ import type {
 export interface ListRunsFilter {
   status?: RunStatus;
   kind?: string;
-  /** Every run launched against this graph -- the "history of this task" query. */
-  graphId?: string;
   limit?: number;
 }
 
@@ -52,6 +51,21 @@ export interface Store {
   patchApproval(id: string, patch: Partial<Approval>): Promise<Approval>;
   listApprovals(runId: string): Promise<Approval[]>;
 
+  // Canonical AgentOS session state. Harnesses and decision models are views
+  // over this state; neither is allowed to become the source of truth.
+  createSessionState(state: AgentSessionState): Promise<AgentSessionState>;
+  getSessionState(id: string): Promise<AgentSessionState | null>;
+  getSessionStateByHarnessSession(harnessSessionId: string): Promise<AgentSessionState | null>;
+  patchSessionState(id: string, patch: Partial<AgentSessionState>): Promise<AgentSessionState>;
+  listSessionStates(runId?: string): Promise<AgentSessionState[]>;
+
+  // User-configured upstream MCP servers. Secret values are environment refs,
+  // never fields on this record.
+  saveMcpConnection(connection: McpConnection): Promise<McpConnection>;
+  getMcpConnection(id: string): Promise<McpConnection | null>;
+  listMcpConnections(): Promise<McpConnection[]>;
+  deleteMcpConnection(id: string): Promise<boolean>;
+
   // Egress ledger (append-only)
   appendEgress(event: EgressEvent): Promise<EgressEvent>;
   listEgress(runId: string): Promise<EgressEvent[]>;
@@ -71,11 +85,6 @@ export interface Store {
   getGraph(id: string): Promise<AgentGraph | null>;
   listGraphs(): Promise<AgentGraph[]>;
   deleteGraph(id: string): Promise<boolean>;
-
-  // Conversations. Mutable like graphs, and not scoped to a run.
-  saveConversation(conversation: Conversation): Promise<Conversation>;
-  getConversation(id: string): Promise<Conversation | null>;
-  listConversations(): Promise<Conversation[]>;
 
   // Event log — append-only, monotonic seq per run. Powers SSE replay.
   appendEvent(runId: string, event: RunEvent): Promise<StoredEvent>;
