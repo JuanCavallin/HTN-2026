@@ -32,28 +32,36 @@ calling, no agent loop.
 | Write a selector, plan, or any prose | **no** — use a generative model                            |
 | Decide what to type into a field     | **no** — Jev picks the field, a small LLM writes the value |
 
-```bash
-npm install @typesafe-ai/sdk     # Node 20+; TYPESAFE_API_KEY in the root .env
-```
+**We reach Jev through the Vercel AI SDK's AI Gateway. Do NOT use `@typesafe-ai/sdk`.**
+It is the AI SDK's _evaluation_ API, not the OpenAI-compatible chat-completions endpoint.
 
 ```ts
-import { choice, noul, score, TypeSafeClient } from '@typesafe-ai/sdk';
+import { createGateway, experimental_evaluate as evaluate } from 'ai';
 
-const client = new TypeSafeClient(); // model: "jev-latest"
-const r = await client.systemOne({
+// AI_GATEWAY_API_KEY in the root .env; config.providers.jev holds it.
+const gateway = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY });
+const model = gateway.evaluationModel('typesafe-ai/jev');
+
+const r = await evaluate({
+  model,
   state: { document: 'I was charged twice.' },
   questions: {
-    billing: noul('Is this about billing?'),
-    tone: choice('Tone?', { calm: null, angry: null }),
-    urgency: score('How urgent?', ['can wait', 'this week', 'today']),
+    tone: { type: 'choice', instructions: 'Tone?', criteria: { calm: '...', angry: '...' } },
+    billing: { type: 'boolean', instructions: 'Is this about billing?' },
   },
+  maxRetries: 2,
+  abortSignal: ctx.signal,
 });
 
-r.answers.billing.noul; // 0..1
-r.answers.tone.choice; // a criteria key — type-inferred
-r.answers.urgency.score; // float, e.g. 1.3
-r.answers.tone.confidence; // calibrated
+r.answers.tone.choice; // a criteria key
+r.answers.tone.probabilities; // distribution -> confidence
+r.answers.billing.probability; // 0..1
+r.usage; // { inputTokens, outputTokens } -> report into ProviderMeta
 ```
+
+Both callers share one gateway and one credential slot: `providers/jev/live.ts`
+(Person 2's `decide`/`route`) and `providers/jev/browserDecider.ts` (3B's browser
+operation + target).
 
 Many questions in one request is cheap — latency is per-request. Batch aggressively.
 

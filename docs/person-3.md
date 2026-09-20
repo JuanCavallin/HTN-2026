@@ -5,7 +5,7 @@ then work only your track.
 
 | Track                                 | Owns                                                                                                                                                              | Owner          |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| **3A — Tool Registry and MCP**        | The _plumbing_: `ToolDescriptor` registry, MCP client, plugin manifests, `select_tool_metadata`, non-browser executors. **Not the tools themselves — see below.** | _(fill in)_    |
+| **3A — Tool Registry and MCP**        | The _plumbing_: `ToolDescriptor` registry, MCP client, plugin manifests, `select_tool_metadata`, non-browser executors. **Not the tools themselves — see below.** | `danielzhao07` |
 | **3B — Browser, Browserbase and Jev** | The browser tool family: local + Browserbase backends, the element table Jev chooses from, the browser executor, session lifecycle                                | `danielzhao07` |
 
 **Read [agentos-design.md](./agentos-design.md) first.** It is the source of truth for
@@ -18,19 +18,26 @@ text. If you are writing a prompt for it, you are using it wrong.
 
 ## Progress
 
-**3A — Tool Registry and MCP:** plumbing done against an empty catalog. Registry,
-manifest format + loader, `select_tool_metadata` and the gated executor dispatcher all
-built and verified by `pnpm --filter @htn/api check:browser` (76 checks). The MCP client
-is a boundary only — **blocked on a dependency decision (`3A-2`, Person 4)**. No sponsor
-tools added, by design (`3A-6`).
+**Jev route (settled):** Vercel AI SDK → AI Gateway → `typesafe-ai/jev`, called with
+`experimental_evaluate`. Credential `AI_GATEWAY_API_KEY`, read from the single slot
+`config.providers.jev` that Person 2's adapter also uses. **`@typesafe-ai/sdk` is not
+used anywhere.**
 
-**3B — Browser, Browserbase and Jev:** working end to end on both backends. Local Chrome
-and a real Browserbase session each open, build an element table, act on a chosen index,
-refuse a stale snapshot, refuse an occluded target, replay from cache with zero model
-calls, and release. Verified by `node scripts/smoke_browser.mjs --mode local|browserbase`.
-Jev decisions use the **deterministic fallback** — there is still no `TYPESAFE_API_KEY`,
-and the SDK is not a declared dependency; the Jev-backed decider is written behind the
-same interface and reports its source truthfully.
+**3A — Tool Registry and MCP:** plumbing done and waiting on the sponsor API / MCP list.
+Registry, manifest format + loader, `select_tool_metadata` and the gated executor
+dispatcher are built and verified by `pnpm --filter @htn/api check:browser`. **Connecting
+a real tool should be one manifest file in `config/plugins/` plus one executor binding** —
+that speed is the deliverable, not the tools. The MCP client is a boundary only until its
+dependency lands (`3A-2`). No sponsor tools added, by design (`3A-6`).
+
+**3B — Browser, Browserbase and Jev:** working end to end on both backends, and still
+working after merging `origin/main`. Local Chrome and a real Browserbase session each
+open, build an element table, act on a chosen index, refuse a stale snapshot, refuse an
+occluded target, replay from cache with zero model calls, and release. Verified by
+`node scripts/smoke_browser.mjs --mode local|browserbase`. Jev decisions currently come
+from the **deterministic fallback** — the gateway decider is written and typechecks but
+has not been run against a real `AI_GATEWAY_API_KEY`, and the trace labels its source
+`deterministic` rather than implying a model call.
 
 _Tick a box when the task is done **and verified by a command**, not when the code is
 written. Update the status lines above when a track's phase changes._
@@ -55,9 +62,14 @@ control plane does not need to be Python. Persons 1 and 2 are both on TypeScript
 > unchecked and helped justify a Python build that has since been deleted. Check the
 > source before repeating a constraint.
 
-**2. Jev's API is known.** It is TypeSafe AI's _System One_ model (`jev-latest`), reached
-via `@typesafe-ai/sdk`. It returns **typed choices, scores and probabilities — never free
-text**. This changes 3B's whole design; see [Track 3B](#track-3b--browser-browserbase-and-jev).
+**2. Jev is reached through the VERCEL AI SDK's AI GATEWAY.** `experimental_evaluate`
+from the `ai` package, model **`typesafe-ai/jev`**, credential **`AI_GATEWAY_API_KEY`**
+(held in `config.providers.jev`). **Not `@typesafe-ai/sdk`**, and not the
+OpenAI-compatible chat-completions endpoint — it is the AI SDK's _evaluation_ API.
+Person 2's `providers/jev/live.ts` established this route; 3B's
+`providers/jev/browserDecider.ts` rides the same one. Jev still returns **typed choices
+and probabilities — never free text**. See [jev.md](./jev.md) and
+[Track 3B](#track-3b--browser-browserbase-and-jev).
 
 **3. Browserbase works.** Credentials are in the root `.env` and a real session has been
 opened, driven and released. The facts learned are recorded under `3B-3`.
@@ -390,14 +402,15 @@ the machine — inputs, screenshots and cookies alike.
 
 ### `3B-5` The Jev decision call
 
-- [ ] One `system_one` request per step carrying operation + speculative targets —
-      **written, unverifiable: no `TYPESAFE_API_KEY`.** See `providers/jev/browserDecider.ts`
-- [ ] Use `@typesafe-ai/sdk`; `TYPESAFE_API_KEY` in root `.env` — **the key is empty and
-      the SDK is not a declared dependency.** It is loaded through a variable specifier so
-      the repo builds and runs without it; `pnpm --filter @htn/api add @typesafe-ai/sdk`
-      plus a key is the whole switch-on. SDK shape confirmed against TypeSafe's published
-      docs (`systemOne(request, options)`, `RequestOptions.timeout` is **per attempt** with
-      **no total retry budget**, default 10000ms — we override to 2000ms)
+- [x] One `evaluate()` request per step carrying operation + speculative targets, in
+      `providers/jev/browserDecider.ts`. Same batched shape Person 2's `route()` uses
+      (privacy + intelligence + one question per tool, all in one call)
+- [x] Use the **Vercel AI SDK through the AI Gateway** (`experimental_evaluate`, model
+      `typesafe-ai/jev`), reading Person 2's `config.providers.jev` slot so there is one
+      Jev route and one place to configure it. `ai` is a declared dependency and the code
+      is written and typechecks. **Not yet run against a real `AI_GATEWAY_API_KEY`**, so
+      every browser decision today comes from the deterministic fallback and is labelled
+      `deterministic` in the trace.
 - [x] **Deterministic fallback when there is no key** — string-match the intent against
       candidate labels. The design doc requires a deterministic Jev fallback anyway, so this
       is not throwaway work, and it keeps the demo runnable with zero credentials

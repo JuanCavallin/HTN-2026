@@ -3,28 +3,19 @@
 **Read this before writing any code that calls Jev.** Jev is not a chat model and does
 not behave like one. The most common mistake is asking it to generate something.
 
-> **Status of this document.** Everything here was verified against TypeSafe's published
-> docs and the `browser-use/jev-ultrafast` source. **No live Jev call has been made from
-> this repo** — we still have no `TYPESAFE_API_KEY`. Treat request/response shapes as
-> documented-but-untested, and fix this file the first time reality disagrees with it.
+> **Status of this document.** **We call Jev through the Vercel AI SDK's AI Gateway**
+> (`experimental_evaluate`, model `typesafe-ai/jev`). See **Setup** below — that section
+> is the one that describes how we actually call it. `@typesafe-ai/sdk` is **not** used.
 >
-> **Re-confirmed against the published SDK reference (2026-09-19)**, so these are safe to
-> code against:
+> The conceptual material here (what Jev is, criteria, calibrated probabilities, the
+> browser pattern) was verified against TypeSafe's published docs and the
+> `browser-use/jev-ultrafast` source, and it holds regardless of transport.
 >
-> - `client.systemOne(request, options?)` — `options` is `RequestOptions`.
-> - `RequestOptions.timeout` is **per attempt, in ms, with NO total retry budget**; the
->   client default is **10000ms**. Left alone, one browser decision can hang ~25s across
->   retries and backoff. `providers/jev/browserDecider.ts` overrides it to
->   `BROWSER_DECISION_TIMEOUT_MS` (2000ms) with `retry: { maxRetries: 1 }`.
-> - `RequestOptions` also carries `signal`, `retry` and `headers`.
-> - `TypeSafeClientConfig.defaultModel` falls back to `TYPESAFE_DEFAULT_MODEL`, then
->   `jev-latest`. `dangerouslyAllowBrowser` defaults to false — **never set it.**
-> - A result is `{ answers, model, usage }`; `usage` has `input_tokens` / `output_tokens`,
->   which should be reported into `ProviderMeta` so Jev does not look free in the ledger.
-> - `systemOne` **throws** on empty questions, on a `score` with fewer than two criteria,
->   on a non-2xx after retries, on timeout after retries, and on abort. A `choice` with
->   one option is not a question — build the criteria first and skip the head if it has
->   fewer than two entries.
+> **Still unverified:** no live Jev call has been made from a browser step. Person 2's
+> `providers/jev/live.ts` exercises the gateway for `decide()` and `route()`; 3B's
+> `browserDecider.ts` uses the same route but has not been run against a real key, so the
+> browser runs on its deterministic fallback and labels every decision `deterministic`.
+> Fix this file the first time reality disagrees with it.
 
 ---
 
@@ -54,30 +45,81 @@ If you catch yourself designing a prompt, stop. Jev takes `criteria`, not prompt
 
 ## Setup
 
-This repo is TypeScript. Use the JS/TS SDK.
+> ## WE USE THE VERCEL AI SDK, THROUGH THE AI GATEWAY
+>
+> **This is the only route to Jev in this repo. Do not use `@typesafe-ai/sdk`.**
+> Everything below that describes `TypeSafeClient` / `systemOne` /
+> `TYPESAFE_API_KEY` is background on what Jev _is_ — not how we call it.
 
 ```bash
-npm install @typesafe-ai/sdk          # requires Node 20+
-# TYPESAFE_API_KEY goes in the root .env
+pnpm --filter @htn/api add ai     # already installed
+# AI_GATEWAY_API_KEY goes in the root .env
 ```
 
-|              |                                                                   |
-| ------------ | ----------------------------------------------------------------- |
-| Package      | `@typesafe-ai/sdk` (npm; 0.6.0 at time of writing)                |
-| Client       | `new TypeSafeClient()` → `client.systemOne({ state, questions })` |
-| Auth         | `TYPESAFE_API_KEY` environment variable                           |
-| Model id     | `jev-latest`                                                      |
-| Raw endpoint | `POST https://api.typesafe.ai/v1/systemone`                       |
+```ts
+import { createGateway, experimental_evaluate as evaluate } from 'ai';
 
-A Python SDK (`typesafe-sdk` on PyPI, with `AsyncTypeSafeClient`) exists too, if an MCP
-server or side tool ever needs it. The SDK is a thin wrapper over that endpoint;
-`jev-ultrafast` posts raw JSON only because it predates the SDK.
+const gateway = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY });
+const model = gateway.evaluationModel('typesafe-ai/jev');
+
+const result = await evaluate({
+  model,
+  state: { document: 'I was charged twice.' },
+  questions: {
+    tone: { type: 'choice', instructions: 'Tone?', criteria: { calm: '…', angry: '…' } },
+    billing: { type: 'boolean', instructions: 'Is this about billing?' },
+  },
+  maxRetries: 2,
+  abortSignal: ctx.signal,
+});
+
+result.answers.tone.choice; // a criteria key
+result.answers.tone.probabilities; // distribution -> confidence
+result.answers.billing.probability; // 0..1 for a boolean question
+result.usage; // { inputTokens, outputTokens }
+```
+
+|             |                                                                               |
+| ----------- | ----------------------------------------------------------------------------- |
+| Package     | `ai` (Vercel AI SDK)                                                          |
+| Client      | `createGateway({...}).evaluationModel('typesafe-ai/jev')`                     |
+| Call        | `experimental_evaluate({ model, state, questions })`                          |
+| Auth        | `AI_GATEWAY_API_KEY` (legacy alias: `JEV_API_KEY`)                            |
+| Gateway     | `https://ai-gateway.vercel.sh/v4/ai` (`AI_GATEWAY_BASE_URL` to override)      |
+| Model id    | `typesafe-ai/jev`                                                             |
+| Answer kind | `type: 'choice'` → `.choice` + `.probabilities`; `'boolean'` → `.probability` |
+
+**Note the endpoint distinction:** this is the AI SDK's _evaluation_ API, not the
+OpenAI-compatible chat-completions endpoint. Jev is not a chat model and does not answer
+there.
+
+Two callers exist, and they use the same gateway and the same credential slot
+(`config.providers.jev`) on purpose — one Jev route, one place to configure it:
+
+| File                                   | What it decides                                          |
+| -------------------------------------- | -------------------------------------------------------- |
+| `providers/jev/live.ts` (Person 2)     | `decide()` and `route()` — privacy, intelligence, tools  |
+| `providers/jev/browserDecider.ts` (3B) | the browser's operation + target, batched in one request |
+
+### Background: the vendor's own SDK
+
+TypeSafe also publishes `@typesafe-ai/sdk` (`new TypeSafeClient().systemOne(...)`,
+`TYPESAFE_API_KEY`, model `jev-latest`, raw endpoint
+`POST https://api.typesafe.ai/v1/systemone`) and a Python `typesafe-sdk`. **We do not use
+either.** They are recorded here only because the concepts below — `choice`, `score`,
+`noul`, criteria, calibrated probabilities — are the vendor's vocabulary, and the older
+examples in this document are written in it.
 
 ---
 
 ## The three primitives
 
 All three can go in **one request**, and every answer carries calibrated probabilities.
+
+> The example below is in the **vendor SDK's** vocabulary, which is where these concepts
+> are best documented. Through the AI Gateway the same three ideas appear as
+> `type: 'choice'` and `type: 'boolean'` question objects — see **Setup**. `score` has no
+> direct gateway equivalent today; use a `choice` over ordered buckets.
 
 ```ts
 import { choice, noul, score, TypeSafeClient } from '@typesafe-ai/sdk';
