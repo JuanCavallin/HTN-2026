@@ -1,6 +1,7 @@
 node_modules/
 dist/
 CLAUDE.local.md
+docs/person-3.md
 .data/
 .env
 .env.local

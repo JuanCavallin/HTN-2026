@@ -1,5 +1,6 @@
 import { Link, Route, Routes, useLocation } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
+import { Compare } from './pages/Compare';
 import { GraphEditor } from './pages/GraphEditor';
 import { Workspace, LiveRunWorkspace } from './pages/Workspace';
 import { RunHistory } from './pages/RunHistory';
@@ -12,6 +13,7 @@ export function App() {
         <Route path="/" element={<Workspace key={location.key} />} />
         <Route path="/runs" element={<RunHistory />} />
         <Route path="/runs/:id" element={<LiveRunWorkspace key={location.pathname} />} />
+        <Route path="/compare" element={<Compare />} />
         <Route path="/graphs" element={<GraphEditor />} />
         <Route path="/graphs/:id" element={<GraphEditor key={location.pathname} />} />
         <Route

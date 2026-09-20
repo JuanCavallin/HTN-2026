@@ -18,6 +18,7 @@ export * from './manifest.js';
 export * from './manifestLoader.js';
 export * from './mcp.js';
 export * from './registry.js';
+export * from './webTools.js';
 
 import type { AuthorizeAction, ToolExecutor } from '@htn/shared';
 import { createBrowserExecutor, type BrowserExecutorDeps } from './browser.js';
@@ -33,6 +34,7 @@ import { browserDescriptors, type BrowserDescriptorOptions } from './browserDesc
 import { createToolDispatcher } from './executor.js';
 import { loadPluginManifests, type LoadedPlugins } from './manifestLoader.js';
 import { createToolRegistry, type ToolRegistry } from './registry.js';
+import { createWebExecutor, webDescriptors, type WebDescriptorOptions } from './webTools.js';
 
 export interface ToolPlaneOptions {
   authorize: AuthorizeAction;
@@ -46,6 +48,15 @@ export interface ToolPlaneOptions {
    */
   jevDecider?: BrowserDecider | null;
   descriptors?: BrowserDescriptorOptions;
+  /**
+   * The `web` family (web.search / web.read). OPT-IN: omit it and the plane is
+   * exactly the browser-only plane it was before, which is what the browser
+   * check scripts assume. Present, the tools register and their executor binds.
+   */
+  web?: WebDescriptorOptions & {
+    searchUrl?: (query: string) => string;
+    searchScope?: string;
+  };
   selectedTools?: (stepId: string) => readonly string[] | undefined;
   /** Absolute path to config/plugins/. Omitted means "do not load manifests". */
   pluginDirectory?: string;
@@ -68,6 +79,7 @@ export async function createToolPlane(options: ToolPlaneOptions): Promise<ToolPl
 
   // 3B registers into 3A's registry. No second catalog.
   registry.registerAll(browserDescriptors(options.descriptors));
+  if (options.web) registry.registerAll(webDescriptors(options.web));
 
   const plugins = options.pluginDirectory
     ? await loadPluginManifests(options.pluginDirectory)
@@ -97,7 +109,21 @@ export async function createToolPlane(options: ToolPlaneOptions): Promise<ToolPl
     registry,
     executor: createToolDispatcher({
       registry,
-      executors: [browserExecutor],
+      executors: [
+        browserExecutor,
+        // Delegates to the browser executor, which runs the gate -- see webTools.ts.
+        ...(options.web
+          ? [
+              createWebExecutor({
+                browser: browserExecutor,
+                ...(options.web.searchUrl ? { searchUrl: options.web.searchUrl } : {}),
+                ...(options.web.searchScope !== undefined
+                  ? { searchScope: options.web.searchScope }
+                  : {}),
+              }),
+            ]
+          : []),
+      ],
       ...(options.selectedTools ? { selectedTools: options.selectedTools } : {}),
     }),
     cache,

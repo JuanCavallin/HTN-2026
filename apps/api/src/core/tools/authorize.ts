@@ -50,8 +50,12 @@ export interface StopgapOptions {
   actionKind?: (action: ToolAction) => string;
 }
 
-/** `browser.submit` -> `submit_form`, so the existing rules fire correctly. */
-function defaultActionKind(action: ToolAction): string {
+/**
+ * `browser.submit` -> `submit_form`, so the existing rules fire correctly.
+ * Exported so the approval bridge (services/runtime.ts) labels an approval with
+ * the SAME kind the gate classified -- two spellings would let them disagree.
+ */
+export function defaultActionKind(action: ToolAction): string {
   const operation = action.toolId.split('.').slice(1).join('.');
   switch (operation) {
     case 'submit':

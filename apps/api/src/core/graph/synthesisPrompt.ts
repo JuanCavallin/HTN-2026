@@ -30,6 +30,8 @@ import { GRAPH_NODE_TYPES, graphEdgeSchema, graphNodeSchema, type AgentGraph } f
 export interface ToolCatalogEntry {
   name: string;
   description: string;
+  /** Editor grouping (`web`, `mail`, ...). Also how a family of tools is recognised here. */
+  group?: string;
 }
 
 /**
@@ -99,8 +101,44 @@ REDACTION
 - If a document may contain personal data, put a redact node between loading it
   and any node that sends content to a model.`.trim();
 
+/**
+ * Steering for live-web work, DERIVED from what the catalog actually contains.
+ *
+ * Without this a synthesiser reaches for `agent_task` on every "look it up"
+ * request -- it is the only node that sounds like it can browse -- and that
+ * sends a lookup to a general-purpose agent that searches slowly, unreliably,
+ * and outside our gate and ledger. When a `web` tool is listed, say so; when
+ * none is (no browser backend configured), say nothing rather than promise one.
+ * Tool names are read from the catalog, never written here, so a renamed or
+ * added web tool needs no edit to this file.
+ */
+function webLookupRules(tools: ToolCatalogEntry[]): string {
+  const web = tools.filter((t) => t.group === 'web').map((t) => t.name);
+  if (web.length === 0) return '';
+
+  return [
+    'LIVE WEB LOOKUPS',
+    '',
+    '- These tools fetch live pages through a gated cloud browser: ' + web.join(', ') + '.',
+    '  Use them, as `tool` nodes (or as `dispatch` candidates), for ANY step that needs',
+    '  current information from the internet: searching, checking a price, reading a page.',
+    '- Add a web lookup ONLY when the request needs information from the internet. Work on',
+    '  the user\'s own documents, notes or records needs none: do not add one "for context"',
+    '  (the query leaves the machine).',
+    '- Do NOT hand a web lookup to an `agent_task` -- that includes "deep research" and',
+    '  fallback branches. If one lookup might come back thin, add a second web tool node, or',
+    '  a `dispatch` between web tools. Keep `agent_task` for open-ended work no listed tool',
+    '  fits. A lookup done by a tool is cheaper, faster and audited.',
+    "- Each tool's description states its args and result fields. Pass one lookup's result",
+    '  to a later node with a ref, e.g. "{{search.result.text}}" for a node with id "search".',
+  ].join('\n');
+}
+
 export function buildSynthesisSystemPrompt(tools: ToolCatalogEntry[]): string {
-  const toolList = tools.map((t) => '  ' + t.name + ' — ' + t.description).join('\n');
+  const toolList = tools
+    .map((t) => '  ' + t.name + (t.group ? ' [' + t.group + ']' : '') + ' — ' + t.description)
+    .join('\n');
+  const webRules = webLookupRules(tools);
 
   return [
     'You design agent workflows as a JSON graph document.',
@@ -111,6 +149,7 @@ export function buildSynthesisSystemPrompt(tools: ToolCatalogEntry[]): string {
     '',
     SHAPE_RULES,
     '',
+    ...(webRules ? [webRules, ''] : []),
     'AVAILABLE TOOLS (use only these names, exactly as written):',
     toolList || '  (none connected — avoid tool, dispatch and submit nodes)',
     '',

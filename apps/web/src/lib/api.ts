@@ -171,7 +171,15 @@ export const api = {
       body: JSON.stringify({ kind: 'graph', input: { graphId, variables } }),
     }),
 
-  listRuns: () => request<{ runs: Run[] }>('/runs'),
+  listRuns: (filter: { graphId?: string; kind?: string; status?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (filter.graphId) params.set('graphId', filter.graphId);
+    if (filter.kind) params.set('kind', filter.kind);
+    if (filter.status) params.set('status', filter.status);
+    if (filter.limit) params.set('limit', String(filter.limit));
+    const qs = params.toString();
+    return request<{ runs: Run[] }>('/runs' + (qs ? '?' + qs : ''));
+  },
 
   createRun: (kind: string, input: unknown) =>
     request<{ run: Run }>('/runs', { method: 'POST', body: JSON.stringify({ kind, input }) }),
@@ -179,6 +187,10 @@ export const api = {
   getRun: (id: string) => request<RunDetail>('/runs/' + id),
 
   cancelRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/cancel', { method: 'POST' }),
+
+  /** "Save as a new task": fork the graph THIS run executed into a new document. */
+  saveRunAsGraph: (id: string) =>
+    request<{ graph: AgentGraph }>('/runs/' + id + '/save-as-graph', { method: 'POST' }),
 
   decide: (approvalId: string, decision: ApprovalDecision) =>
     request<{ approval: Approval }>('/approvals/' + approvalId + '/decide', {

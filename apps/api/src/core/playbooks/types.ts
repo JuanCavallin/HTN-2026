@@ -13,6 +13,7 @@ import type { ZodType } from 'zod';
 import type {
   Capability,
   CapabilityMap,
+  HarnessToolCall,
   IntelligenceLevel,
   Json,
   ModelTier,
@@ -104,6 +105,48 @@ export interface AgentTaskSpec {
    * cannot (see AgentRuntimeAdapter.pollTask) falls back to `maxPolls` alone.
    */
   inactivityTimeoutMs?: number;
+  /**
+   * WALL-CLOCK budget for the whole task, checked every poll regardless of
+   * what the runtime reports. Default 240_000 (4 minutes).
+   *
+   * This exists because `inactivityTimeoutMs` above turned out to be
+   * structurally unreachable for the runtime we actually have. Hermes streams
+   * `agent_thought_chunk` updates continuously while it reasons, and the live
+   * adapter counts every update as activity -- measured against a real
+   * research goal, the idle clock never exceeded 17s across a 196s task. A
+   * harness that is looping uselessly looks exactly as "active" as one that
+   * is converging, so an idle timer cannot tell them apart and only the
+   * `maxPolls` ceiling (600s at the defaults) ever fired. That is far too long
+   * to wait to find out a node is not going to finish, especially with
+   * several agent_task nodes running concurrently.
+   *
+   * Keep all three: `inactivityTimeoutMs` still catches a runtime that goes
+   * genuinely silent (faster than this budget), `maxPolls` is still the
+   * absolute backstop, and this is the one that bounds a live-but-unproductive
+   * task. Raise it per node for work that is legitimately long-running.
+   */
+  maxDurationMs?: number;
+  /**
+   * Stop the task once this many tool calls IN A ROW have come back FAILED.
+   * Default 3. Set 0 to disable.
+   *
+   * The budgets above all answer "how long do we wait?". This one answers a
+   * different and usually more useful question: "is it even able to do this?"
+   * A harness whose tools are broken stays perfectly busy -- it retries,
+   * rephrases, tries a neighbouring tool -- so it trips no idle timer and
+   * looks healthy right up until the wall-clock budget kills it. Measured on
+   * this project: `browser_exec` failing on every call and `web_search`
+   * 403-ing on a keyless provider, while the agent churned for the full
+   * budget and reported only "timed out".
+   *
+   * CONSECUTIVE, not total, and that distinction is load-bearing: agents
+   * retry. A healthy browser task measured here failed 2 of 14 calls while
+   * successfully driving a page, recovering each time -- a total count would
+   * have killed it. A genuinely broken tool fails every call instead, so the
+   * streak builds immediately. Requires the harness to report per-call status
+   * (see HarnessToolCall.status); a harness that cannot never trips this.
+   */
+  maxFailedToolCalls?: number;
 }
 
 export interface AgentTaskResult {
@@ -111,7 +154,7 @@ export interface AgentTaskResult {
   /** The routing decision Jev made before this task started. */
   scheduleDecision: ScheduleDecision;
   /** Self-reported by the runtime; our only post-hoc visibility into its internal loop. */
-  toolCalls: { tool: string; args?: unknown; at: string }[];
+  toolCalls: HarnessToolCall[];
 }
 
 export interface PlaybookContext {

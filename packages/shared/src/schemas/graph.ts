@@ -214,6 +214,18 @@ export const agentTaskNodeSchema = nodeVariant(
     maxPolls: z.number().int().min(1).max(2000).optional(),
     /** Give up if the runtime goes silent this long, even under maxPolls. See AgentTaskSpec. */
     inactivityTimeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
+    /**
+     * Wall-clock budget for the node, enforced even while the runtime reports
+     * activity. Default 240_000. This is the budget that actually fires for
+     * Hermes -- see AgentTaskSpec.maxDurationMs for the measurements.
+     */
+    maxDurationMs: z.number().int().min(1000).max(1_800_000).optional(),
+    /**
+     * Stop once this many tool calls IN A ROW have FAILED. Default 3, 0 disables.
+     * Catches "the agent has no working tools for this" in seconds, where
+     * every time-based budget above would wait it out. See AgentTaskSpec.
+     */
+    maxFailedToolCalls: z.number().int().min(0).max(100).optional(),
   }),
 );
 

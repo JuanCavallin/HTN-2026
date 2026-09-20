@@ -569,7 +569,17 @@ async function main() {
   // and forgetting to wire it is invisible until someone notices their edit
   // produced a different document than the one they were looking at.
   console.log('\n9b. Chatting on an EXISTING graph edits that graph, not a fork of it');
-  const { body: beforeEdit } = await api('/api/graphs/graph_demo');
+  // A throwaway graph, not graph_demo -- editing IN PLACE is exactly what
+  // this test is proving, and doing that to the shared seeded demo would
+  // permanently drift it a little further every time this suite runs,
+  // eventually breaking unrelated checks elsewhere (section 8, and section
+  // 11's fixture-based checks were added specifically to stop depending on
+  // graph_demo surviving this for exactly that reason).
+  const editFixture = await api('/api/graphs', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Smoke: 9b edit-in-place fixture' }),
+  });
+  const beforeEdit = editFixture.body;
   const seededConv = await api('/api/conversations', {
     method: 'POST',
     body: JSON.stringify({ graphId: beforeEdit.graph.id }),
@@ -635,6 +645,248 @@ async function main() {
   } else {
     check('second run reached its approval', false, 'timed out');
   }
+
+  console.log('\n11. Baseline, task history, and "save as new task"');
+  // A DEDICATED fixture, not graph_demo -- section 9b above edits graph_demo
+  // in place, so by the time this section runs it may no longer have a
+  // "redact"/"verdict" node id (or 8 nodes) to check against. Self-contained
+  // beats order-dependent.
+  const fixture = await api('/api/graphs', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke: section 11 fixture',
+      nodes: [
+        {
+          id: 'redact',
+          type: 'redact',
+          label: 'Redact',
+          position: { x: 0, y: 0 },
+          config: {
+            field: 'case_file',
+            text: 'SIN 046 454 286, contact avery.chen@example.edu, phone 519-555-0142.',
+          },
+        },
+        {
+          id: 'verdict',
+          type: 'judge',
+          label: 'Verdict',
+          position: { x: 0, y: 130 },
+          config: {
+            question: 'File a correction?',
+            options: ['file_correction', 'no_action'],
+            evidence: '{{redact.spans}} sensitive span(s) found.',
+          },
+        },
+      ],
+      edges: [{ id: 'e1', source: 'redact', target: 'verdict' }],
+    }),
+  });
+  const fixtureId = fixture.body?.graph?.id;
+
+  const graphRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ kind: 'graph', input: { graphId: fixtureId } }),
+  });
+  const graphRunId = graphRun.body?.run?.id;
+  check(
+    'graph run hoists graphId onto the run itself',
+    graphRun.body?.run?.graphId === fixtureId,
+    graphRun.body?.run?.graphId,
+  );
+
+  const baselineRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({
+      kind: 'baseline',
+      input: { target: 'ACME-2026-TERM-FEES', graphId: fixtureId },
+    }),
+  });
+  const baselineRunId = baselineRun.body?.run?.id;
+  check(
+    'baseline run links to the SAME task via graphId',
+    baselineRun.body?.run?.graphId === fixtureId,
+    baselineRun.body?.run?.graphId,
+  );
+
+  const history = await api('/api/runs?graphId=' + fixtureId + '&limit=10');
+  const historyIds = (history.body?.runs ?? []).map((r) => r.id);
+  check(
+    'run history for the task includes both the graph and the baseline attempt',
+    historyIds.includes(graphRunId) && historyIds.includes(baselineRunId),
+    historyIds.length + ' run(s) found',
+  );
+
+  // No submit/approval node in this fixture, so it runs straight to completion.
+  const graphDone = await waitFor(graphRunId, (run) => run.status === 'succeeded');
+  const redactStep = graphDone?.steps.find((s) => s.nodeId === 'redact');
+  const verdictStep = graphDone?.steps.find((s) => s.nodeId === 'verdict');
+  check(
+    'the redact node\'s persisted step output carries "spans" -- what a_pii\'s assertion path reads',
+    redactStep?.output?.spans === 3,
+    JSON.stringify(redactStep?.output),
+  );
+  check(
+    'the judge node\'s persisted step output carries "choice" -- what a_verdict\'s assertion path reads',
+    verdictStep?.output?.choice === 'file_correction',
+    JSON.stringify(verdictStep?.output),
+  );
+
+  const baselineDone = await waitFor(baselineRunId, (run) => run.status === 'succeeded');
+  check(
+    'the baseline reports a verdict in the SAME shape a graph assertion checks',
+    typeof baselineDone?.run?.result?.choice === 'string' &&
+      typeof baselineDone?.run?.result?.confidence === 'number',
+    JSON.stringify(baselineDone?.run?.result),
+  );
+  check(
+    'the baseline sent the case file UNREDACTED -- no PII spans pinned, nothing to gate on',
+    baselineDone?.piiSpans?.length === 0,
+    baselineDone?.piiSpans?.length,
+  );
+
+  const forked = await api('/api/runs/' + graphRunId + '/save-as-graph', { method: 'POST' });
+  check(
+    '"save as new task" forks a graph run into a new document',
+    forked.status === 201,
+    forked.status,
+  );
+  check(
+    'the fork is a genuinely new graph, not the original',
+    forked.body?.graph?.id && forked.body.graph.id !== fixtureId,
+    forked.body?.graph?.id,
+  );
+  check(
+    'the fork starts at version 1',
+    forked.body?.graph?.version === 1,
+    forked.body?.graph?.version,
+  );
+  check(
+    'the fork carries over the same nodes as the snapshot it was forked from',
+    forked.body?.graph?.nodes?.length === fixture.body?.graph?.nodes?.length,
+    forked.body?.graph?.nodes?.length + ' vs ' + fixture.body?.graph?.nodes?.length,
+  );
+
+  const forkNotAGraph = await api('/api/runs/' + baselineRunId + '/save-as-graph', {
+    method: 'POST',
+  });
+  check(
+    'forking a run with no graph document is rejected, not silently accepted',
+    forkNotAGraph.status === 400,
+    forkNotAGraph.status,
+  );
+
+  console.log('\n12. Live-web lookups run on OUR gated browser, not on Hermes');
+  const webCatalog = await api('/api/tools');
+  const webTools = (webCatalog.body?.tools ?? []).filter((t) => t.name.startsWith('web.'));
+  check(
+    'the catalog lists web.search and web.read, tagged as the web family',
+    webTools.some((t) => t.name === 'web.search' && t.group === 'web') &&
+      webTools.some((t) => t.name === 'web.read' && t.group === 'web'),
+    webTools.map((t) => t.name + '[' + t.group + ']').join(', '),
+  );
+  check(
+    'a name in both catalogs is listed once -- the real tool, not the toolbox fixture',
+    webTools.filter((t) => t.name === 'web.search').length === 1,
+  );
+
+  const webFixture = await api('/api/graphs', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke: section 12 web fixture',
+      nodes: [
+        {
+          id: 'search',
+          type: 'tool',
+          label: 'Search the web',
+          position: { x: 0, y: 0 },
+          config: { tool: 'web.search', args: { query: 'agentos hackathon demo' } },
+        },
+        {
+          id: 'read',
+          type: 'tool',
+          label: 'Read a page',
+          position: { x: 300, y: 0 },
+          config: { tool: 'web.read', args: { url: 'https://example.com' } },
+        },
+      ],
+      edges: [],
+    }),
+  });
+  const webRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ kind: 'graph', input: { graphId: webFixture.body?.graph?.id } }),
+  });
+  const webRunId = webRun.body?.run?.id;
+  const webDone = await waitFor(webRunId, (run) => run.status === 'succeeded' || run.status === 'failed');
+  check('a graph of web tool nodes completes without approval', webDone?.run?.status === 'succeeded', webDone?.run?.status);
+
+  const searchStep = webDone?.steps.find((s) => s.nodeId === 'search');
+  check(
+    'the step is badged with the browser provider, not the toolbox',
+    searchStep?.providerId === 'browserbase',
+    searchStep?.providerId,
+  );
+
+  const webEgress = (await api('/api/runs/' + webRunId + '/egress')).body?.events ?? [];
+  const searchRows = webEgress.filter((e) => e.providerId === 'browserbase' && e.stepId === searchStep?.id);
+  check(
+    'the browser calls landed in THIS run\'s ledger, attributed to the search node\'s step',
+    searchRows.length > 0,
+    searchRows.map((e) => e.op).join(', ') || 'no rows',
+  );
+  check(
+    'and the session was released -- an open session is billed and capped',
+    searchRows.some((e) => e.op === 'closeSession'),
+    searchRows.map((e) => e.op).join(', '),
+  );
+  check(
+    'no Hermes call was involved in a web lookup',
+    !webEgress.some((e) => e.providerId === 'hermes'),
+  );
+
+  const badWebFixture = await api('/api/graphs', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke: section 12 bad-args fixture',
+      nodes: [
+        {
+          id: 'empty',
+          type: 'tool',
+          label: 'Empty query',
+          position: { x: 0, y: 0 },
+          config: { tool: 'web.search', args: { query: '   ' } },
+        },
+        {
+          id: 'internal',
+          type: 'tool',
+          label: 'Internal address',
+          position: { x: 300, y: 0 },
+          config: { tool: 'web.read', args: { url: 'http://169.254.169.254/latest/meta-data' } },
+        },
+      ],
+      edges: [],
+    }),
+  });
+  const badRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ kind: 'graph', input: { graphId: badWebFixture.body?.graph?.id } }),
+  });
+  const badDone = await waitFor(
+    badRun.body?.run?.id,
+    (run) => run.status === 'succeeded' || run.status === 'failed',
+  );
+  const badSteps = badDone?.steps.filter((s) => s.nodeId === 'empty' || s.nodeId === 'internal') ?? [];
+  check(
+    'an empty query and an internal address are both refused',
+    badDone?.run?.status === 'failed' && badSteps.length === 2 && badSteps.every((s) => s.status === 'failed'),
+    badSteps.map((s) => s.nodeId + ':' + s.status).join(', '),
+  );
+  const badEgress = (await api('/api/runs/' + badRun.body?.run?.id + '/egress')).body?.events ?? [];
+  check(
+    'refused BEFORE any browser was touched',
+    !badEgress.some((e) => e.providerId === 'browserbase'),
+    badEgress.length + ' ledger row(s)',
+  );
 
   console.log('\n' + (failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'));
   process.exit(failures === 0 ? 0 : 1);

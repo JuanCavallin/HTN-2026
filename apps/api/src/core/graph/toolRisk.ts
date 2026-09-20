@@ -44,15 +44,37 @@
  */
 let CLASSIFICATIONS: ReadonlyMap<string, string> = new Map();
 
+/**
+ * Tool name -> its one-line description, from the same catalog read.
+ *
+ * Only `dispatch`'s `argsFrom: 'model'` path uses it: to infer a chosen tool's
+ * arguments, the model has to be told what that tool takes, and the catalog is
+ * the one place that says so. Empty is a normal state -- see `toolDescription`.
+ */
+let DESCRIPTIONS: ReadonlyMap<string, string> = new Map();
+
 /** Called once at startup with whatever the catalog reports. */
 export function setToolClassifications(
-  entries: readonly { name: string; actionKind?: string }[],
+  entries: readonly { name: string; description?: string; actionKind?: string }[],
 ): void {
   const next = new Map<string, string>();
+  const described = new Map<string, string>();
   for (const entry of entries) {
     if (entry.actionKind) next.set(entry.name, entry.actionKind);
+    if (entry.description) described.set(entry.name, entry.description);
   }
   CLASSIFICATIONS = next;
+  DESCRIPTIONS = described;
+}
+
+/**
+ * What a tool does and what it takes, or '' when the catalog never mentioned it.
+ *
+ * Unlike a missing CLASSIFICATION, a missing description is not a safety
+ * matter: it makes an inferred-args prompt weaker, not a call more permissive.
+ */
+export function toolDescription(tool: string): string {
+  return DESCRIPTIONS.get(tool) ?? '';
 }
 
 export const UNKNOWN_TOOL_ACTION_KIND = 'unclassified_tool';

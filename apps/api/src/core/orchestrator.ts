@@ -10,6 +10,7 @@
 import type {
   Capability,
   CapabilityMap,
+  HarnessToolCall,
   Json,
   ProposedAction,
   ProviderCallContext,
@@ -22,6 +23,7 @@ import { stripPiiValue } from '@htn/shared';
 import type { Store } from '../store/types.js';
 import { newId, nowIso } from '../lib/ids.js';
 import { ApprovalRejectedError, waitForApproval } from './approvalGate.js';
+import { registerRunContext, releaseRunContext } from './runContexts.js';
 import type { RunBus } from './bus.js';
 import { buildEgressEvent } from './ledger.js';
 import { detectPii } from './redaction.js';
@@ -93,6 +95,7 @@ export class Orchestrator {
       await this.patchRun(run.id, { status: 'running' });
 
       const ctx = this.createContext(run.id, controller.signal);
+      registerRunContext(run.id, ctx);
       const outcome = await playbook.execute(ctx, parsed.data as never);
 
       await this.patchRun(run.id, {
@@ -104,6 +107,7 @@ export class Orchestrator {
       await this.finishWithError(run.id, err as Error, controller.signal.aborted);
     } finally {
       this.inFlight.delete(run.id);
+      releaseRunContext(run.id);
       void bus;
       void store;
     }
@@ -368,6 +372,55 @@ export class Orchestrator {
         const pollIntervalMs = spec.pollIntervalMs ?? 1500;
         const maxPolls = spec.maxPolls ?? 400;
         const inactivityTimeoutMs = spec.inactivityTimeoutMs ?? 120_000;
+        // THE THIRD BUDGET, and in practice the one that fires. See
+        // AgentTaskSpec.maxDurationMs: measured against live Hermes, the idle
+        // clock never passed 17s during a 196s task because the harness
+        // streams thought chunks the whole time it reasons, so
+        // inactivityTimeoutMs cannot distinguish "converging slowly" from
+        // "looping uselessly" and only maxPolls (600s) ever stopped anything.
+        const maxDurationMs = spec.maxDurationMs ?? 240_000;
+        // Not a clock. See AgentTaskSpec.maxFailedToolCalls: a harness with
+        // broken tools stays busy, so every time-based budget above lets it
+        // run to the end. This is the one that catches "it cannot actually
+        // do this" rather than "it is taking a while".
+        const maxFailedToolCalls = spec.maxFailedToolCalls ?? 3;
+
+        /**
+         * Write the harness's self-reported tool calls into the SAME ledger
+         * real provider calls go through.
+         *
+         * Called on BOTH the success and the failure path. It used to run only
+         * on success, which quietly broke the ledger's own invariant: a task
+         * killed by a timeout had genuinely made those calls -- they left the
+         * machine -- and none of them were ever recorded. A timeout is exactly
+         * when you most want the list.
+         */
+        const ledgerToolCalls = async (
+          calls: HarnessToolCall[],
+        ): Promise<void> => {
+          for (const call of calls) {
+            const egress = buildEgressEvent(
+              {
+                id: newId('egr'),
+                runId,
+                stepId: step.id,
+                providerId: 'hermes',
+                op: 'internal.tool_call:' + call.tool,
+                destination: 'hermes-internal://' + call.tool,
+                policyRule: 'reported-post-hoc-by-hermes',
+              },
+              call.at,
+            );
+            await store.appendEgress(egress);
+            await bus.emit(runId, { type: 'egress.logged', egress });
+          }
+        };
+
+        /**
+         * Tool calls seen so far, updated on every poll. Declared out here so
+         * the catch block below can still report them after a throw.
+         */
+        let toolCalls: HarnessToolCall[] = [];
 
         try {
           // 1. Route BEFORE starting the task. This is where tool/model
@@ -432,10 +485,10 @@ export class Orchestrator {
           const taskId = started.data.taskId;
 
           // 3. Poll to completion, bounded so a stuck task cannot hang the run.
-          let toolCalls: { tool: string; args?: unknown; at: string }[] = [];
           let finalResult: unknown = null;
           let completed = false;
-          let stopReason: 'inactive' | 'max_polls' | null = null;
+          let stopReason: 'inactive' | 'max_polls' | 'max_duration' | 'tool_failures' | null =
+            null;
 
           const pollingStartedAt = Date.now();
           // Anchors the inactivity clock until the harness reports its own
@@ -462,6 +515,14 @@ export class Orchestrator {
               break;
             }
 
+            // Keep the latest self-reported tool calls from EVERY poll, not
+            // just the terminal one. A task that is later cancelled by a
+            // timeout still has to be able to say what it invoked before it
+            // was stopped -- that list is the main evidence for WHY it stalled
+            // (e.g. "21 web searches, no browser") and it is exactly what was
+            // being thrown away when the run failed.
+            if (polled.data.toolCalls) toolCalls = polled.data.toolCalls;
+
             if (polled.data.lastActivityAt) {
               lastKnownActivityAt = Date.parse(polled.data.lastActivityAt);
             }
@@ -481,8 +542,22 @@ export class Orchestrator {
               '| toolCalls=' + (polled.data.toolCalls?.length ?? 0),
             );
 
+            // Checked BEFORE the time budgets: when a task is doomed because
+            // its tools are broken, the useful error names the tools, not the
+            // clock. Letting a timeout win the race here would bury the
+            // actual cause under a generic "took too long".
+            const failedCalls = toolCalls.filter((c) => c.status === 'failed');
+            if (maxFailedToolCalls > 0 && failedCalls.length >= maxFailedToolCalls) {
+              stopReason = 'tool_failures';
+              break;
+            }
+
             if (idleMs >= inactivityTimeoutMs) {
               stopReason = 'inactive';
+              break;
+            }
+            if (elapsedMs >= maxDurationMs) {
+              stopReason = 'max_duration';
               break;
             }
 
@@ -495,6 +570,42 @@ export class Orchestrator {
               taskId,
               buildCallContext({ stepId: step.id, policyRule: 'poll-timeout-cancel' }),
             );
+            if (stopReason === 'tool_failures') {
+              const failed = toolCalls.filter((c) => c.status === 'failed');
+              // Name the tool AND what it said. "3 tool calls failed" sends
+              // someone back to the logs; "browser_exec failed: daemon didn't
+              // come up" is something they can act on without leaving here.
+              const detail = failed
+                .map((c) => '  • ' + c.tool + (c.result ? ' -> ' + c.result : ''))
+                .join('\n');
+              throw new Error(
+                'Agent task ' +
+                  taskId +
+                  ' was stopped after ' +
+                  failed.length +
+                  ' tool call(s) in a row failed (of ' +
+                  toolCalls.length +
+                  ' total) — it was working, but not with tools that work:\n' +
+                  detail +
+                  '\nFix the tool (or stop offering it to this task) rather than raising the ' +
+                  'time budget; more time only buys more failed retries. Raise ' +
+                  'maxFailedToolCalls on this node if these failures are expected and recoverable.',
+              );
+            }
+            if (stopReason === 'max_duration') {
+              throw new Error(
+                'Agent task ' +
+                  taskId +
+                  ' was still active but had not finished after ' +
+                  (maxDurationMs / 1000).toFixed(0) +
+                  's (its wall-clock budget), so it was stopped. It was NOT idle — ' +
+                  'the harness kept reporting activity throughout. Either the goal is too ' +
+                  'open-ended for one agent turn, or the harness lacks a tool it needs and is ' +
+                  'working around it slowly. Check the [hermes:live] tool_call lines for this ' +
+                  'task to see what it actually spent the time on, and raise maxDurationMs on ' +
+                  'this node only if the work genuinely takes this long.',
+              );
+            }
             throw new Error(
               stopReason === 'inactive'
                 ? 'Agent task ' +
@@ -522,22 +633,7 @@ export class Orchestrator {
           //    SAME ledger real provider calls go through, so "every outbound
           //    call is logged" still holds, just after the fact rather than
           //    gated in real time.
-          for (const call of toolCalls) {
-            const egress = buildEgressEvent(
-              {
-                id: newId('egr'),
-                runId,
-                stepId: step.id,
-                providerId: 'hermes',
-                op: 'internal.tool_call:' + call.tool,
-                destination: 'hermes-internal://' + call.tool,
-                policyRule: 'reported-post-hoc-by-hermes',
-              },
-              call.at,
-            );
-            await store.appendEgress(egress);
-            await bus.emit(runId, { type: 'egress.logged', egress });
-          }
+          await ledgerToolCalls(toolCalls);
 
           await this.upsertStep(step.id, {
             status: 'succeeded',
@@ -547,9 +643,16 @@ export class Orchestrator {
 
           return { result: finalResult, scheduleDecision: decision, toolCalls };
         } catch (err) {
+          // Preserve the evidence. A failed agent task used to write ONLY an
+          // error string, so the timeline could say "this timed out" but never
+          // "...after calling web_search 21 times" -- the single most useful
+          // fact for working out why. Both the step output and the ledger now
+          // carry whatever the harness reported before it was stopped.
+          await ledgerToolCalls(toolCalls);
           await this.upsertStep(step.id, {
             status: 'failed',
             error: { code: 'AGENT_TASK_FAILED', message: (err as Error).message },
+            output: toJson({ partial: true, toolCallCount: toolCalls.length, toolCalls }),
             endedAt: nowIso(),
           });
           throw err;

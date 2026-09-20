@@ -7,6 +7,7 @@
  * the full demo. A missing key downgrades live -> mock. It never throws.
  */
 
+import { resolve as resolvePath } from 'node:path';
 import { z } from 'zod';
 import { PROVIDER_IDS, type ProviderId, type ProviderMode } from '@htn/shared';
 
@@ -38,6 +39,17 @@ const envSchema = z.object({
   // an HTTP API — there is no bearer key. What live mode actually needs is the
   // absolute path to a `hermes-agent` checkout with the `acp` extra installed.
   HERMES_CWD: z.string().optional(),
+  /**
+   * The directory each ACP SESSION works in — NOT where hermes-acp is spawned.
+   *
+   * These were the same path, and that was a real problem: the session cwd is
+   * what Hermes's `terminal` tool operates in, so pointing it at HERMES_CWD
+   * turned the Hermes source checkout into the agent's scratch space. Observed
+   * live, a task with no case data to work from spent its first 30 seconds
+   * running `ls -la`, `git status` and `find` across that checkout looking for
+   * context that was never there. Defaults to `.data/hermes-workspace`.
+   */
+  HERMES_WORKSPACE: z.string().optional(),
   HERMES_API_KEY: z.string().optional(),
   HERMES_BASE_URL: z.string().optional(),
 
@@ -119,6 +131,8 @@ export interface ProviderConfig {
   projectId?: string;
   /** Absolute path to a local checkout the provider drives as a subprocess (Hermes only). */
   cwd?: string;
+  /** Where a Hermes SESSION works, kept separate from `cwd`. See HERMES_WORKSPACE. */
+  workspace?: string;
   /** Installed browser channel to drive, e.g. 'chrome' (localbrowser only). */
   channel?: string;
   /** Name of the env var that would enable live mode. Shown in health detail. */
@@ -147,7 +161,16 @@ function resolveHermes(): ProviderConfig {
   let mode: ProviderMode = env.HERMES_MODE;
   if (env.MOCK_ALL) mode = 'mock';
   else if (mode === 'live' && !env.HERMES_CWD) mode = 'mock';
-  return { mode, cwd: env.HERMES_CWD, baseUrl: env.HERMES_BASE_URL, keyVar: 'HERMES_CWD' };
+  return {
+    mode,
+    cwd: env.HERMES_CWD,
+    // '../../.data' relative to apps/api, matching store/sqlite.ts's DB_PATH
+    // so everything this app writes lands in the one gitignored .data/ at the
+    // repo root rather than a second one under apps/api.
+    workspace: env.HERMES_WORKSPACE ?? resolvePath(process.cwd(), '../../.data/hermes-workspace'),
+    baseUrl: env.HERMES_BASE_URL,
+    keyVar: 'HERMES_CWD',
+  };
 }
 
 /**

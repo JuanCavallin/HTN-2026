@@ -1,21 +1,18 @@
 /**
  * The tool catalog, for the graph editor's per-node tool picker.
  *
- * Served through the `toolbox` CAPABILITY rather than a vendor, so this endpoint
- * does not change when Person 3's 50+ tool registry replaces the composio mock's
- * short list — it grows on its own. See providers/registry.ts BINDINGS.
+ * Served through services/toolCatalog.ts: the `toolbox` CAPABILITY (not a
+ * vendor) merged with the tool plane's registry, so this endpoint grows on its
+ * own when a provider or a plugin manifest is added. See providers/registry.ts
+ * BINDINGS.
  */
 
 import { Router } from 'express';
-import { providers } from '../services/runtime.js';
+import type { ToolCatalogEntry } from '@htn/shared';
+import { listToolCatalog } from '../services/toolCatalog.js';
 import { HttpError } from './middleware/validate.js';
 
 export const toolsRouter: Router = Router();
-
-interface ToolCatalogEntry {
-  name: string;
-  description: string;
-}
 
 /**
  * The catalog is read through withEgress, which records a ledger row per call.
@@ -36,7 +33,7 @@ toolsRouter.get('/tools', async (_req, res) => {
   // No run owns this call, but every outbound call is logged — there is no
   // anonymous egress. A synthetic runId keeps that invariant true; the `sys_`
   // prefix cannot collide with a real `run_` id.
-  const result = await providers.provider('toolbox').listTools({
+  const result = await listToolCatalog({
     runId: 'sys_catalog',
     policyRule: 'tool-catalog-read',
   });

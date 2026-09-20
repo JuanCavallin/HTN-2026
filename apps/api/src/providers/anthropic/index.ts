@@ -19,10 +19,14 @@ function createMock(cfg: ProviderConfig): TextModelAdapter {
     async complete(input, ctx) {
       const placeholders = (ctx.redactions ?? []).length;
 
-      // A JSON request is graph synthesis. Returning prose here would make the
-      // whole chat -> graph -> run loop unusable without API keys, so the mock
-      // returns a real, runnable, DELEGATING document. See mockGraphs.ts.
-      if (input.json) {
+      // Graph synthesis is identified by its policyRule, not by `json: true` --
+      // that flag is now also set by other JSON-shaped callers (e.g. the
+      // baseline playbook asking for a verdict), and returning a mock GRAPH
+      // document to one of those would be actively wrong, not just untargeted.
+      // Returning prose here for a real synthesis call would make the whole
+      // chat -> graph -> run loop unusable without API keys, so THIS specific
+      // caller gets a real, runnable, DELEGATING document. See mockGraphs.ts.
+      if (input.json && ctx.policyRule === 'graph-synthesis') {
         const graph = mockGraphFor(input.prompt);
         const jsonIn = Math.ceil((input.prompt.length + (input.system?.length ?? 0)) / 4);
         const jsonOut = Math.ceil(graph.length / 4);

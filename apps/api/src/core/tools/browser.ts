@@ -55,7 +55,12 @@ export interface BrowserExecutorDeps {
   decide: BrowserDecider;
   /** Supplies TYPE_TEXT's value. Jev cannot write text — a small model does. */
   composeText?: (goal: string, fieldLabel: string, signal?: AbortSignal) => Promise<string>;
-  callContext(args: { stepId?: string; policyRule: string }): ProviderCallContext;
+  /**
+   * `runId` is the run the ACTION belongs to. The plane is a process-wide
+   * singleton, so it cannot know that on its own -- without it every call lands
+   * on one synthetic run and never reaches the real run's ledger or analytics.
+   */
+  callContext(args: { runId?: string; stepId?: string; policyRule: string }): ProviderCallContext;
 }
 
 interface Backend {
@@ -165,6 +170,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): ToolExecutor {
 
     const operation = action.toolId.split('.').slice(1).join('.');
     const ctx = deps.callContext({
+      runId: action.runId,
       stepId: action.stepId,
       policyRule: auth.reason,
     });
@@ -398,7 +404,11 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): ToolExecutor {
         await backend.adapter
           .closeSession(
             sessionId,
-            deps.callContext({ stepId: action.stepId, policyRule: 'session-release' }),
+            deps.callContext({
+              runId: action.runId,
+              stepId: action.stepId,
+              policyRule: 'session-release',
+            }),
           )
           .catch((err: unknown) => {
             // Never let cleanup mask the real error that sent us here.
