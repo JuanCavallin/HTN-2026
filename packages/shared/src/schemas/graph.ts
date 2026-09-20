@@ -8,7 +8,7 @@
  * source of runtime failures. There is no separate graph.ts.
  *
  * A graph is executed by the interpreter, which maps each node type onto one
- * PlaybookContext primitive — see docs/graph-workflow-plan.md. Node `type`
+ * PlaybookContext primitive — see docs/archive/graph-workflow-plan.md. Node `type`
  * reuses the existing StepSpec.kind vocabulary so the icon map in the web app's
  * StepRow works on graph nodes with no extra mapping.
  *
@@ -147,7 +147,7 @@ export const toolNodeSchema = nodeVariant(
  * multi-turn model loop — one cheap decide plus one tool call.
  *
  * This is the "Direct tool call (no agent loop needed)" branch that already
- * appears in docs/example_flow.md, hanging straight off the Jev node.
+ * appears in docs/archive/example_flow.md, hanging straight off the Jev node.
  *
  * Needs NO new provider capability: DecisionAdapter.decide({question, options})
  * already has exactly this shape, with `options` as the candidate tool names.

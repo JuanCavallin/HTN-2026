@@ -1,5 +1,10 @@
 # MCP, Composio, and OpenRouter Integration Plan
 
+> **Archived — historical planning document.** Kept for the record of how Zephyr/AgentOS
+> was built during Hack the North 2026. It may describe work that has since changed; the
+> current docs are the [README](../../README.md), [agentos-design.md](../agentos-design.md)
+> and [DEMO.md](../DEMO.md).
+
 This is the immediate execution plan after the trusted registry and exact-action broker.
 It is deliberately split into small mergeable changes so the Composio and OpenRouter
 tracks can proceed in parallel without bypassing AgentOS.

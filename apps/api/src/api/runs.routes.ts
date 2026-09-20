@@ -14,6 +14,8 @@ import {
   getRunEvents,
   getRunDetail,
   listRuns,
+  pauseRun,
+  resumeRun,
 } from '../services/runs.service.js';
 import { listEgress } from '../services/egress.service.js';
 import { HttpError, param, valid, validate } from './middleware/validate.js';
@@ -51,6 +53,23 @@ runsRouter.get('/runs/:id/events', async (req, res) => {
   const events = await getRunEvents(param(req, 'id'), since);
   if (!events) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
   res.json({ events, lastSeq: events.at(-1)?.seq ?? since });
+});
+
+/**
+ * Pause takes effect at the next step boundary, not instantly — so this
+ * returns the run as it is NOW, and the client learns the run actually stopped
+ * from the `run.updated` event that carries status 'paused'.
+ */
+runsRouter.post('/runs/:id/pause', async (req, res) => {
+  const run = await pauseRun(param(req, 'id'));
+  if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json({ run });
+});
+
+runsRouter.post('/runs/:id/resume', async (req, res) => {
+  const run = await resumeRun(param(req, 'id'));
+  if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json({ run });
 });
 
 runsRouter.post('/runs/:id/cancel', async (req, res) => {
@@ -91,7 +110,9 @@ runsRouter.get('/runs/:id/browser/:sessionId/live-view', async (req, res) => {
 
   const adapter = providers.provider('browser');
   if (!adapter.liveView) {
-    res.json({ liveViewUrl: null, interactive: false });
+    // Same shape on every path: a caller that reads `pageUrl` must not get
+    // `undefined` from one branch and `null` from the others.
+    res.json({ liveViewUrl: null, pageUrl: null, interactive: false });
     return;
   }
 

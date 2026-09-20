@@ -16,17 +16,36 @@ export type CreateRunRequest = z.infer<typeof createRunRequestSchema>;
 
 export const listRunsQuerySchema = z.object({
   status: z
-    .enum(['pending', 'running', 'awaiting_approval', 'succeeded', 'failed', 'cancelled'])
+    .enum(['pending', 'running', 'awaiting_approval', 'paused', 'succeeded', 'failed', 'cancelled'])
     .optional(),
   kind: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 export type ListRunsQuery = z.infer<typeof listRunsQuerySchema>;
 
-export const approvalDecisionSchema = z.object({
-  decision: z.enum(['approved', 'rejected']),
-  note: z.string().max(1000).optional(),
-});
+/**
+ * The three human answers to a gated action. 'revised' is not a flavour of
+ * 'approved': it replaces the payload, and the replacement goes back through
+ * the risk gate before anything runs.
+ */
+export const approvalDecisionSchema = z
+  .object({
+    decision: z.enum(['approved', 'rejected', 'revised']),
+    note: z.string().max(1000).optional(),
+    /**
+     * The edited payload. Only the payload is editable — the action's kind
+     * and destination are what the risk classification was built on, so
+     * letting the client restate them would let a revision walk around the
+     * gate rather than through it.
+     */
+    revisedPayload: z.unknown().optional(),
+    /** Optional edit to the monetary impact, which the gate re-reads. */
+    revisedAmountCents: z.number().int().min(0).optional(),
+  })
+  .refine((v) => v.decision !== 'revised' || v.revisedPayload !== undefined, {
+    message: 'revisedPayload is required when decision is "revised"',
+    path: ['revisedPayload'],
+  });
 export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>;
 
 export const runIdParamSchema = z.object({ id: z.string().min(1) });

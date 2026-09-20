@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { emptyRunView, isTerminal, type AgentGraph, type Conversation } from '@htn/shared';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { emptyRunView, isTerminal, type Conversation } from '@htn/shared';
 import { api } from '../lib/api';
 import {
   advancePreview,
@@ -15,6 +15,7 @@ import {
 } from '../lib/workspace';
 import { useRunStream } from '../hooks/useRunStream';
 import { useRunGraph } from '../hooks/useGraph';
+import { useTools } from '../hooks/useTools';
 import { useHarness } from '../components/layout/AppShell';
 import { DecisionCanvas } from '../components/graph/DecisionCanvas';
 import { MetricsStrip, RunInspector, TaskComposer } from '../components/chat/WorkspacePanels';
@@ -271,7 +272,6 @@ export function Workspace() {
   const [overrides, setOverrides] = useState<RouteOverrides>({});
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const [prepared, setPrepared] = useState<AgentGraph | null>(null);
   const [pastMessages, setPastMessages] = useState<string[]>([]);
   const scroll = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -293,11 +293,11 @@ export function Workspace() {
       mode === 'preview' && started
         ? previewTrace(scenario, elapsed, approval, overrides)
         : {
-            ...buildTrace(emptyRunView, prepared),
+            ...buildTrace(emptyRunView, null),
             provenance: mode === 'preview' ? 'preview' : 'unknown',
             status: busy ? 'pending' : 'ready',
           },
-    [mode, started, scenario, elapsed, approval, overrides, prepared, busy],
+    [mode, started, scenario, elapsed, approval, overrides, busy],
   );
   const done = trace.status === 'succeeded';
   const gate = trace.status === 'awaiting_approval';
@@ -324,7 +324,6 @@ export function Workspace() {
     setOverrides({});
     setMode('preview');
     setError('');
-    setPrepared(null);
   };
 
   // Editing a route in preview re-runs the workflow with the new choice, from the top, so
@@ -359,17 +358,13 @@ export function Workspace() {
     }
     setStarted(true);
     setPrompt(text);
-    setPrepared(null);
-    setBusy('Preparing the workflow');
+    setBusy('Starting execution');
     try {
-      const { conversation } = await api.createConversation();
-      const result = await api.sendMessage(conversation.id, text);
-      setPrepared(result.graph);
-      setBusy('Starting execution');
-      const { run } = await api.runGraph(result.graph.id);
-      navigate('/runs/' + run.id, {
-        state: { conversation: result.conversation, graph: result.graph },
-      });
+      // One supervised `agent` run per goal. The old createConversation ->
+      // sendMessage -> runGraph sequence targeted graph-synthesis endpoints the
+      // AgentOS backend no longer has; see docs/frontend-handoff.md.
+      const { run } = await api.startAgentTask(text);
+      navigate('/runs/' + run.id);
       return true;
     } catch (issue) {
       setError(
@@ -432,9 +427,7 @@ export function Workspace() {
                   : sample.intro
                 : busy
                   ? 'Turning your request into a workflow. Execution will start as soon as it is ready.'
-                  : prepared
-                    ? 'The workflow is prepared. Execution has not started.'
-                    : 'Your task will run through the configured backend.'}
+                  : 'Your task will run through the configured backend.'}
             </p>
             {mode === 'preview' && trace.nodes.length > 0 && (
               <div className="routing-summary">
@@ -536,7 +529,6 @@ export function Workspace() {
       {error && (
         <div className="error-note" role="alert">
           {error}
-          {prepared && <Link to={'/graphs/' + prepared.id}>Open the prepared workflow</Link>}
         </div>
       )}
     </>
@@ -564,7 +556,6 @@ export function Workspace() {
           onModeChange={(next) => {
             setMode(next);
             setError('');
-            setPrepared(null);
             if (next === 'backend') setStarted(false);
           }}
           onSend={send}
@@ -584,9 +575,7 @@ export function Workspace() {
 
 export function LiveRunWorkspace() {
   const { id } = useParams<{ id: string }>();
-  const location = useLocation();
   const navigate = useNavigate();
-  const seed = location.state as { conversation?: Conversation; graph?: AgentGraph } | null;
   const [retry, setRetry] = useState(0);
   const view = useRunStream(id, retry);
   const snapshot = useRunGraph(view.run?.input ?? null);
@@ -595,9 +584,15 @@ export function LiveRunWorkspace() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const graph = snapshot ?? seed?.graph;
-  const trace = useMemo(() => buildTrace(view, graph, now), [view, graph, now]);
+  const graph = snapshot;
+  // Names each tool's provider (Composio, browser, MCP) so the graph can say where it ran.
+  const { tools } = useTools();
+  const catalog = useMemo(() => new Map(tools.map((tool) => [tool.name, tool])), [tools]);
+  const trace = useMemo(() => buildTrace(view, graph, now, catalog), [view, graph, now, catalog]);
   const terminal = !!view.run && isTerminal(view.run.status);
+  // Read from the run, never from a local click -- pause lands at the next step
+  // boundary, so the server is the only thing that knows when it took effect.
+  const runPaused = view.run?.status === 'paused';
 
   useEffect(() => {
     if (terminal) return;
@@ -621,13 +616,9 @@ export function LiveRunWorkspace() {
     setBusy(true);
     setError('');
     try {
-      const conversationId =
-        seed?.conversation?.id ?? (await api.createConversation(graph?.id)).conversation.id;
-      const result = await api.sendMessage(conversationId, text);
-      const { run } = await api.runGraph(result.graph.id);
-      navigate('/runs/' + run.id, {
-        state: { conversation: result.conversation, graph: result.graph },
-      });
+      // A follow-up is a new supervised run, not an edit of this one.
+      const { run } = await api.startAgentTask(text);
+      navigate('/runs/' + run.id);
       return true;
     } catch (issue) {
       setError(issue instanceof Error ? issue.message : 'Could not start your follow-up.');
@@ -644,6 +635,23 @@ export function LiveRunWorkspace() {
       await api.cancelRun(id);
     } catch (issue) {
       setError(issue instanceof Error ? issue.message : 'Cancellation was not confirmed.');
+    }
+  };
+
+  /**
+   * Pause is cooperative, so this does NOT set any local "paused" state: the
+   * run reports status 'paused' over SSE once it actually reaches a step
+   * boundary. Flipping a local flag here would show the run as stopped while a
+   * step was still running.
+   */
+  const togglePause = async () => {
+    if (!id) return;
+    setError('');
+    try {
+      if (runPaused) await api.resumeRun(id);
+      else await api.pauseRun(id);
+    } catch (issue) {
+      setError(issue instanceof Error ? issue.message : 'The run did not accept that request.');
     }
   };
 
@@ -673,28 +681,23 @@ export function LiveRunWorkspace() {
         </div>
       ) : (
         <>
-          {seed?.conversation?.messages
-            .filter((message) => message.role === 'user')
-            .map((message) => (
-              <Message author="you" key={message.id}>
-                <p className="user-request">{message.text}</p>
-              </Message>
-            ))}
           <Message author="agent">
             <p className="assistant-intro">
               {view.run?.summary ??
-                seed?.conversation?.messages.findLast((message) => message.role === 'assistant')
-                  ?.text ??
                 'Following the execution stream. Recorded steps and routing decisions will appear here as they arrive.'}
             </p>
             {!terminal && (
-              <WorkingStatus active={view.connected && view.run?.status !== 'awaiting_approval'}>
+              <WorkingStatus
+                active={view.connected && view.run?.status !== 'awaiting_approval' && !runPaused}
+              >
                 {view.run?.status === 'awaiting_approval'
                   ? 'Waiting for your approval'
-                  : !view.connected
-                    ? 'Connection interrupted — reconnecting'
-                    : (trace.nodes.find((node) => node.status === 'running')?.label ??
-                      'Waiting for a backend update')}
+                  : runPaused
+                    ? 'Paused at a step boundary — resume when you’re ready'
+                    : !view.connected
+                      ? 'Connection interrupted — reconnecting'
+                      : (trace.nodes.find((node) => node.status === 'running')?.label ??
+                        'Waiting for a backend update')}
               </WorkingStatus>
             )}
             {view.approvals
@@ -794,6 +797,8 @@ export function LiveRunWorkspace() {
       metrics={
         <MetricsStrip
           trace={trace}
+          paused={runPaused}
+          onPause={() => void togglePause()}
           onCancel={() => void cancel()}
           connected={view.connected}
           lastEventAt={view.lastEventAt}

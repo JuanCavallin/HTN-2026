@@ -1,5 +1,10 @@
 # Editable graph workflow + chat + analytics — implementation plan
 
+> **Archived — historical planning document.** Kept for the record of how Zephyr/AgentOS
+> was built during Hack the North 2026. It may describe work that has since changed; the
+> current docs are the [README](../../README.md), [agentos-design.md](../agentos-design.md)
+> and [DEMO.md](../DEMO.md).
+
 Scope of this document: turning the pipeline from imperative TypeScript into an
 editable graph document, driving it from a chat, visualising it live, and
 measuring it against a single-prompt baseline.

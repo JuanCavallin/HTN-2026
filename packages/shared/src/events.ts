@@ -73,6 +73,11 @@ export interface RunView {
   controlDecisions: ControlDecisionRecord[];
   modelCalls: ModelLifecycleEvent[];
   harnessTurns: HarnessTurnEvent[];
+  /**
+   * Every `tool.lifecycle` event, in arrival order. One tool action produces several
+   * (proposed -> policy_decided -> ... -> succeeded), all sharing `action.id`; group by it.
+   */
+  toolLifecycle: ToolLifecycleEvent[];
   agentSessions: AgentSessionState[];
   logs: { level: 'info' | 'warn' | 'error'; message: string; at: Iso }[];
   /** Highest `seq` applied. Used as the replay cursor on reconnect. */
@@ -90,6 +95,7 @@ export const emptyRunView: RunView = {
   controlDecisions: [],
   modelCalls: [],
   harnessTurns: [],
+  toolLifecycle: [],
   agentSessions: [],
   logs: [],
   lastSeq: 0,

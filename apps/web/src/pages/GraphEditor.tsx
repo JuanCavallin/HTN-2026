@@ -1,27 +1,24 @@
 /**
- * The graph page: describe a workflow, see its shape, edit it, run it.
+ * The graph page: see a workflow's shape, edit it, run it.
  *
- * Chat and canvas sit side by side on purpose. The chat produces a DOCUMENT,
- * not a run -- you read what it built, and only then launch it. That gap is the
- * product; a prompt box that immediately executes would be a different (and
- * less defensible) thing.
+ * A manual graph editor. You build and edit the DOCUMENT directly on the
+ * canvas, and only then launch it -- a prompt box that immediately executes
+ * would be a different (and less defensible) thing.
  *
  * Phase 4: the canvas is directly editable here (drag, connect, delete) and
  * the node panel is a real typed form (NodeInspector) instead of a read-only
- * JSON dump. Chat and canvas both mutate the same document, so every canvas
- * mutation carries `graph.version` -- see the mutation error banner below for
- * what happens when they race.
+ * JSON dump. Every canvas mutation carries `graph.version` -- see the
+ * mutation error banner below for what happens when two edits race.
  */
 
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { AgentGraph, Conversation, GraphEdge, GraphNodeType } from '@htn/shared';
+import type { AgentGraph, GraphEdge, GraphNodeType } from '@htn/shared';
 import { GRAPH_NODE_TYPES } from '@htn/shared';
 import { useGraph, useGraphs } from '../hooks/useGraph';
 import { useTools } from '../hooks/useTools';
 import { api, ApiError } from '../lib/api';
 import { newClientId } from '../lib/ids';
-import { ChatPanel } from '../components/chat/ChatPanel';
 import { GraphCanvas } from '../components/graph/GraphCanvas';
 import { Legend } from '../components/graph/Legend';
 import { NodeInspector } from '../components/graph/NodeInspector';
@@ -37,43 +34,26 @@ export function GraphEditor() {
   const { graph: loaded, refresh: refreshGraph } = useGraph(id ?? undefined);
   const { tools } = useTools();
 
-  // The chat can replace the graph under us, so the displayed document is local
-  // state seeded from whatever was loaded.
+  // The displayed document is local state seeded from whatever was loaded.
   const [graph, setGraph] = useState<AgentGraph | null>(null);
-  const [conversation, setConversation] = useState<Conversation | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [addType, setAddType] = useState<GraphNodeType>('tool');
-  // Chat and the canvas both mutate the same document -- a 409 here means the
-  // other one won -- see mutateGraph's optimistic-concurrency check.
+  // A 409 here means a concurrent edit won -- see mutateGraph's
+  // optimistic-concurrency check.
   const [mutationError, setMutationError] = useState<string | null>(null);
-  // Synthesis reads the graph's version once, before a multi-second model
-  // call, then writes back afterward. A canvas edit inside that window can't
-  // be merged into a rewrite the model already computed without seeing it --
-  // so canvas mutation is locked for the duration rather than raced against.
-  const [chatBusy, setChatBusy] = useState(false);
 
   useEffect(() => {
     if (loaded) setGraph(loaded);
   }, [loaded]);
 
   // With no graph in the URL, show the most recent one so the canvas is not
-  // empty while the chat is still untouched.
+  // empty while nothing has been edited yet.
   useEffect(() => {
     if (!id && !graph && graphs.length > 0) setGraph(graphs[0] as AgentGraph);
   }, [id, graph, graphs]);
-
-  // A DELIBERATE navigation to a different graph (the dropdown, or a link from
-  // elsewhere) must drop any active conversation. Without this, an existing
-  // conversation keeps the `graphId` it was seeded with, and a message typed
-  // after switching would silently edit the graph you navigated AWAY from
-  // while the canvas shows the one you switched TO. This does not fire when
-  // the chat itself updates `graph` in place -- only when the URL's :id changes.
-  useEffect(() => {
-    setConversation(null);
-  }, [id]);
 
   const DEMO_TARGET = 'ACME-2026-TERM-FEES';
 
@@ -249,7 +229,7 @@ export function GraphEditor() {
                   </option>
                 ))}
               </select>
-              <Button variant="ghost" onClick={() => void addNode()} disabled={chatBusy}>
+              <Button variant="ghost" onClick={() => void addNode()}>
                 + Add node
               </Button>
             </>
@@ -277,11 +257,6 @@ export function GraphEditor() {
       )}
       {graph?.description && <p className="text-sm text-slate-400">{graph.description}</p>}
       {launchError && <p className="text-xs text-rose-400">{launchError}</p>}
-      {chatBusy && (
-        <p className="text-xs text-sky-400">
-          Chat is rewriting this graph — canvas editing is locked until it replies.
-        </p>
-      )}
       {mutationError && (
         <p className="text-xs text-rose-400">
           {mutationError}{' '}
@@ -299,24 +274,10 @@ export function GraphEditor() {
       )}
 
       <div className="editor-layout">
-        <ChatPanel
-          conversation={conversation}
-          graphId={graph?.id}
-          onConversation={setConversation}
-          onGraph={(next) => {
-            setGraph(next);
-            setSelectedNodeId(undefined);
-            setMutationError(null);
-            void refreshGraphs();
-          }}
-          onBusyChange={setChatBusy}
-          className="h-[560px]"
-        />
-
         {graph ? (
           <GraphCanvas
             graph={graph}
-            editable={!chatBusy}
+            editable
             selectedNodeId={selectedNodeId}
             onSelectNode={setSelectedNodeId}
             onMoveNode={(nodeId, position) => void moveNode(nodeId, position)}
@@ -327,7 +288,7 @@ export function GraphEditor() {
           />
         ) : (
           <div className="flex h-[560px] items-center justify-center rounded-lg border border-dashed border-slate-800 text-sm text-slate-600">
-            Describe a workflow to build one.
+            Start a new task to build a workflow.
           </div>
         )}
       </div>
@@ -335,11 +296,7 @@ export function GraphEditor() {
       <Legend />
 
       <Card title={selected ? 'Node: ' + selected.label : 'Select a node'}>
-        {chatBusy ? (
-          <p className="text-sm text-slate-500">
-            Chat is rewriting this graph. The inspector reopens once it replies.
-          </p>
-        ) : selected && graph ? (
+        {selected && graph ? (
           <NodeInspector
             // Every field below is an uncontrolled input seeded via
             // defaultValue -- remount on node switch so it doesn't keep

@@ -11,7 +11,14 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Icon, type IconName } from '../ui/Icon';
-import { formatDuration, formatTokens, type Trace, type TraceNode } from '../../lib/workspace';
+import {
+  formatDuration,
+  formatTokens,
+  toolActivity,
+  toolGlyph,
+  type Trace,
+  type TraceNode,
+} from '../../lib/workspace';
 
 const kindIcons: Record<string, IconName> = {
   judge: 'graph',
@@ -23,6 +30,8 @@ const kindIcons: Record<string, IconName> = {
   result: 'check',
   submit: 'send',
   tool: 'settings',
+  tool_call: 'connect',
+  tool_exposed: 'connect',
   swarm: 'spark',
   agent_task: 'activity',
 };
@@ -47,6 +56,7 @@ function DecisionNode({ data }: NodeProps<Node<DecisionData>>) {
     item.status,
     item.planned ? 'is-planned' : 'is-materialized',
     item.unplanned ? 'is-unplanned' : '',
+    item.role ? 'is-tool ' + item.role : '',
     item.revised ? 'is-revised' : '',
     selected ? 'selected' : '',
     paused ? 'motion-paused' : '',
@@ -65,6 +75,8 @@ function DecisionNode({ data }: NodeProps<Node<DecisionData>>) {
         : item.status === 'pending'
           ? 'Planned'
           : item.status;
+  // A tool says where it runs and what that provider is doing right now.
+  const activity = toolActivity(item);
   return (
     <div className={classes}>
       <Handle type="target" position={Position.Left} />
@@ -72,13 +84,21 @@ function DecisionNode({ data }: NodeProps<Node<DecisionData>>) {
       <button
         className="node-action"
         onClick={() => onSelect(item.id)}
-        aria-label={`${item.label}, ${item.status}${item.planned ? ', planned' : ''}${
+        aria-label={`${item.label}, ${
+          item.role === 'tool-exposed' ? 'tool offered, not called' : item.status
+        }${item.tool ? ', ' + (activity ?? '') : ''}${item.planned && !item.role ? ', planned' : ''}${
           item.unplanned ? ', created at runtime' : ''
-        }. Inspect decision`}
+        }. Inspect ${item.tool ? 'tool' : 'decision'}`}
         aria-pressed={selected}
       >
         <span className="node-heading">
-          <Icon name={kindIcons[item.kind] ?? 'spark'} size={16} />
+          {item.tool ? (
+            <i className="node-glyph" aria-hidden="true">
+              {toolGlyph(item.tool)}
+            </i>
+          ) : (
+            <Icon name={kindIcons[item.kind] ?? 'spark'} size={16} />
+          )}
           <span>{item.label}</span>
           <span className="node-status">
             {item.status === 'succeeded' ? (
@@ -92,20 +112,25 @@ function DecisionNode({ data }: NodeProps<Node<DecisionData>>) {
         </span>
         <span className="node-description">{item.route}</span>
         <span className="node-measure">
-          <span>{state}</span>
+          <span className={item.tool ? 'node-activity' : undefined}>{activity ?? state}</span>
           <span className="node-measure-values">
-            <span
-              className="node-tokens"
-              title={
-                item.tokens === undefined
-                  ? 'No token usage reported for this step'
-                  : `${item.tokens.toLocaleString()} tokens`
-              }
-            >
-              <Icon name="tokens" size={11} />
-              {formatTokens(item.tokens)}
-            </span>
-            <span title="Duration">{formatDuration(item.durationMs)}</span>
+            {/* A tool call reports no tokens of its own, so it never shows a token count. */}
+            {!item.tool && (
+              <span
+                className="node-tokens"
+                title={
+                  item.tokens === undefined
+                    ? 'No token usage reported for this step'
+                    : `${item.tokens.toLocaleString()} tokens`
+                }
+              >
+                <Icon name="tokens" size={11} />
+                {formatTokens(item.tokens)}
+              </span>
+            )}
+            {item.role !== 'tool-exposed' && (
+              <span title="Duration">{formatDuration(item.durationMs)}</span>
+            )}
           </span>
         </span>
       </button>
@@ -280,8 +305,11 @@ export function DecisionCanvas({
     [trace.edges, trace.nodes, paused, onPath],
   );
 
-  const planned = trace.nodes.filter((node) => node.planned).length;
-  const materialized = trace.nodes.length - planned;
+  // A tool that was offered but not called is neither planned work nor reported work, so it
+  // is counted on its own rather than inflating either number.
+  const offered = trace.nodes.filter((node) => node.role === 'tool-exposed').length;
+  const planned = trace.nodes.filter((node) => node.planned && node.role !== 'tool-exposed').length;
+  const materialized = trace.nodes.length - planned - offered;
   const signature = `${trace.nodes.length}:${materialized}`;
 
   const toggleFullscreen = useCallback(() => {
@@ -312,6 +340,7 @@ export function DecisionCanvas({
           <span className="canvas-count">
             <strong>{materialized}</strong> reported
             {planned > 0 && <em>· {planned} planned</em>}
+            {offered > 0 && <em>· {offered} tools offered</em>}
           </span>
           <button
             className="icon-button"
@@ -354,37 +383,45 @@ export function DecisionCanvas({
               className={`activity-row ${node.planned ? 'is-planned' : ''}`}
             >
               <span className={`activity-symbol ${node.status}`}>
-                <Icon
-                  name={
-                    node.status === 'succeeded'
-                      ? 'check'
-                      : node.status === 'blocked'
-                        ? 'pause'
-                        : 'activity'
-                  }
-                  size={15}
-                />
+                {node.tool ? (
+                  <i className="node-glyph" aria-hidden="true">
+                    {toolGlyph(node.tool)}
+                  </i>
+                ) : (
+                  <Icon
+                    name={
+                      node.status === 'succeeded'
+                        ? 'check'
+                        : node.status === 'blocked'
+                          ? 'pause'
+                          : 'activity'
+                    }
+                    size={15}
+                  />
+                )}
               </span>
               <span>
                 <strong>{node.label}</strong>
                 <small>
-                  {node.route} · {node.planned ? 'planned' : node.status}
+                  {node.route} · {toolActivity(node) ?? (node.planned ? 'planned' : node.status)}
                   {node.unplanned && ' · created at runtime'}
                 </small>
               </span>
               <span className="activity-measure">
-                <span
-                  className="node-tokens"
-                  title={
-                    node.tokens === undefined
-                      ? 'No token usage reported for this step'
-                      : `${node.tokens.toLocaleString()} tokens`
-                  }
-                >
-                  <Icon name="tokens" size={11} />
-                  {formatTokens(node.tokens)}
-                </span>
-                <time>{formatDuration(node.durationMs)}</time>
+                {!node.tool && (
+                  <span
+                    className="node-tokens"
+                    title={
+                      node.tokens === undefined
+                        ? 'No token usage reported for this step'
+                        : `${node.tokens.toLocaleString()} tokens`
+                    }
+                  >
+                    <Icon name="tokens" size={11} />
+                    {formatTokens(node.tokens)}
+                  </span>
+                )}
+                {node.role !== 'tool-exposed' && <time>{formatDuration(node.durationMs)}</time>}
               </span>
             </button>
           ))}
@@ -407,6 +444,12 @@ export function DecisionCanvas({
           <span className="legend-mark runtime" />
           Runtime
         </span>
+        {offered > 0 && (
+          <span>
+            <span className="legend-mark offered" />
+            Tool offered, not called
+          </span>
+        )}
         <span className="canvas-hint">Select a node to inspect and edit its decision</span>
       </div>
     </section>

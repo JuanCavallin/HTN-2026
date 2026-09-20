@@ -124,8 +124,14 @@ export interface PlaybookContext {
   /**
    * Classify an action and, if the policy demands a human, BLOCK until they decide.
    * Throws ApprovalRejectedError when rejected.
+   *
+   * Returns the action AS AUTHORIZED. That is the proposed action for an
+   * ungated or plainly-approved call, and the human's edit when they revised
+   * it. Execute the return value — executing the argument instead would
+   * silently discard a revision, which is the one bug this signature exists to
+   * make impossible.
    */
-  requireApproval(stepId: string, action: ProposedAction): Promise<void>;
+  requireApproval(stepId: string, action: ProposedAction): Promise<ProposedAction>;
 
   /** Get a provider by capability — never by vendor name. */
   provider<C extends Capability>(capability: C): CapabilityMap[C];

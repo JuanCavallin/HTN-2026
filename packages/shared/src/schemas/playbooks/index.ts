@@ -8,15 +8,18 @@
 
 import type { ZodType } from 'zod';
 import { agentInputSchema } from './agent.js';
+import { baselineInputSchema } from './baseline.js';
 import { demoInputSchema } from './demo.js';
 import { graphRunInputSchema } from './graph.js';
 
 export * from './agent.js';
+export * from './baseline.js';
 export * from './demo.js';
 export * from './graph.js';
 
 export const PLAYBOOK_INPUT_SCHEMAS = {
   agent: agentInputSchema,
+  baseline: baselineInputSchema,
   demo: demoInputSchema,
   graph: graphRunInputSchema,
 } as const satisfies Record<string, ZodType>;

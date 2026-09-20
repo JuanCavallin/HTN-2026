@@ -1,7 +1,12 @@
 # AgentOS Implementation Plan
 
-Read [agentos-design.md](./agentos-design.md) for the source-of-truth architecture and
-[jev.md](./jev.md) before changing Jev code. Jev is a typed decision model: it selects
+> **Archived — historical planning document.** Kept for the record of how Zephyr/AgentOS
+> was built during Hack the North 2026. It may describe work that has since changed; the
+> current docs are the [README](../../README.md), [agentos-design.md](../agentos-design.md)
+> and [DEMO.md](../DEMO.md).
+
+Read [agentos-design.md](../agentos-design.md) for the source-of-truth architecture and
+[jev.md](../jev.md) before changing Jev code. Jev is a typed decision model: it selects
 from options AgentOS constructs; it does not generate plans, prose, tool arguments, or
 tool calls.
 

@@ -14,7 +14,7 @@ import { successes } from '../swarm.js';
 import { definePlaybook } from './types.js';
 
 /** A fake case file. The SIN is a well-known test value and passes the Luhn check. */
-function caseFile(target: string, includeSensitive: boolean): string {
+export function caseFile(target: string, includeSensitive: boolean): string {
   const sensitive = includeSensitive
     ? 'Applicant SIN 046 454 286, contact avery.chen@example.edu, phone 519-555-0142.'
     : 'Applicant contact withheld.';
@@ -80,7 +80,18 @@ export const demoPlaybook = definePlaybook<DemoInput>({
           // Summarizing redacted text is a cheap-tier task by nature — real
           // demonstration of Jev's model_tier reaching an actual model choice
           // (Haiku here), not just a label recorded for telemetry.
-          { prompt: redaction.redacted, maxTokens: 256, tier: 'cheap' },
+          // A bare document with no instruction makes a live model answer with a
+          // refusal-shaped disclaimer. The placeholders are explained so the model
+          // treats them as opaque tokens rather than as missing data.
+          {
+            prompt:
+              'Summarise the case file below in 2-3 plain sentences for a reviewer: what is ' +
+              'being disputed and what needs checking. Tokens like [[PII_1]] are redaction ' +
+              'placeholders; keep them verbatim and do not comment on them.\n\n' +
+              redaction.redacted,
+            maxTokens: 256,
+            tier: 'cheap',
+          },
           ctx.callContext({
             stepId: step.id,
             policyRule: 'redacted-payload-may-leave',
@@ -93,7 +104,7 @@ export const demoPlaybook = definePlaybook<DemoInput>({
 
     /* 3.5. Delegate a bounded subtask to the agent runtime (Hermes). ------ */
     // CANDIDATE_TOOLS stands in for the real 50+ tool registry (a separate
-    // workstream — see docs/implementation_plan.md M1 Person 3). Jev filters
+    // workstream — see docs/archive/implementation_plan.md M1 Person 3). Jev filters
     // this list down before the agent runtime ever sees it; swap this for the
     // real registry's tool names once it exists, nothing else here changes.
     const CANDIDATE_TOOLS = [
@@ -191,7 +202,7 @@ export const demoPlaybook = definePlaybook<DemoInput>({
         { label: 'File correction request', kind: 'submit', providerId: 'composio' },
         async (step) => {
           // Classified irreversible -> creates an Approval and BLOCKS here.
-          await ctx.requireApproval(step.id, {
+          const authorized = await ctx.requireApproval(step.id, {
             kind: 'submit_form',
             description:
               'Submit a correction request for ' +
@@ -207,9 +218,14 @@ export const demoPlaybook = definePlaybook<DemoInput>({
             },
           });
 
+          // Submit what was AUTHORIZED, which is the human's edit if they
+          // revised it. Reading `input.target` here instead would make the
+          // revision controls decorative.
+          const payload = (authorized.payload ?? {}) as { target?: string };
+
           const toolbox = ctx.provider('toolbox');
           const res = await toolbox.callTool(
-            { name: 'forms.submit', args: { target: input.target } },
+            { name: 'forms.submit', args: { target: payload.target ?? input.target } },
             ctx.callContext({ stepId: step.id, policyRule: 'human-approved-submission' }),
           );
           return res.ok ? 'submitted' : 'submission_failed';

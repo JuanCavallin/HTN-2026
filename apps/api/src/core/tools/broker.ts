@@ -2,6 +2,7 @@ import Ajv, { type AnySchema, type ErrorObject, type ValidateFunction } from 'aj
 import type {
   AgentSessionState,
   AuthorizationDecision,
+  ContentAnalysisAdapter,
   DataLabel,
   Json,
   ProviderCallContext,
@@ -15,6 +16,7 @@ import type { DecisionService } from '../decisions/service.js';
 import { decisionStateFromSession } from '../sessions/decisionState.js';
 import type { SessionStateService } from '../sessions/service.js';
 import type { ToolApprovalGate } from './approval.js';
+import { checkOutboundText } from './contentCheck.js';
 import type { ToolExecutorRegistry, ToolExecutionOutput } from './executors.js';
 import type { RegisteredTool, ToolRegistry } from './registry.js';
 
@@ -61,6 +63,12 @@ export interface ToolBrokerResult extends ToolExecutionOutput {
 export interface ToolBrokerOptions {
   approvalGate?: ToolApprovalGate;
   ajv?: Ajv;
+  /**
+   * Optional outbound-text authenticity check. Advisory and ESCALATE-ONLY:
+   * see core/tools/contentCheck.ts. Omitting it disables the check entirely
+   * rather than blocking, which is why it is not required to construct a broker.
+   */
+  contentCheck?: { analysis: ContentAnalysisAdapter; threshold?: number };
 }
 
 /**
@@ -70,6 +78,7 @@ export interface ToolBrokerOptions {
  */
 export class ToolBroker {
   private readonly approvalGate?: ToolApprovalGate;
+  private readonly contentCheck?: ToolBrokerOptions['contentCheck'];
   private readonly ajv: Ajv;
   private readonly validators = new Map<string, ValidateFunction>();
 
@@ -82,6 +91,7 @@ export class ToolBroker {
     options: ToolBrokerOptions = {},
   ) {
     this.approvalGate = options.approvalGate;
+    this.contentCheck = options.contentCheck;
     this.ajv = options.ajv ?? new Ajv({ allErrors: true, strict: true });
   }
 
@@ -122,7 +132,9 @@ export class ToolBroker {
       );
     }
 
-    const action = deepFreeze<ToolAction>({
+    // Reassigned when a human revises the payload; the revision replaces this
+    // and is reauthorized before anything executes.
+    let action = deepFreeze<ToolAction>({
       id: newId('act'),
       runId: session.runId,
       stepId: session.stepId,
@@ -154,7 +166,7 @@ export class ToolBroker {
       policyRule: 'exact-tool-action-authorization',
       signal: request.signal,
     };
-    const authorization = await this.decisions.authorizeAction(
+    let authorization = await this.decisions.authorizeAction(
       decisionStateFromSession(session),
       action,
       registered.descriptor,
@@ -176,6 +188,49 @@ export class ToolBroker {
         at: nowIso(),
       },
     });
+
+    // Outbound-text authenticity. Runs AFTER authorization because it is not an
+    // authorization: it can only take a policy the gate already settled on and
+    // make it stricter. A failure here leaves the policy untouched, so a GPTZero
+    // outage cannot block an action the gate permitted. See contentCheck.ts.
+    if (this.contentCheck) {
+      const checked = await checkOutboundText(
+        this.contentCheck.analysis,
+        action,
+        registered.descriptor,
+        authorization.finalPolicy,
+        callContext,
+        { threshold: this.contentCheck.threshold },
+      );
+
+      if (checked.outcome !== 'skipped') {
+        await this.bus.emit(session.runId, {
+          type: 'control.decided',
+          decision: {
+            id: newId('ctl'),
+            runId: session.runId,
+            stepId: session.stepId,
+            operation: 'check_outbound_text',
+            candidateIds: ['passed', 'escalated', 'unavailable'],
+            selectedIds: [checked.outcome],
+            // The score IS the confidence here: P(ai) is what the check measured.
+            confidence: checked.score ?? 0,
+            reasonCodes: checked.reasonCodes,
+            source: 'deterministic',
+            at: nowIso(),
+          },
+        });
+      }
+
+      if (checked.policy !== authorization.finalPolicy) {
+        authorization = {
+          ...authorization,
+          finalPolicy: checked.policy,
+          reasonCodes: [...authorization.reasonCodes, ...checked.reasonCodes],
+        };
+        await this.emit(session, action, 'policy_decided', { authorization });
+      }
+    }
 
     if (authorization.finalPolicy === 'deny') {
       await this.emit(session, action, 'blocked', {
@@ -216,6 +271,59 @@ export class ToolBroker {
         throw error;
       }
       approvalId = receipt.approvalId;
+
+      // A revision is a DIFFERENT action, so it goes through the same gate the
+      // original did: schema validation, destination resolution, and a second
+      // authorizeAction. Skipping any of these would make "revise" the one way
+      // to get an unauthorized payload executed.
+      if (receipt.revisedArguments !== undefined) {
+        const revisedArguments = deepFreeze(structuredClone(receipt.revisedArguments));
+        this.validateArguments(registered, revisedArguments);
+
+        const revisedDestination = executor.destinationFor({
+          descriptor: registered.descriptor,
+          arguments: revisedArguments,
+        });
+        if (revisedDestination !== destination) {
+          const message =
+            'A revision may not change the destination (' +
+            destination +
+            ' -> ' +
+            String(revisedDestination) +
+            ').';
+          await this.emit(session, action, 'blocked', {
+            authorization,
+            approvalId,
+            error: { code: 'TOOL_ACTION_DENIED', message },
+          });
+          throw new ToolBrokerError('TOOL_ACTION_DENIED', message);
+        }
+
+        action = deepFreeze<ToolAction>({ ...action, arguments: revisedArguments });
+        await this.emit(session, action, 'proposed', { authorization, approvalId });
+
+        authorization = await this.decisions.authorizeAction(
+          decisionStateFromSession(session),
+          action,
+          registered.descriptor,
+          { ...callContext, policyRule: 'revised-tool-action-reauthorization' },
+        );
+        await this.emit(session, action, 'policy_decided', { authorization, approvalId });
+
+        // 'ask_user' again would mean the revision is no safer than what the
+        // human was already shown, and re-prompting the same person for the
+        // payload they just wrote is a loop, not a gate. Fail closed instead.
+        if (!authorization.allowed || authorization.finalPolicy === 'deny') {
+          const message = 'The revised tool action was not authorized.';
+          await this.emit(session, action, 'blocked', {
+            authorization,
+            approvalId,
+            error: { code: 'TOOL_ACTION_DENIED', message },
+          });
+          throw new ToolBrokerError('TOOL_ACTION_DENIED', message);
+        }
+      }
+
       await this.emit(session, action, 'approved', { authorization, approvalId });
     } else if (!authorization.allowed) {
       throw new ToolBrokerError(

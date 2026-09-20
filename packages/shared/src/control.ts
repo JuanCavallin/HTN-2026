@@ -253,6 +253,8 @@ export type ControlDecisionOperation =
   | 'select_tool_families'
   | 'select_tools'
   | 'recommend_action_policy'
+  /** Outbound-text authenticity check. Advisory and escalate-only. */
+  | 'check_outbound_text'
   | 'judge_completion';
 
 /** Persisted, UI-safe trace of one bounded control-plane decision. */

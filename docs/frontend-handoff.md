@@ -58,20 +58,14 @@ Working now:
 - SQLite persistence and replayable event history;
 - lifecycle events for the full model, tool, harness, approval, and completion flow.
 
-The current React workspace was designed around graph synthesis and predates several of
-these backend additions. It compiles and can render run activity, but its backend-mode
-composer still calls the old conversation/graph flow rather than launching the generic
-`agent` playbook. It also does **not** yet render all control, model, tool, harness, and
-session events. Treat the contracts below and `@htn/shared` as authoritative, not the
-current screen behavior.
-
-### Immediate integration mismatch
-
-`apps/web/src/pages/Workspace.tsx` currently starts backend work with
-`createConversation -> sendMessage -> runGraph`. Those conversation endpoints are not
-part of the current AgentOS backend. Replace that sequence with one `POST /api/runs`
-using `kind: "agent"`, then navigate to `/runs/:id`. The graph editor may remain a
-separate optional workflow-authoring surface.
+The React workspace was originally designed around graph synthesis, but the composer has
+since been updated: `apps/web/src/pages/Workspace.tsx` now starts a task with one
+`POST /api/runs` call (`api.startAgentTask`, `kind: "agent"`) rather than the old
+`createConversation -> sendMessage -> runGraph` sequence. The `/api/conversations/*`
+graph-synthesis endpoints referenced by earlier drafts of this document do not exist in
+the current backend. The graph editor remains a separate, optional workflow-authoring
+surface (`kind: "graph"`). Treat the contracts below and `@htn/shared` as authoritative
+if anything here drifts from the current screen behavior.
 
 ## Frontend's responsibility
 
@@ -150,24 +144,26 @@ the background.
 
 All routes below are under `/api` unless shown otherwise.
 
-| Purpose               | Method and path                  | Notes                                                                     |
-| --------------------- | -------------------------------- | ------------------------------------------------------------------------- |
-| Health                | `GET /health`                    | `{ ok, uptimeSeconds }`                                                   |
-| Provider badges       | `GET /providers`                 | provider `mode`, health, capabilities, and capability bindings            |
-| Launch choices        | `GET /playbooks`                 | use the `agent` kind for the main composer                                |
-| Create run            | `POST /runs`                     | returns before execution finishes                                         |
-| Run history           | `GET /runs?status=&kind=&limit=` | `limit` defaults to 50, maximum 200                                       |
-| Run snapshot          | `GET /runs/:id`                  | run, steps, approvals, egress, PII metadata, schedule decisions, sessions |
-| Full/catch-up history | `GET /runs/:id/events?since=0`   | persisted `StoredEvent[]` plus `lastSeq`                                  |
-| Live run stream       | `GET /runs/:id/stream`           | replay + live SSE; preferred detail-page source                           |
-| Dashboard stream      | `GET /stream`                    | live global events; refresh the run list on `run.updated`                 |
-| Cancel                | `POST /runs/:id/cancel`          | terminally cancels the run                                                |
-| Decide approval       | `POST /approvals/:id/decide`     | body has `decision` (`approved` or `rejected`) and optional `note`        |
-| One approval          | `GET /approvals/:id`             | useful for a direct approval link                                         |
-| Egress ledger         | `GET /runs/:id/egress`           | outbound destinations and data classes, never secret values               |
-| Analytics             | `GET /runs/:id/analytics`        | cost/token/time rollup                                                    |
-| Reviewed tool catalog | `GET /tools`                     | registered tools and availability                                         |
-| Task tool discovery   | `POST /tools/discover`           | body: `{ query, toolkits?, limit? }`                                      |
+| Purpose               | Method and path                  | Notes                                                                                                                                  |
+| --------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Health                | `GET /health`                    | `{ ok, uptimeSeconds }`                                                                                                                |
+| Provider badges       | `GET /providers`                 | provider `mode`, health, capabilities, and capability bindings                                                                         |
+| Launch choices        | `GET /playbooks`                 | use the `agent` kind for the main composer                                                                                             |
+| Create run            | `POST /runs`                     | returns before execution finishes                                                                                                      |
+| Run history           | `GET /runs?status=&kind=&limit=` | `limit` defaults to 50, maximum 200                                                                                                    |
+| Run snapshot          | `GET /runs/:id`                  | run, steps, approvals, egress, PII metadata, schedule decisions, sessions                                                              |
+| Full/catch-up history | `GET /runs/:id/events?since=0`   | persisted `StoredEvent[]` plus `lastSeq`                                                                                               |
+| Live run stream       | `GET /runs/:id/stream`           | replay + live SSE; preferred detail-page source                                                                                        |
+| Dashboard stream      | `GET /stream`                    | live global events; refresh the run list on `run.updated`                                                                              |
+| Pause                 | `POST /runs/:id/pause`           | cooperative — takes effect at the next step boundary, not instantly                                                                    |
+| Resume                | `POST /runs/:id/resume`          | resumes a `paused` run                                                                                                                 |
+| Cancel                | `POST /runs/:id/cancel`          | terminally cancels the run                                                                                                             |
+| Decide approval       | `POST /approvals/:id/decide`     | body has `decision` (`approved`, `rejected`, or `revised`), optional `note`, and (for `revised`) `revisedPayload`/`revisedAmountCents` |
+| One approval          | `GET /approvals/:id`             | useful for a direct approval link                                                                                                      |
+| Egress ledger         | `GET /runs/:id/egress`           | outbound destinations and data classes, never secret values                                                                            |
+| Analytics             | `GET /runs/:id/analytics`        | cost/token/time rollup                                                                                                                 |
+| Reviewed tool catalog | `GET /tools`                     | registered tools and availability                                                                                                      |
+| Task tool discovery   | `POST /tools/discover`           | body: `{ query, toolkits?, limit? }`                                                                                                   |
 
 Error bodies are consistently shaped as:
 
@@ -217,20 +213,12 @@ Use stable IDs to upsert stateful records and preserve event arrival order for t
 activity feed. The stream intentionally stays open after completion, so the client
 should close it when the run becomes `succeeded`, `failed`, or `cancelled`.
 
-### Existing stream-hook gap
+### Stream-hook coverage
 
-`apps/web/src/hooks/useRunStream.ts` currently handles only run, step, approval, egress,
-PII, schedule, and log events. The frontend implementation must add handling for:
-
-- `control.decided`;
-- `model.lifecycle`;
-- `harness.turn`;
-- `tool.lifecycle`;
-- `session.updated`.
-
-`RunView` already has control/model/harness/session collections, but needs an additive
-tool-lifecycle collection (or a separate raw activity collection). Do not remove the
-default reducer case: older tabs must safely ignore future event types.
+`apps/web/src/hooks/useRunStream.ts` now handles the full event set: run, step, approval,
+egress, PII, schedule, `control.decided`, `model.lifecycle`, `harness.turn`,
+`tool.lifecycle`, `session.updated`, and log events. The default reducer case still
+ignores unknown types, so older tabs safely no-op on any future event type added later.
 
 ## How to explain the live process
 
@@ -285,8 +273,23 @@ optimistically mark the tool as executed. A decision is one-shot and a second de
 returns a conflict. If the API restarted while approval was pending, the orphaned run
 fails safely because the in-memory waiter no longer exists.
 
-Payload revision is not a separate backend endpoint yet. For the demo, support approve,
-reject, and cancel truthfully; do not label reject-and-relaunch as in-place revision.
+Revise (same endpoint, `decision: "revised"`):
+
+```json
+{
+  "decision": "revised",
+  "revisedPayload": { "recipient": "person@example.com", "subject": "Corrected subject" },
+  "revisedAmountCents": 500
+}
+```
+
+`revisedPayload` is required when `decision` is `"revised"`. The service
+(`apps/api/src/services/approvals.service.ts`) re-authorizes the revised action through
+`core/risk.ts` `reauthorizeRevision` before anything runs — a revision can only narrow the
+action, never widen it, and a refused revision leaves the approval untouched and still
+pending. On success the resolved approval carries `revisedAction`, `reversibility`,
+`riskClass`, and `reauthorizedRule`; render these instead of the original proposal once a
+revision has been accepted.
 
 ## Tool connections UI
 
@@ -402,20 +405,52 @@ the core demo because the backend machine is already configured.
 
 ## Frontend acceptance checklist
 
-- [ ] Typing a prompt and clicking Start launches `kind: "agent"` and navigates to it.
-- [ ] Refreshing an active or completed run reconstructs the same trace without gaps.
-- [ ] The trace distinguishes candidate, selected, proposed, authorized, and executed.
+- [x] Typing a prompt and clicking Start launches `kind: "agent"` and navigates to it.
+      (`apps/web/src/pages/Workspace.tsx` calls `api.startAgentTask` then
+      `navigate('/runs/' + run.id)`.)
+- [x] Refreshing an active or completed run reconstructs the same trace without gaps.
+      (`apps/web/src/hooks/useRunStream.ts` — the SSE endpoint replays full history from
+      cursor 0 on connect and only the gap on reconnect; there is no separate initial
+      fetch.)
+- [x] The trace distinguishes candidate, selected, proposed, authorized, and executed.
+      (`apps/web/src/lib/workspace.ts` `toolActivity()`/role flags and
+      `WorkspacePanels.tsx` render `tool-exposed` vs executed, `exposedTools` vs
+      `availableTools`, and the phase progression through policy/approval/execution.)
 - [ ] The actual model/provider is sourced from `model.lifecycle`, not guessed.
+      (`model.lifecycle` is handled by the reducer, but no component currently renders
+      `actualModelId`/`configuredModelId` by name — could not verify this is surfaced.)
 - [ ] Jev source, confidence, and reason codes are visible.
-- [ ] Exact tool arguments and deterministic authorization are visible.
-- [ ] An irreversible action pauses and can be approved or rejected in the UI.
-- [ ] No success is shown before `tool.lifecycle.phase === "succeeded"`.
-- [ ] Verified completion and canonical session status are visible.
-- [ ] Provider health/mode and tool availability are truthful.
-- [ ] Composio and generic MCP connection states can be managed without exposing keys.
-- [ ] Secrets and raw PII never appear in logs, local storage, or analytics.
-- [ ] Failed, blocked, disconnected, reconnecting, empty, and cancelled states are clear.
-- [ ] One email task and one browser task complete from the UI without using curl.
+      (Confidence and `reasonCodes` are rendered in `WorkspacePanels.tsx`; the
+      `jev`/`deterministic`/`fallback` decision `source` is not rendered anywhere in the
+      web app — could not verify the full claim.)
+- [x] Exact tool arguments and deterministic authorization are visible.
+      (`WorkspacePanels.tsx` renders `node.tool.argsPreview` under "Exact arguments" and
+      `node.tool.policy`/destination/data labels.)
+- [x] An irreversible action pauses and can be approved or rejected in the UI.
+      (`apps/web/src/components/approvals/ApprovalPanel.tsx` — approve, reject, and
+      revise-and-resubmit are all wired to `POST /approvals/:id/decide`.)
+- [x] No success is shown before `tool.lifecycle.phase === "succeeded"`.
+      (`toolActivity()` in `apps/web/src/lib/workspace.ts` only returns "Ran via …" on
+      `phase === 'succeeded'`; earlier phases render "Checking policy" /
+      "Connecting to … ".)
+- [ ] Verified completion and canonical session status are visible. `session.updated` is
+      consumed only internally in `apps/web/src/lib/workspace.ts` for tool-exposure
+      bookkeeping; no component renders session status or the completion checkpoint.
+- [x] Provider health/mode and tool availability are truthful.
+      (`apps/web/src/components/providers/ProviderBadges.tsx` and
+      `apps/web/src/pages/Connections.tsx` render `mode` and `healthy` as separate,
+      independent badges.)
+- [x] Composio and generic MCP connection states can be managed without exposing keys.
+      (`apps/web/src/pages/Connections.tsx` connect/refresh/list flows; header comment:
+      "no secrets are ever held in state, only the env-var NAMES.")
+- [x] Secrets and raw PII never appear in logs, local storage, or analytics.
+      (The only `localStorage` use in `apps/web/src` is `lib/theme.ts` for the UI theme
+      preference; no secret or PII value is written to it.)
+- [x] Failed, blocked, disconnected, reconnecting, empty, and cancelled states are clear.
+      (`apps/web/src/pages/RunHistory.tsx` renders explicit empty/error states; the
+      workspace shows "Connection interrupted — reconnecting" during SSE reconnects.)
+- [ ] One email task and one browser task complete from the UI without using curl. Not
+      verifiable from static code — requires a live run.
 
 ## Source files to trust
 
@@ -424,10 +459,11 @@ the core demo because the backend machine is already configured.
 - `packages/shared/src/domain.ts` — runs, steps, approvals, egress, and PII shapes
 - `packages/shared/src/mcp.ts` — generic MCP connection contract
 - `apps/api/src/api/*.routes.ts` — actual HTTP endpoints
-- `apps/web/src/hooks/useRunStream.ts` — current reducer, including the gaps listed above
+- `apps/web/src/hooks/useRunStream.ts` — current reducer
 - `docs/provider-setup.md` — server-side provider configuration
 - `docs/tool-registry-handoff.md` — registry/broker behavior and extension rules
-- `docs/implementation_plan.md` — architecture decisions and team ownership
+- `docs/archive/implementation_plan.md` — historical architecture decisions and team
+  ownership (archived; may not reflect current state)
 
 If a UI assumption conflicts with these shared types or actual routes, fix the UI
 assumption. If a genuinely new backend capability is required, agree on an additive

@@ -110,8 +110,10 @@ not credential values, raw secrets, or every full schema.
 
 ### What Jev is
 
-Jev is TypeSafe AI's _System One_ decision model, reached through the `typesafe-sdk`
-package or `POST https://api.typesafe.ai/v1/systemone` with model id `jev-latest`.
+Jev is TypeSafe AI's _System One_ decision model. This repo reaches it through the
+Vercel AI SDK's AI Gateway (`typesafe-ai/jev`, credential `AI_GATEWAY_API_KEY`), not
+through the `typesafe-sdk` package or `POST https://api.typesafe.ai/v1/systemone`; see
+[jev.md](./jev.md) and `apps/api/src/providers/jev/live.ts`.
 
 It answers **typed questions against state** and returns a `Choice` (one key from a
 supplied `criteria` set), a `Score` (a float against an ordered scale), or a `Noul` (a
@@ -258,7 +260,7 @@ progress in parallel.
 | Person 4 | Dashboard, metrics and demo            | Dashboard                                                                | UI task entry and Hermes-run wrapper; live trace; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation                                                                                                                                                | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints                     |
 
 Person 3's scope is split across two people — **3A (tool registry and MCP)** and
-**3B (browser and Browserbase)**. See [person-3.md](./person-3.md) for that breakdown,
+**3B (browser and Browserbase)**. See [person-3.md](./archive/person-3.md) for that breakdown,
 the seam between the two tracks, and the files each one owns.
 
 ### Handoffs

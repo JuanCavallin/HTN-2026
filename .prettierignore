@@ -1,0 +1,15 @@
+# The root `format` script globs **/*.{ts,tsx,json,md,css}, which without this
+# file rewrites every agent-tooling directory in the repo and buries a real diff
+# under a few hundred whitespace-only ones. Only OUR source is formatted here.
+node_modules/
+dist/
+.vite/
+.data/
+pnpm-lock.yaml
+skills-lock.json
+
+# Vendored agent tooling. Not ours to reformat.
+.agents/
+.claude/
+.devin/
+hermes-tester/
