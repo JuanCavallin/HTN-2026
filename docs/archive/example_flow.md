@@ -1,5 +1,10 @@
 # Jev / AgentOS Architecture
 
+> **Archived — historical planning document.** Kept for the record of how Zephyr/AgentOS
+> was built during Hack the North 2026. It may describe work that has since changed; the
+> current docs are the [README](../../README.md), [agentos-design.md](../agentos-design.md)
+> and [DEMO.md](../DEMO.md).
+
 ```mermaid
 flowchart TD
     Start(["Run created<br/>(task input)"]):::detStep

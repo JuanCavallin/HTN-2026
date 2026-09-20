@@ -1,5 +1,10 @@
 # Person 3 — Tools and Browser
 
+> **Archived — historical planning document.** Kept for the record of how Zephyr/AgentOS
+> was built during Hack the North 2026. It may describe work that has since changed; the
+> current docs are the [README](../../README.md), [agentos-design.md](../agentos-design.md)
+> and [DEMO.md](../DEMO.md).
+
 Person 3's scope is split across **two people**. Read this file top to bottom once,
 then work only your track.
 
@@ -8,10 +13,10 @@ then work only your track.
 | **3A — Tool Registry and MCP**        | The _plumbing_: `ToolDescriptor` registry, MCP client, plugin manifests, `select_tool_metadata`, non-browser executors. **Not the tools themselves — see below.** | `danielzhao07` |
 | **3B — Browser, Browserbase and Jev** | The browser tool family: local + Browserbase backends, the element table Jev chooses from, the browser executor, session lifecycle                                | `danielzhao07` |
 
-**Read [agentos-design.md](./agentos-design.md) first.** It is the source of truth for
+**Read [agentos-design.md](../agentos-design.md) first.** It is the source of truth for
 the product, the step lifecycle, the safety invariants and the acceptance criteria.
 
-**Read [jev.md](./jev.md) before writing any code that calls Jev.** Jev cannot generate
+**Read [jev.md](../jev.md) before writing any code that calls Jev.** Jev cannot generate
 text. If you are writing a prompt for it, you are using it wrong.
 
 ---
@@ -68,7 +73,7 @@ from the `ai` package, model **`typesafe-ai/jev`**, credential **`AI_GATEWAY_API
 OpenAI-compatible chat-completions endpoint — it is the AI SDK's _evaluation_ API.
 Person 2's `providers/jev/live.ts` established this route; 3B's
 `providers/jev/browserDecider.ts` rides the same one. Jev still returns **typed choices
-and probabilities — never free text**. See [jev.md](./jev.md) and
+and probabilities — never free text**. See [jev.md](../jev.md) and
 [Track 3B](#track-3b--browser-browserbase-and-jev).
 
 **3. Browserbase works.** Credentials are in the root `.env` and a real session has been
@@ -145,7 +150,7 @@ announcing changes in chat first.
 ### `C-1` `RiskClass` — **answered, use the repo's**
 
 - [x] Resolved: `auto | verify | ask_human`, **no `deny`**, already defined in
-      [packages/shared/src/policy.ts](../packages/shared/src/policy.ts). **Import it. Do not
+      [packages/shared/src/policy.ts](../../packages/shared/src/policy.ts). **Import it. Do not
       define a second enum.**
 - [x] Tell Person 2 that a blocked action therefore has no risk class — the executor
       expresses denial as a thrown error / `ok: false`.
@@ -288,7 +293,7 @@ One file per provider. No marketplace, no installer.
 
 This is the centre of 3B. **Jev chooses every browser action, and the design goal is one
 network round trip per step.** The pattern is proven — `browser-use/jev-ultrafast` (MIT,
-8k+ stars) converged on it, and [jev.md](./jev.md) documents it in full.
+8k+ stars) converged on it, and [jev.md](../jev.md) documents it in full.
 
 ```
                           one TypeSafe request
@@ -510,7 +515,7 @@ end to end before any sponsor tool exists.
 | MCP client                                 | None. New dependency (`3A-2`), Person 4's call.                                                                     |
 | Local browser path                         | Not written (`3B-2`). `playwright-core` is installed but ships no binaries.                                         |
 | Browserbase                                | Stagehand v4 adapter exists; credentials work; live-view URL unwired.                                               |
-| Jev                                        | `providers/jev/{index,live}.ts` exist. API shape now known — see [jev.md](./jev.md).                                |
+| Jev                                        | `providers/jev/{index,live}.ts` exist. API shape now known — see [jev.md](../jev.md).                               |
 
 **What already works:** every provider falls back to a mock with no API keys, so `pnpm dev`
 runs the full demo today. Build against mocks first and flip one `<PROVIDER>_MODE=live` at
