@@ -775,6 +775,119 @@ async function main() {
     forkNotAGraph.status,
   );
 
+  console.log('\n12. Live-web lookups run on OUR gated browser, not on Hermes');
+  const webCatalog = await api('/api/tools');
+  const webTools = (webCatalog.body?.tools ?? []).filter((t) => t.name.startsWith('web.'));
+  check(
+    'the catalog lists web.search and web.read, tagged as the web family',
+    webTools.some((t) => t.name === 'web.search' && t.group === 'web') &&
+      webTools.some((t) => t.name === 'web.read' && t.group === 'web'),
+    webTools.map((t) => t.name + '[' + t.group + ']').join(', '),
+  );
+  check(
+    'a name in both catalogs is listed once -- the real tool, not the toolbox fixture',
+    webTools.filter((t) => t.name === 'web.search').length === 1,
+  );
+
+  const webFixture = await api('/api/graphs', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke: section 12 web fixture',
+      nodes: [
+        {
+          id: 'search',
+          type: 'tool',
+          label: 'Search the web',
+          position: { x: 0, y: 0 },
+          config: { tool: 'web.search', args: { query: 'agentos hackathon demo' } },
+        },
+        {
+          id: 'read',
+          type: 'tool',
+          label: 'Read a page',
+          position: { x: 300, y: 0 },
+          config: { tool: 'web.read', args: { url: 'https://example.com' } },
+        },
+      ],
+      edges: [],
+    }),
+  });
+  const webRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ kind: 'graph', input: { graphId: webFixture.body?.graph?.id } }),
+  });
+  const webRunId = webRun.body?.run?.id;
+  const webDone = await waitFor(webRunId, (run) => run.status === 'succeeded' || run.status === 'failed');
+  check('a graph of web tool nodes completes without approval', webDone?.run?.status === 'succeeded', webDone?.run?.status);
+
+  const searchStep = webDone?.steps.find((s) => s.nodeId === 'search');
+  check(
+    'the step is badged with the browser provider, not the toolbox',
+    searchStep?.providerId === 'browserbase',
+    searchStep?.providerId,
+  );
+
+  const webEgress = (await api('/api/runs/' + webRunId + '/egress')).body?.events ?? [];
+  const searchRows = webEgress.filter((e) => e.providerId === 'browserbase' && e.stepId === searchStep?.id);
+  check(
+    'the browser calls landed in THIS run\'s ledger, attributed to the search node\'s step',
+    searchRows.length > 0,
+    searchRows.map((e) => e.op).join(', ') || 'no rows',
+  );
+  check(
+    'and the session was released -- an open session is billed and capped',
+    searchRows.some((e) => e.op === 'closeSession'),
+    searchRows.map((e) => e.op).join(', '),
+  );
+  check(
+    'no Hermes call was involved in a web lookup',
+    !webEgress.some((e) => e.providerId === 'hermes'),
+  );
+
+  const badWebFixture = await api('/api/graphs', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke: section 12 bad-args fixture',
+      nodes: [
+        {
+          id: 'empty',
+          type: 'tool',
+          label: 'Empty query',
+          position: { x: 0, y: 0 },
+          config: { tool: 'web.search', args: { query: '   ' } },
+        },
+        {
+          id: 'internal',
+          type: 'tool',
+          label: 'Internal address',
+          position: { x: 300, y: 0 },
+          config: { tool: 'web.read', args: { url: 'http://169.254.169.254/latest/meta-data' } },
+        },
+      ],
+      edges: [],
+    }),
+  });
+  const badRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ kind: 'graph', input: { graphId: badWebFixture.body?.graph?.id } }),
+  });
+  const badDone = await waitFor(
+    badRun.body?.run?.id,
+    (run) => run.status === 'succeeded' || run.status === 'failed',
+  );
+  const badSteps = badDone?.steps.filter((s) => s.nodeId === 'empty' || s.nodeId === 'internal') ?? [];
+  check(
+    'an empty query and an internal address are both refused',
+    badDone?.run?.status === 'failed' && badSteps.length === 2 && badSteps.every((s) => s.status === 'failed'),
+    badSteps.map((s) => s.nodeId + ':' + s.status).join(', '),
+  );
+  const badEgress = (await api('/api/runs/' + badRun.body?.run?.id + '/egress')).body?.events ?? [];
+  check(
+    'refused BEFORE any browser was touched',
+    !badEgress.some((e) => e.providerId === 'browserbase'),
+    badEgress.length + ' ledger row(s)',
+  );
+
   console.log('\n' + (failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'));
   process.exit(failures === 0 ? 0 : 1);
 }

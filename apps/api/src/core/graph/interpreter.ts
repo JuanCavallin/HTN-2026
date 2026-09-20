@@ -30,7 +30,8 @@
 import type { AgentGraph, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
 import type { PlaybookContext, PlaybookOutcome, RedactionOutput } from '../playbooks/types.js';
 import { resolveRefs, type RefScope } from './refs.js';
-import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
+import { routeFor } from './toolRoutes.js';
+import { toolDescription, toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
 
 /* -------------------------------------------------------------------------- */
 /* Node outcomes                                                              */
@@ -327,41 +328,47 @@ async function callToolGated(
     forceApproval?: boolean;
   },
 ): Promise<unknown> {
+  const route = await routeFor(args.tool);
   const risk = toolRisk(args.tool, args.actionKind);
 
-  if (risk.unknown) {
-    await ctx.log(
-      'warn',
-      'Tool "' +
-        args.tool +
-        '" is not classified, so it is being treated as irreversible and sent for approval. ' +
-        'See docs/tool-registry-handoff.md.',
-    );
+  // A route that runs its own `authorize_action` gates the CONCRETE action
+  // itself, so gating here too would ask a human twice. Two things still gate
+  // in this file regardless: a route with no gate of its own, and an explicit
+  // `submit` node -- "always stop for a human" must not depend on which route
+  // happens to own the tool.
+  const gateHere = !route.gatesItself || args.forceApproval;
+
+  if (gateHere) {
+    if (risk.unknown) {
+      await ctx.log(
+        'warn',
+        'Tool "' +
+          args.tool +
+          '" is not classified, so it is being treated as irreversible and sent for approval. ' +
+          'See docs/tool-registry-handoff.md.',
+      );
+    }
+
+    await ctx.requireApproval(args.stepId, {
+      kind: risk.kind,
+      description: args.description,
+      amountCents: args.amountCents,
+      // An unclassified tool fails CLOSED. So does an explicit submit node.
+      reversibility: risk.unknown || args.forceApproval ? 'irreversible' : undefined,
+      payload: { tool: args.tool, args: args.toolArgs } as Json,
+    });
   }
 
-  await ctx.requireApproval(args.stepId, {
-    kind: risk.kind,
+  return route.call(ctx, {
+    stepId: args.stepId,
+    tool: args.tool,
+    args: args.toolArgs,
     description: args.description,
-    amountCents: args.amountCents,
-    // An unclassified tool fails CLOSED. So does an explicit submit node.
-    reversibility: risk.unknown || args.forceApproval ? 'irreversible' : undefined,
-    payload: { tool: args.tool, args: args.toolArgs } as Json,
+    policyRule:
+      risk.kind === UNKNOWN_TOOL_ACTION_KIND
+        ? 'human-approved-unclassified-tool'
+        : 'graph-node-tool-call',
   });
-
-  const toolbox = ctx.provider('toolbox');
-  const res = await toolbox.callTool(
-    { name: args.tool, args: args.toolArgs },
-    ctx.callContext({
-      stepId: args.stepId,
-      policyRule:
-        risk.kind === UNKNOWN_TOOL_ACTION_KIND
-          ? 'human-approved-unclassified-tool'
-          : 'graph-node-tool-call',
-    }),
-  );
-
-  if (!res.ok) throw new Error('Tool ' + args.tool + ' failed: ' + res.error.message);
-  return res.data;
 }
 
 async function runTool(
@@ -370,9 +377,10 @@ async function runTool(
   scope: RefScope,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
+  const route = await routeFor(cfg.tool);
 
   const result = await ctx.step(
-    { label: node.label, kind: 'tool', nodeId: node.id, providerId: ctx.providerFor('toolbox') },
+    { label: node.label, kind: 'tool', nodeId: node.id, providerId: route.providerFor(ctx) },
     async (step) =>
       callToolGated(ctx, {
         stepId: step.id,
@@ -391,6 +399,85 @@ async function runTool(
  * set and we call it directly — no agent harness, so no multi-turn model loop.
  * One cheap decide plus one tool call.
  */
+/**
+ * A dispatch node's arguments for the tool the decision layer just chose.
+ *
+ * `argsFrom: 'static'` is the default and costs nothing: the author already
+ * wrote the args per candidate. `'model'` is for the case the author could NOT
+ * write them -- the right query or URL depends on what upstream nodes found --
+ * and costs one CHEAP completion, which is still far less than handing the job
+ * to a harness. The schema has promised this since it was written; until now
+ * nothing read the field, so `'model'` silently dispatched `{}` and any tool
+ * needing an argument failed.
+ *
+ * FAIL SOFT, toward the author's own args: an unusable reply (not JSON, not an
+ * object) falls back to whatever `static` holds rather than throwing. The gate
+ * has not run yet at this point -- this is argument composition, not a
+ * permission decision, exactly as core/tools/composeText.ts is for typing.
+ */
+async function dispatchArgs(
+  ctx: PlaybookContext,
+  stepId: string,
+  spec: {
+    tool: string;
+    goal: string;
+    evidence?: string;
+    argsFrom: 'static' | 'model';
+    static: Record<string, Json>;
+  },
+): Promise<Record<string, Json>> {
+  if (spec.argsFrom !== 'model') return spec.static;
+
+  const description = toolDescription(spec.tool);
+  const res = await ctx.provider('text.model').complete(
+    {
+      system:
+        'You produce ARGUMENTS for one tool call, as JSON. Reply with a single JSON ' +
+        'object and nothing else: the arguments themselves, no wrapper, no prose. ' +
+        'Use only what the tool takes; omit anything you are unsure of.',
+      prompt: [
+        'TOOL: ' + spec.tool + (description ? ' — ' + description : ''),
+        'GOAL: ' + spec.goal,
+        ...(spec.evidence ? ['', 'CONTEXT:', spec.evidence] : []),
+        ...(Object.keys(spec.static).length > 0
+          ? [
+              '',
+              'STARTING POINT (override only what the goal requires):',
+              JSON.stringify(spec.static),
+            ]
+          : []),
+      ].join('\n'),
+      tier: 'cheap',
+      maxTokens: 512,
+      json: true,
+    },
+    ctx.callContext({ stepId, policyRule: 'graph-node-tool-args' }),
+  );
+
+  if (!res.ok) {
+    await ctx.log('warn', 'Could not infer arguments for ' + spec.tool + "; using the node's own.");
+    return spec.static;
+  }
+
+  try {
+    const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(res.data.text);
+    const body = fenced ? (fenced[1] as string) : res.data.text;
+    const start = body.indexOf('{');
+    const end = body.lastIndexOf('}');
+    const parsed: unknown =
+      start === -1 || end < start ? null : JSON.parse(body.slice(start, end + 1));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return spec.static;
+    // The author's args are the floor: an inference may add or refine, never drop.
+    return { ...spec.static, ...(parsed as Record<string, Json>) };
+  } catch {
+    await ctx.log(
+      'warn',
+      'Inferred arguments for ' + spec.tool + " were not JSON; using the node's own.",
+    );
+    return spec.static;
+  }
+}
+
 async function runDispatch(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'dispatch' }>,
@@ -443,7 +530,13 @@ async function runDispatch(
         rule: 'dispatch-selected-single-tool',
       });
 
-      const toolArgs = (cfg.args[tool] ?? {}) as Record<string, Json>;
+      const toolArgs = await dispatchArgs(ctx, step.id, {
+        tool,
+        goal: cfg.goal,
+        evidence: cfg.evidence,
+        argsFrom: cfg.argsFrom,
+        static: (cfg.args[tool] ?? {}) as Record<string, Json>,
+      });
 
       const result = await callToolGated(ctx, {
         stepId: step.id,

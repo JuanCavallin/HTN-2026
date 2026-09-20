@@ -30,6 +30,7 @@ import {
 } from '../core/graph/synthesisPrompt.js';
 import { newId, nowIso } from '../lib/ids.js';
 import { providers } from './runtime.js';
+import { listToolCatalog } from './toolCatalog.js';
 
 export class SynthesisError extends Error {
   readonly code = 'SYNTHESIS_FAILED';
@@ -84,7 +85,7 @@ export async function synthesiseGraph(args: {
     preview(args.request, 150),
   );
 
-  const catalogResult = await providers.provider('toolbox').listTools({
+  const catalogResult = await listToolCatalog({
     runId: args.conversationId,
     policyRule: 'tool-catalog-for-synthesis',
   });

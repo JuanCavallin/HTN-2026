@@ -11,10 +11,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { RunBus } from '../core/bus.js';
 import { buildEgressEvent } from '../core/ledger.js';
+import { ApprovalRejectedError } from '../core/approvalGate.js';
 import { Orchestrator } from '../core/orchestrator.js';
+import { runContextFor } from '../core/runContexts.js';
 import {
   createStopgapAuthorizeAction,
   createToolPlane,
+  defaultActionKind,
+  type RequestApproval,
   type ToolPlane,
 } from '../core/tools/index.js';
 import { config } from '../config.js';
@@ -58,24 +62,51 @@ export const orchestrator = new Orchestrator({
  * `authorize_action`. Swapping it is one line here and nothing else changes,
  * because every executor only ever knew the `AuthorizeAction` protocol.
  *
- * `requestApproval` is deliberately NOT passed yet: Person 1 owns pause/resume
- * and the approval endpoints, so until that is wired, an `ask_human` action is
- * DENIED rather than auto-run. Failing closed is the correct default.
+ * `requestApproval` bridges an `ask_human` action to the SAME approval flow a
+ * hand-written playbook uses, by finding the run's own context (core/runContexts).
+ * No live run to ask, or a rejection, means DENY -- failing closed is the
+ * correct default, and it stays the default for anything this cannot reach.
  */
 let toolPlanePromise: Promise<ToolPlane> | undefined;
+
+const requestApproval: RequestApproval = async (action) => {
+  const run = runContextFor(action.runId);
+  if (!run) return { approved: false };
+  try {
+    await run.requireApproval(action.stepId, {
+      kind: defaultActionKind(action),
+      description: action.toolId + ' on ' + action.destination,
+      payload: action.args,
+    });
+    return { approved: true };
+  } catch (err) {
+    if (err instanceof ApprovalRejectedError) return { approved: false };
+    throw err;
+  }
+};
 
 export function toolPlane(): Promise<ToolPlane> {
   toolPlanePromise ??= (async () => {
     const here = dirname(fileURLToPath(import.meta.url));
     return createToolPlane({
-      authorize: createStopgapAuthorizeAction(),
+      authorize: createStopgapAuthorizeAction({ requestApproval }),
       provider: ((capability: 'browser' | 'browser.local') =>
         providers.provider(capability)) as never,
-      callContext: ({ stepId, policyRule }) => ({
-        runId: 'run_tool_plane',
+      // The plane is one process-wide instance, so the RUN comes from each
+      // action. The fallback only serves a caller that has no run at all.
+      callContext: ({ runId, stepId, policyRule }) => ({
+        runId: runId ?? 'run_tool_plane',
         ...(stepId ? { stepId } : {}),
         policyRule,
       }),
+      // The `web` family rides on Browserbase, so it is available when that
+      // backend is (mock mode counts: it is what makes a keyless demo run).
+      web: {
+        available:
+          config.providers.browserbase.mode !== 'disabled' &&
+          (config.providers.browserbase.mode === 'mock' ||
+            Boolean(config.providers.browserbase.apiKey)),
+      },
       // null when there is no TYPESAFE_API_KEY or no SDK, which is today's
       // state — the deterministic fallback then takes every decision, and
       // `decisionSource` reports that truthfully to the UI.

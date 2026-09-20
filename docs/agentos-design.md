@@ -17,6 +17,10 @@ inner agent loop over ACP. AgentOS does not fork or reimplement the harness. Reu
 product with another harness means translating that harness's model, tool, and lifecycle
 boundaries into the same contracts.
 
+Anything that touches the outside world — a live web lookup, the browser, Composio — is
+executed by AgentOS through one gated tool plane rather than delegated to the harness. The
+harness reasons; AgentOS acts. See [Tool Execution Paths](#tool-execution-paths).
+
 ## MVP Boundary
 
 The MVP proves the complete flow with Hermes. Supporting another harness later means
@@ -25,11 +29,14 @@ hackathon requirement.
 
 Included: one Hermes adapter, Jev with a deterministic fallback, local/private and cloud
 model routes, 2–3 live providers, a 50+ tool catalog containing clearly labeled fixtures,
-one complete demo playbook, real-time intervention, and measured evaluation.
+deterministic graph tool nodes that execute through one gated tool plane (live web lookups,
+browser, Composio), one complete demo playbook, real-time intervention, and measured
+evaluation.
 
 Excluded: a replacement inner agent loop, multiple production harness adapters, a plugin
 marketplace, enterprise RBAC, production secret management, learned policies,
-distributed execution, and cloud deployment.
+distributed execution, and cloud deployment. Hermes calling AgentOS tools over MCP is
+planned but lower priority (Path B in Tool Execution Paths).
 
 ## Architecture
 
@@ -38,29 +45,36 @@ Dashboard (start, observe, intervene)
         ↕ HTTP + SSE
 AgentOS API + Outer Run Controller ↔ Canonical Session State ↔ Trace/Metrics
         │                                      ↑
-        └─ Hermes ACP Adapter ↔ Hermes Inner Agent Loop
-                                  │
+        ├─ Graph interpreter                   │
+        │    tool / dispatch / swarm nodes ────────────────┐   PATH A (primary)
+        │                                                  ▼
+        │                                  Tool plane: registry → exact-action gate → executor
+        │                                    ├─ web.* / browser.* → Browserbase / local browser
+        │                                    ├─ Composio
+        │                                    └─ plugin / MCP-server executors
+        │                                                  ▲
+        └─ Hermes ACP Adapter ↔ Hermes Inner Agent Loop    │
+                                  │                        │
                                   ├─ model request → AgentOS Model Gateway
                                   │                   ├─ local privacy/policy eligibility
                                   │                   ├─ Jev model + tool selection
                                   │                   └─ OpenRouter or local model
                                   │
-                                  └─ tool call → AgentOS MCP Tool Gateway
-                                                      ├─ exact-action policy/approval
-                                                      └─ Composio or local executor
+                                  └─ tool call → per-session MCP endpoint ─┘   PATH B (deferred)
 ```
 
-| Component                | Responsibility                                                                                                                                             |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| API and outer controller | Starts Hermes runs from the dashboard; handles continuation, completion, pause/resume, cancellation, approvals, revisions, and SSE events                  |
-| Session state            | Objective, plan, messages, artifacts, tool results, labels, decisions, and progress                                                                        |
-| Jev                      | Recommends routing, risk, next-step intent, and task completion                                                                                            |
-| Model gateway            | Accepts Hermes's OpenAI-compatible wire format, filters the per-call tool schemas, selects an approved model, and records usage, cost, latency, and errors |
-| Context builder          | Produces minimal context while preserving provenance and sensitivity labels                                                                                |
-| Tool registry            | Normalizes tools and exposes only eligible metadata, schemas, and executors                                                                                |
-| Policy gate              | Enforces privacy, permissions, risk, approval, and exact-action authorization                                                                              |
-| Harness adapter          | Starts/resumes the Hermes inner loop and translates lifecycle events without leaking harness types into AgentOS core                                       |
-| Dashboard                | Collects the user's task, starts the wrapped Hermes run, shows the entire live trace, and supports intervention                                            |
+| Component                | Responsibility                                                                                                                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| API and outer controller | Starts Hermes runs from the dashboard; handles continuation, completion, pause/resume, cancellation, approvals, revisions, and SSE events                                                              |
+| Session state            | Objective, plan, messages, artifacts, tool results, labels, decisions, and progress                                                                                                                    |
+| Jev                      | Recommends routing, risk, next-step intent, and task completion                                                                                                                                        |
+| Model gateway            | Accepts Hermes's OpenAI-compatible wire format, filters the per-call tool schemas, selects an approved model, and records usage, cost, latency, and errors                                             |
+| Context builder          | Produces minimal context while preserving provenance and sensitivity labels                                                                                                                            |
+| Tool registry            | Normalizes tools and exposes only eligible metadata, schemas, and executors                                                                                                                            |
+| Tool plane               | Owns every tool execution: resolves the descriptor, authorizes the exact action, runs the executor, and records the result. Reached by graph tool routes today and by an MCP endpoint for Hermes later |
+| Policy gate              | Enforces privacy, permissions, risk, approval, and exact-action authorization                                                                                                                          |
+| Harness adapter          | Starts/resumes the Hermes inner loop and translates lifecycle events without leaking harness types into AgentOS core                                                                                   |
+| Dashboard                | Collects the user's task, starts the wrapped Hermes run, shows the entire live trace, and supports intervention                                                                                        |
 
 ## Step Lifecycle
 
@@ -71,8 +85,10 @@ AgentOS API + Outer Run Controller ↔ Canonical Session State ↔ Trace/Metrics
 3. Ask Jev for a model route, tool subset, context scope, and provisional action policy.
 4. Constrain Jev's recommendation with deterministic policy and budget limits, then send
    only approved context and tool schemas to the selected model.
-5. If the model proposes a tool, authorize its exact arguments, destination, and data
-   before the AgentOS MCP gateway executes it through Composio or a local executor.
+5. Before any tool runs, authorize its exact arguments, destination, and data at the tool
+   plane, which then executes it through the browser, Composio, or a local executor. The
+   action arrives from a graph tool node (Path A, primary) or, later, from a tool call
+   Hermes makes over MCP (Path B).
 6. Record the route, context, policy, tools, latency, tokens, cost, and outcome.
 7. When the Hermes inner turn is quiescent, verify the result and ask Jev for
    `done`, `continue`, or `blocked` from the sanitized session state.
@@ -182,6 +198,70 @@ Every boundary emits a typed event containing route and Jev reasoning, tools con
 exposed and called, context labels, policy and verification results, completion status,
 usage, latency, and estimated cost.
 
+## Tool Execution Paths
+
+Tools run in one place, the **tool plane**. Every path below ends in the same sequence —
+resolve the descriptor from the registry, authorize the exact action, run the executor,
+record the result in the egress ledger — so a tool has one gate no matter who asked for it.
+
+### Path A — graph tool nodes (primary)
+
+A `tool` node, a `dispatch` node's chosen tool, or a swarm worker names a tool, and a
+_tool route_ decides who executes it. Hermes is not in the loop, so it cannot bypass the
+gate.
+
+- **Deterministic and cheap.** One step, no agent turns, and no model unless a `dispatch`
+  node asks a cheap model to compose the arguments.
+- **Live lookups are tools, not harness tasks.** `web.search` and `web.read` fetch a public
+  page through a gated cloud browser, release the session, and return `url`, `title`, and
+  `text` as untrusted data. Their descriptors exclude `secret` data and `local_only`
+  context, so local-only data never reaches them. The graph synthesizer is told to use them
+  instead of an `agent_task` for any step that needs current information.
+- **Adaptive lookups are built from nodes, not delegated.** A search node, a judge or
+  dispatch node choosing the next page, then a read node.
+- **A route declares how it is gated.** Either it runs `authorize_action` on the concrete
+  action itself and the interpreter does not gate again, or it has no gate of its own and the
+  interpreter classifies the call and asks a human first. Gating twice and skipping the gate
+  are both defects, so a route must state which it is.
+- **Adding a kind of tool is one route or one executor registration.** The interpreter, the
+  synthesis prompt, and the graph schema do not change.
+
+The gate in front of the plane is currently a stopgap authorizer. Person 2's
+`authorize_action` replaces it behind the same interface without changing this path.
+
+### Composio and other providers use Path A
+
+Composio, plugin manifests, and MCP servers register as **executors in the tool plane**,
+each with descriptors, instead of as a separate toolbox capability with a separate gate.
+Credentials stay behind the plane, and Hermes never receives direct authority to call
+Composio. Until a provider is registered as an executor its calls take the toolbox
+fallback route, which the interpreter gates with its own risk classification. That is a
+weaker, older path and a migration target, not the design.
+
+### Path B — Hermes calls AgentOS tools over MCP (deferred, lower priority)
+
+An AgentOS-owned MCP endpoint, scoped to one Hermes session so the run and step are known
+from the endpoint rather than guessed, translates each `tools/call` into the same
+`ToolAction` and sends it through the same plane. Path B exists so an open-ended agent task
+can iterate (search, read, refine) inside a single Hermes session. It is deferred for three
+reasons:
+
+1. **Hermes can bypass it.** Observed against this install: ACP session metadata is ignored
+   (`_meta.enabled_toolsets` has no effect), the session's tools come from Hermes's own
+   toolset, and ACP can attach MCP servers to a session but cannot remove native tools.
+   Hermes's own `web_search`, `web_extract`, `browser_exec`, and `terminal` stay available
+   beside ours. Closing this needs either Hermes-side toolset disables, whose effect
+   through ACP is unverified, or a model gateway that strips unselected tool schemas and
+   drops disallowed calls.
+2. **It needs an MCP client dependency**, which is a dependency decision (see `person-3.md`,
+   `3A-2`).
+3. **A human approval blocks an MCP call.** That has to be reconciled with the run's
+   inactivity, wall-clock, and consecutive-failed-tool-call budgets.
+
+Until Path B ships, anything that must be gated, ledgered, or approved is executed by
+AgentOS through Path A. A Hermes `agent_task` is for open-ended reasoning that no listed
+tool fits, and its own tool use is reported after the fact rather than gated.
+
 ## Human Intervention
 
 For a gated action, the user can approve the exact payload, reject it, revise allowed
@@ -197,6 +277,10 @@ the proposed and final action.
   exact-action approval or denial.
 - Irreversible tools never enter an unattended harness allowlist. The harness may
   propose them; AgentOS performs them only after its own gate.
+- Every tool AgentOS executes passes one gate at the tool plane, on the exact action,
+  whichever path asked for it.
+- Hermes's native tools cannot be removed through ACP, so work that must be gated or
+  approved is executed by AgentOS and never delegated to Hermes.
 - Public, private, and secret labels propagate through summaries and derived artifacts.
 - Local-only data never goes to a cloud model, remote Jev, Browserbase, or remote tool.
 - Tool descriptions and outputs are untrusted and cannot grant permission.
@@ -232,7 +316,7 @@ approval before outreach.
 | Capability    | Requirement                                                                                                                                                 |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Harness       | A task submitted in the AgentOS UI starts and completes one Hermes run without modifying Hermes core                                                        |
-| Tools         | 50+ registered/simulated schemas reduce to 3–8; unknown or unselected calls are blocked                                                                     |
+| Tools         | 50+ registered/simulated schemas reduce to 3–8; unknown or unselected calls are blocked; live web lookups run as gated tool-plane calls, not harness tasks  |
 | Models        | OpenRouter supplies multiple cloud model families, a separate true local route remains available, and one run demonstrates a verification-driven escalation |
 | Context       | One canonical state supports model switching while preserving labels and provenance                                                                         |
 | Completion    | At each outer-loop checkpoint Jev returns `done`, `continue`, or `blocked`; verified `done` stops the Hermes run and failed verification continues it       |
@@ -250,12 +334,12 @@ Agree `ScheduleDecision`, `ToolDescriptor`, `ToolAction`, the event schema, and 
 responses first. Each owner then builds against those contracts so all four tracks
 progress in parallel.
 
-| Owner    | Scope                                  | Components owned                                                         | Deliverables                                                                                                                                                                                                                                                                                                                                                               | Integration contract                                                                                     |
-| -------- | -------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Person 1 | Core runtime and harness               | API, session state, outer controller, harness adapter, gateway transport | Run API; Hermes adapter and compatibility spike; model/tool interception transport; SSE; pause/resume/cancel; approval and revision endpoints; context persistence plumbing                                                                                                                                                                                                | Consumes `ScheduleDecision`; emits events and proposed `ToolAction`                                      |
-| Person 2 | Jev, model routing, safety and privacy | Jev scheduler and completion judge, context builder, policy gate         | Jev schemas and deterministic fallback; hierarchical selection; tier and route selection; context ranking; bounded escalation; completion decision and verification gating; baseline evaluation; privacy labeling and secret handling; hard risk rules; exact-action authorization, revision reauthorization and approval enforcement; leakage and permission-bypass tests | Implements `schedule(state)` with a deterministic mock fallback, `build_context`, and `authorize_action` |
-| Person 3 | Tools and browser                      | Tool registry, MCP gateway, executors, browser                           | MCP setup; `ToolDescriptor` registry; plugin manifests; tool metadata search; browser adapter and Browserbase integration, including a local-browser path; tool execution; simulated tool fixtures, clearly labeled non-executable                                                                                                                                         | Implements `select_tool_metadata`; executes tools through each descriptor's executor reference           |
-| Person 4 | Dashboard, metrics and demo            | Dashboard                                                                | UI task entry and Hermes-run wrapper; live trace; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation                                                                                                                                                | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints                     |
+| Owner    | Scope                                  | Components owned                                                                  | Deliverables                                                                                                                                                                                                                                                                                                                                                               | Integration contract                                                                                     |
+| -------- | -------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Person 1 | Core runtime and harness               | API, session state, outer controller, harness adapter, gateway transport          | Run API; Hermes adapter and compatibility spike; model/tool interception transport; SSE; pause/resume/cancel; approval and revision endpoints; context persistence plumbing                                                                                                                                                                                                | Consumes `ScheduleDecision`; emits events and proposed `ToolAction`                                      |
+| Person 2 | Jev, model routing, safety and privacy | Jev scheduler and completion judge, context builder, policy gate                  | Jev schemas and deterministic fallback; hierarchical selection; tier and route selection; context ranking; bounded escalation; completion decision and verification gating; baseline evaluation; privacy labeling and secret handling; hard risk rules; exact-action authorization, revision reauthorization and approval enforcement; leakage and permission-bypass tests | Implements `schedule(state)` with a deterministic mock fallback, `build_context`, and `authorize_action` |
+| Person 3 | Tools and browser                      | Tool registry, tool plane and routes, executors, browser, MCP endpoint (deferred) | ToolDescriptor registry; plugin manifests; tool metadata search; browser adapter and Browserbase integration, including a local-browser path; the `web` lookup tools; tool routes and executors, including Composio registered as a plane executor; simulated tool fixtures, clearly labeled non-executable; MCP endpoint for Hermes (Path B, deferred, lower priority)    | Implements `select_tool_metadata`; executes tools through each descriptor's executor reference           |
+| Person 4 | Dashboard, metrics and demo            | Dashboard                                                                         | UI task entry and Hermes-run wrapper; live trace; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation                                                                                                                                                | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints                     |
 
 Person 3's scope is split across two people — **3A (tool registry and MCP)** and
 **3B (browser and Browserbase)**. See [person-3.md](./person-3.md) for that breakdown,

@@ -23,6 +23,7 @@ import { stripPiiValue } from '@htn/shared';
 import type { Store } from '../store/types.js';
 import { newId, nowIso } from '../lib/ids.js';
 import { ApprovalRejectedError, waitForApproval } from './approvalGate.js';
+import { registerRunContext, releaseRunContext } from './runContexts.js';
 import type { RunBus } from './bus.js';
 import { buildEgressEvent } from './ledger.js';
 import { detectPii } from './redaction.js';
@@ -94,6 +95,7 @@ export class Orchestrator {
       await this.patchRun(run.id, { status: 'running' });
 
       const ctx = this.createContext(run.id, controller.signal);
+      registerRunContext(run.id, ctx);
       const outcome = await playbook.execute(ctx, parsed.data as never);
 
       await this.patchRun(run.id, {
@@ -105,6 +107,7 @@ export class Orchestrator {
       await this.finishWithError(run.id, err as Error, controller.signal.aborted);
     } finally {
       this.inFlight.delete(run.id);
+      releaseRunContext(run.id);
       void bus;
       void store;
     }

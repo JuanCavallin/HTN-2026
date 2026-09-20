@@ -3,6 +3,7 @@ import { config, logConfigSummary } from './config.js';
 import { seedGraphs } from './services/graphs.service.js';
 import { probeStaleRuns } from './services/runs.service.js';
 import { loadToolClassifications } from './services/runtime.js';
+import { registerToolRoutes } from './services/toolRoutes.js';
 import { store } from './store/index.js';
 
 async function main(): Promise<void> {
@@ -36,6 +37,10 @@ async function main(): Promise<void> {
   // server accepts a request.
   const classified = await loadToolClassifications();
   console.log('[tools] ' + classified + ' tool(s) classified for the risk gate');
+
+  // Tools the toolbox does not own (the `web` family today) execute through the
+  // tool plane; a graph names them like any other tool. See core/graph/toolRoutes.ts.
+  registerToolRoutes();
 
   const app = createApp();
   const server = app.listen(config.port, () => {
