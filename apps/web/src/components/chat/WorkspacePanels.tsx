@@ -5,7 +5,10 @@ import {
   formatCost,
   formatDuration,
   LIVE_INTERVENTION_REASON,
+  providerLabel,
   ROUTE_OPTIONS,
+  toolActivity,
+  toolGlyph,
   type RouteOption,
   type Trace,
 } from '../../lib/workspace';
@@ -127,7 +130,9 @@ export function MetricsStrip({
   connected?: boolean;
   lastEventAt?: number | null;
 }) {
-  const completed = trace.nodes.filter((item) => item.status === 'succeeded').length;
+  // A tool that was only offered never becomes work, so it must not sit in the denominator.
+  const countable = trace.nodes.filter((item) => item.role !== 'tool-exposed');
+  const completed = countable.filter((item) => item.status === 'succeeded').length;
   const active = trace.nodes.filter((item) => item.status === 'running');
   // A paused run is still an ACTIVE run -- it is exactly the run whose pause
   // control has to stay on screen, so that resume is reachable.
@@ -155,12 +160,12 @@ export function MetricsStrip({
             <span>Steps completed</span>
             <strong>
               {completed}
-              <span> / {trace.nodes.length}</span>
+              <span> / {countable.length}</span>
             </strong>
           </div>
           <progress
             value={completed}
-            max={Math.max(1, trace.nodes.length)}
+            max={Math.max(1, countable.length)}
             aria-label="Completed execution steps"
           />
         </div>
@@ -311,9 +316,23 @@ export function RunInspector({
             <Icon name="close" size={14} />
           </button>
         </header>
-        <strong>{node.label}</strong>
+        <strong>
+          {node.tool && (
+            <i className="node-glyph inline" aria-hidden="true">
+              {toolGlyph(node.tool)}
+            </i>
+          )}
+          {node.label}
+        </strong>
         <span className="inspector-route">{node.route}</span>
-        {node.planned && (
+        {node.role === 'tool-exposed' && (
+          <p className="inspector-flag">
+            <Icon name="connect" size={13} />
+            Offered to the agent for this step. Being offered is not evidence that it ran: no call
+            has been reported.
+          </p>
+        )}
+        {node.planned && node.role !== 'tool-exposed' && (
           <p className="inspector-flag">
             <Icon name="graph" size={13} />
             Planned structure. No execution has been reported for this node, so it carries no
@@ -327,19 +346,80 @@ export function RunInspector({
           </p>
         )}
         <p>{node.detail}</p>
+        {node.tool && (
+          <dl className="tool-facts">
+            <div>
+              <dt>Source</dt>
+              <dd>{providerLabel(node.tool.providerId)}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{toolActivity(node)}</dd>
+            </div>
+            {node.tool.family && (
+              <div>
+                <dt>App</dt>
+                <dd>{node.tool.family}</dd>
+              </div>
+            )}
+            {node.tool.policy && (
+              <div>
+                <dt>Policy</dt>
+                <dd>{node.tool.policy}</dd>
+              </div>
+            )}
+            {node.tool.destination && (
+              <div>
+                <dt>Destination</dt>
+                <dd>{node.tool.destination}</dd>
+              </div>
+            )}
+            {node.tool.dataLabels.length > 0 && (
+              <div>
+                <dt>Data</dt>
+                <dd>{node.tool.dataLabels.join(', ')}</dd>
+              </div>
+            )}
+            {node.tool.attempts > 1 && (
+              <div>
+                <dt>Attempts</dt>
+                <dd>{node.tool.attempts} on this step</dd>
+              </div>
+            )}
+          </dl>
+        )}
+        {node.tool?.reasonCodes.length ? (
+          <div className="tool-tags">
+            {node.tool.reasonCodes.map((code) => (
+              <span key={code}>{code}</span>
+            ))}
+          </div>
+        ) : null}
+        {node.tool?.argsPreview && (
+          <details className="tool-args">
+            <summary>Exact arguments</summary>
+            <pre>{node.tool.argsPreview}</pre>
+          </details>
+        )}
         <dl>
           <div>
             <dt>Duration</dt>
             <dd>{formatDuration(node.durationMs)}</dd>
           </div>
-          <div>
-            <dt>Tokens</dt>
-            <dd>{node.tokens?.toLocaleString() ?? '—'}</dd>
-          </div>
-          <div>
-            <dt>Est. cost</dt>
-            <dd>{formatCost(node.costCents)}</dd>
-          </div>
+          {/* A tool call reports no tokens or cost of its own; the provider row on the
+              parent step carries them. Showing an em dash here would imply they were missed. */}
+          {!node.tool && (
+            <>
+              <div>
+                <dt>Tokens</dt>
+                <dd>{node.tokens?.toLocaleString() ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Est. cost</dt>
+                <dd>{formatCost(node.costCents)}</dd>
+              </div>
+            </>
+          )}
           {node.decision && (
             <>
               <div>
@@ -363,53 +443,56 @@ export function RunInspector({
           </div>
         ) : null}
 
-        <div className="inspector-edit">
-          {editable && editing ? (
-            <fieldset className="route-choices">
-              <legend>Run this step on</legend>
-              {ROUTE_OPTIONS.map((option) => (
-                <button
-                  key={option.id}
-                  className={`route-choice ${override === option.id ? 'chosen' : ''}`}
-                  aria-pressed={override === option.id}
-                  onClick={() => {
-                    onOverride?.(node.id, option.id);
-                    setEditing(false);
-                  }}
-                >
-                  <strong>{option.label}</strong>
-                  <small>{option.note}</small>
+        {/* A tool call is not a routed model step, so there is no route to change. */}
+        {!node.tool && (
+          <div className="inspector-edit">
+            {editable && editing ? (
+              <fieldset className="route-choices">
+                <legend>Run this step on</legend>
+                {ROUTE_OPTIONS.map((option) => (
+                  <button
+                    key={option.id}
+                    className={`route-choice ${override === option.id ? 'chosen' : ''}`}
+                    aria-pressed={override === option.id}
+                    onClick={() => {
+                      onOverride?.(node.id, option.id);
+                      setEditing(false);
+                    }}
+                  >
+                    <strong>{option.label}</strong>
+                    <small>{option.note}</small>
+                  </button>
+                ))}
+                <button className="text-link" onClick={() => setEditing(false)}>
+                  Keep the recorded route
                 </button>
-              ))}
-              <button className="text-link" onClick={() => setEditing(false)}>
-                Keep the recorded route
-              </button>
-            </fieldset>
-          ) : editable ? (
-            <button className="secondary-button full-width" onClick={() => setEditing(true)}>
-              <Icon name="settings" size={14} />
-              Change this step’s route
-            </button>
-          ) : (
-            <>
-              <button
-                className="secondary-button full-width"
-                disabled
-                title={LIVE_INTERVENTION_REASON}
-              >
+              </fieldset>
+            ) : editable ? (
+              <button className="secondary-button full-width" onClick={() => setEditing(true)}>
                 <Icon name="settings" size={14} />
-                Editing unavailable
+                Change this step’s route
               </button>
-              <p className="inspector-reason">{LIVE_INTERVENTION_REASON}</p>
-            </>
-          )}
-          {editable && preview && (
-            <p className="inspector-reason">
-              Changing the route restarts this preview from the beginning with the new choice. It is
-              a simulation — no model or tool is called.
-            </p>
-          )}
-        </div>
+            ) : (
+              <>
+                <button
+                  className="secondary-button full-width"
+                  disabled
+                  title={LIVE_INTERVENTION_REASON}
+                >
+                  <Icon name="settings" size={14} />
+                  Editing unavailable
+                </button>
+                <p className="inspector-reason">{LIVE_INTERVENTION_REASON}</p>
+              </>
+            )}
+            {editable && preview && (
+              <p className="inspector-reason">
+                Changing the route restarts this preview from the beginning with the new choice. It
+                is a simulation — no model or tool is called.
+              </p>
+            )}
+          </div>
+        )}
       </section>
     </aside>
   );

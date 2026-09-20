@@ -2761,3 +2761,68 @@ progress::-moz-progress-bar {
   width: 8px;
   height: 20px;
 }
+
+/* Tool nodes. A tool shows the app it belongs to (a static glyph, nothing fetched) and where
+   it runs. "Connecting to Composio…" is the accent colour only while the broker reports the
+   call executing, so the colour means the same thing it means on a step. */
+.node-glyph {
+  font-style: normal;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex: none;
+  font-size: 14px;
+  line-height: 1;
+  /* Emoji ignore `color`; the dashed, dimmed exposed state has to be carried by opacity. */
+}
+.decision-node.tool-exposed .node-glyph {
+  opacity: 0.55;
+  filter: grayscale(0.6);
+}
+.decision-node.is-tool .node-heading > span:first-of-type {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  letter-spacing: -0.1px;
+}
+.node-activity {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.decision-node.running .node-activity {
+  color: var(--accent-text);
+}
+.legend-mark.offered {
+  background: none;
+  border: 1px dashed var(--mark);
+}
+.node-glyph.inline {
+  width: auto;
+  margin-right: 7px;
+  vertical-align: -1px;
+}
+.tool-facts {
+  margin-top: 12px;
+}
+.tool-args {
+  margin-top: 12px;
+  font-size: 11px;
+}
+.tool-args summary {
+  cursor: pointer;
+  color: var(--secondary);
+}
+.tool-args pre {
+  margin: 8px 0 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

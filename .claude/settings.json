@@ -23,7 +23,10 @@
       "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/404fa9cd-120d-4282-ac4e-aebc53871df1/scratchpad/trace.mjs file:///C:/Users/danie/HTN-2026/docs/frontend-design/Gemini_Generated_Image_niu0wtniu0wtniu0-removebg-preview.png)",
       "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/404fa9cd-120d-4282-ac4e-aebc53871df1/scratchpad/trace.mjs C:/Users/danie/HTN-2026/docs/frontend-design/Gemini_Generated_Image_niu0wtniu0wtniu0-removebg-preview.png)",
       "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/404fa9cd-120d-4282-ac4e-aebc53871df1/scratchpad/shot.mjs file:///C:/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/404fa9cd-120d-4282-ac4e-aebc53871df1/scratchpad/mark-verify.html /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/404fa9cd-120d-4282-ac4e-aebc53871df1/scratchpad/mark-verify.png 1000 460)",
-      "Bash(pnpm dev *)"
+      "Bash(pnpm dev *)",
+      "Bash(npx prettier *)",
+      "Bash(node --test tests/tools-stream.test.mjs)",
+      "Bash(curl -s -o /dev/null -w \"web:%{http_code}\\\\n\" localhost:5173/)"
     ]
   },
   "enabledPlugins": {

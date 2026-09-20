@@ -49,6 +49,26 @@ export function runReducer(state: RunView, event: RunEvent | { type: 'reset' }):
         scheduleDecisions: upsert(state.scheduleDecisions, event.decision),
       };
 
+    // The tool plane and Jev's selections. Without these the graph cannot show which tools
+    // were exposed or called: an agent run has ONE outer step, and everything a tool did
+    // arrives only as these events.
+    case 'control.decided':
+      return { ...state, controlDecisions: upsert(state.controlDecisions, event.decision) };
+
+    case 'model.lifecycle':
+      return { ...state, modelCalls: upsert(state.modelCalls, event.lifecycle) };
+
+    case 'harness.turn':
+      return { ...state, harnessTurns: upsert(state.harnessTurns, event.turn) };
+
+    // Several events per action (proposed ... succeeded), each with its own id, so this
+    // appends; the trace groups them by `action.id`.
+    case 'tool.lifecycle':
+      return { ...state, toolLifecycle: upsert(state.toolLifecycle, event.lifecycle) };
+
+    case 'session.updated':
+      return { ...state, agentSessions: upsert(state.agentSessions, event.session) };
+
     case 'log':
       return {
         ...state,
