@@ -11,10 +11,24 @@ import { z } from 'zod';
 import { PROVIDER_IDS, type ProviderId, type ProviderMode } from '@htn/shared';
 
 const modeEnum = z.enum(['mock', 'live', 'disabled']);
-const optionalUrl = z.preprocess(
-  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-  z.string().url().optional(),
-);
+/**
+ * A BLANK ENV VALUE MEANS UNSET, which is what `FOO=` means to a human editing
+ * a .env file -- and the only reading that survives `??`.
+ *
+ * `env.FOO ?? fallback` does NOT fall through for an empty string, so a var
+ * declared as a plain optional string turns a blank line into a real `''` that
+ * silently wins over every default behind it. That cost a debugging session:
+ * a blank `HERMES_BASE_URL=` beat the model-gateway default and every
+ * agent_task died with "AgentOS model gateway base URL is not configured".
+ *
+ * Use `optionalString` for any optional env string, and `optionalUrl` when it
+ * must also parse as a URL.
+ */
+const blankIsUnset = (value: unknown) =>
+  typeof value === 'string' && value.trim() === '' ? undefined : value;
+
+const optionalString = z.preprocess(blankIsUnset, z.string().optional());
+const optionalUrl = z.preprocess(blankIsUnset, z.string().url().optional());
 
 /** Accepts 1/true/yes/on, case-insensitive; anything else is false. */
 const boolish = z
@@ -38,28 +52,28 @@ const envSchema = z.object({
   // Hermes is driven as a local subprocess over ACP (`uv run hermes-acp`), not
   // an HTTP API — there is no bearer key. What live mode actually needs is the
   // absolute path to a `hermes-agent` checkout with the `acp` and `mcp` extras installed.
-  HERMES_CWD: z.string().optional(),
-  HERMES_PROFILE_DIR: z.string().optional(),
-  HERMES_API_KEY: z.string().optional(),
-  HERMES_BASE_URL: z.string().optional(),
+  HERMES_CWD: optionalString,
+  HERMES_PROFILE_DIR: optionalString,
+  HERMES_API_KEY: optionalString,
+  HERMES_BASE_URL: optionalString,
 
   MODEL_GATEWAY_BASE_URL: optionalUrl,
   MODEL_GATEWAY_API_KEY: z.string().default('agentos-local'),
   MCP_GATEWAY_URL: optionalUrl,
   MCP_GATEWAY_API_KEY: z.string().default('agentos-mcp-local'),
 
-  AI_GATEWAY_API_KEY: z.string().optional(),
+  AI_GATEWAY_API_KEY: optionalString,
   AI_GATEWAY_BASE_URL: optionalUrl,
   JEV_MODE: modeEnum.default('mock'),
   /** Legacy aliases retained so existing local setups keep working. */
-  JEV_API_KEY: z.string().optional(),
+  JEV_API_KEY: optionalString,
   JEV_BASE_URL: optionalUrl,
 
   BROWSERBASE_MODE: modeEnum.default('mock'),
-  BROWSERBASE_API_KEY: z.string().optional(),
-  BROWSERBASE_PROJECT_ID: z.string().optional(),
+  BROWSERBASE_API_KEY: optionalString,
+  BROWSERBASE_PROJECT_ID: optionalString,
   LOCALBROWSER_MODE: modeEnum.default('mock'),
-  LOCALBROWSER_CHANNEL: z.string().optional(),
+  LOCALBROWSER_CHANNEL: optionalString,
   BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
   BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
@@ -69,16 +83,16 @@ const envSchema = z.object({
   BROWSER_SETTLE_SELECT_MS: z.coerce.number().int().min(0).default(200),
 
   COMPOSIO_MODE: modeEnum.default('mock'),
-  COMPOSIO_API_KEY: z.string().optional(),
+  COMPOSIO_API_KEY: optionalString,
   COMPOSIO_BASE_URL: optionalUrl,
   COMPOSIO_USER_ID: z.string().default('agentos-demo-user'),
-  COMPOSIO_AUTH_CONFIG_ID: z.string().optional(),
+  COMPOSIO_AUTH_CONFIG_ID: optionalString,
   COMPOSIO_TOOL_SLUGS: z.string().default('GMAIL_SEND_EMAIL'),
   COMPOSIO_TOOLKITS: z.string().default(''),
   COMPOSIO_DISCOVERY_LIMIT: z.coerce.number().int().min(1).max(100).default(24),
 
   OPENROUTER_MODE: modeEnum.default('mock'),
-  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_API_KEY: optionalString,
   OPENROUTER_BASE_URL: optionalUrl,
   OPENROUTER_CHEAP_MODEL: z.string().default('openai/gpt-5.6-luna'),
   OPENROUTER_FRONTIER_MODEL: z.string().default('openai/gpt-5.6-sol'),
@@ -88,10 +102,10 @@ const envSchema = z.object({
   OLLAMA_MODEL: z.string().default('qwen3:8b'),
 
   ANTHROPIC_MODE: modeEnum.default('mock'),
-  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: optionalString,
 
   GPTZERO_MODE: modeEnum.default('disabled'),
-  GPTZERO_API_KEY: z.string().optional(),
+  GPTZERO_API_KEY: optionalString,
 });
 
 const parsed = envSchema.safeParse(process.env);
