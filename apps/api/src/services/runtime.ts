@@ -197,6 +197,30 @@ export async function recoverInterruptedRuns(): Promise<number> {
     await bus.emit(run.id, { type: 'run.updated', run: next });
   }
 
+  // A session left ACTIVE on a run that already finished is never reached by
+  // the loop above, because that loop only walks non-terminal runs. It is still
+  // debris, and it is not harmless: resolveActiveHarnessSession requires
+  // exactly one active session per harness and throws "multiple active
+  // sessions are ambiguous" otherwise, so a single leaked session can break
+  // every later agent task in the process -- and it survives restarts, because
+  // it is persisted.
+  const orphanedSessions = (await store.listSessionStates()).filter(
+    (session) => !['completed', 'failed', 'cancelled'].includes(session.status),
+  );
+  for (const session of orphanedSessions) {
+    const run = await store.getRun(session.runId);
+    if (run && !isTerminal(run.status)) continue; // handled above
+    const next = await store.patchSessionState(session.id, { status: 'cancelled' });
+    await bus.emit(session.runId, { type: 'session.updated', session: next });
+  }
+  if (orphanedSessions.length > 0) {
+    console.warn(
+      '[store] cancelled ' +
+        orphanedSessions.length.toString() +
+        ' session(s) left active on already-finished runs',
+    );
+  }
+
   if (interrupted.length > 0) {
     console.warn('[store] reconciled ' + interrupted.length.toString() + ' interrupted run(s)');
   }

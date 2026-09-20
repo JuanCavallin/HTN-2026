@@ -391,10 +391,20 @@ export class Orchestrator {
         // A short-lived session state whose ONLY purpose is to carry the
         // author's pinned choice as a grant the broker can verify. One tool,
         // one turn. It is not a harness session and never binds one.
+        // HARNESS IS DELIBERATELY NOT 'hermes'.
+        //
+        // resolveActiveHarnessSession('hermes') requires exactly ONE active
+        // hermes session and throws "multiple active sessions are ambiguous"
+        // otherwise -- which is how Hermes's own MCP tool calls find their
+        // context. Labelling this ephemeral grant-carrier as hermes made every
+        // graph tool node leave a phantom hermes session behind, and the next
+        // agent_task died with a 409 it had nothing to do with.
+        //
+        // This is not a harness session. It is a one-call grant, so it says so.
         const session = await sessionStateService.create({
           runId,
           stepId,
-          harness: 'hermes',
+          harness: 'graph',
           objective: 'graph tool node: ' + toolId,
           dataLabels: ['private'],
           // One call, so one step of budget. This session exists to carry a
@@ -417,7 +427,11 @@ export class Orchestrator {
           });
           return { output: result.output, summary: result.summary };
         } finally {
-          // The grant must not outlive the one call it was minted for.
+          // The grant must not outlive the one call it was minted for, and
+          // neither must the session: an ACTIVE one left behind is state that
+          // later lookups have to disambiguate. Terminal status first, which
+          // also clears the grant (see savePatch), then belt and braces.
+          await sessionStateService.setStatus(session.id, 'completed').catch(() => undefined);
           await sessionStateService.clearToolExposure(session.id).catch(() => undefined);
         }
       },

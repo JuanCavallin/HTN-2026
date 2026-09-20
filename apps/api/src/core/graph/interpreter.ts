@@ -29,7 +29,7 @@
 
 import type { AgentGraph, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
 import type { PlaybookContext, PlaybookOutcome } from '../playbooks/types.js';
-import { resolveRefs, type RefScope } from './refs.js';
+import { collectRefs, lookup, resolveRefs, type RefScope } from './refs.js';
 import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
 
 /* -------------------------------------------------------------------------- */
@@ -146,7 +146,9 @@ export async function runGraph(
         }
       }
 
-      const result = await executeNode(ctx, node, scopeNow(), graph, lease);
+      const scope = scopeNow();
+      await warnUnresolvedRefs(ctx, node, scope);
+      const result = await executeNode(ctx, node, scope, graph, lease);
       const ran: Ran = { ran: true, value: result.value, choice: result.choice };
       outcomes.set(nodeId, ran);
       return ran;
@@ -180,6 +182,60 @@ export async function runGraph(
   }
 
   return summarise(graph, outcomes, variables);
+}
+
+/**
+ * Say when a `{{ref}}` points at nothing.
+ *
+ * An unresolved ref resolves to `undefined` (whole form) or "" (embedded), by
+ * design -- see refs.ts. For a REQUIRED field a downstream zod parse then fails
+ * loudly, which is the behaviour that design note assumes. For an OPTIONAL one
+ * nothing fails at all: the field is simply absent and the node runs as if the
+ * author never wrote it.
+ *
+ * That is not hypothetical. A handoff whose `url` was "{{verify.output}}" --
+ * where the node actually produces `{text}`, not `{output}` -- opened a browser
+ * with no url at all and handed a person a blank page, with the same empty
+ * string interpolated invisibly into the instruction they were reading.
+ *
+ * So: warn, and NAME WHAT IS ACTUALLY AVAILABLE on that node. "verify has:
+ * text" turns a long hunt into a one-character fix. Warning rather than
+ * throwing is deliberate -- a ref into a skipped branch is legitimately empty,
+ * and a graph that is 90% right should still run.
+ */
+async function warnUnresolvedRefs(
+  ctx: PlaybookContext,
+  node: GraphNode,
+  scope: RefScope,
+): Promise<void> {
+  const unresolved = [...collectRefs(node.config)].filter(
+    (path) => lookup(scope, path) === undefined,
+  );
+  if (unresolved.length === 0) return;
+
+  const detail = unresolved.map((path) => {
+    const root = path.split('.')[0] as string;
+    const value = scope[root];
+    if (value === undefined) {
+      return path + ' (nothing named "' + root + '" has produced a value)';
+    }
+    const keys = value !== null && typeof value === 'object' ? Object.keys(value as object) : [];
+    return (
+      path + ' ("' + root + '" has: ' + (keys.length > 0 ? keys.join(', ') : typeof value) + ')'
+    );
+  });
+
+  await ctx
+    .log(
+      'warn',
+      'Node "' +
+        node.label +
+        '" has ' +
+        unresolved.length +
+        ' unresolved {{ref}}(s), which resolve to nothing: ' +
+        detail.join('; '),
+    )
+    .catch(() => undefined);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -873,6 +929,24 @@ async function runHandoff(
     { label: node.label, kind: 'handoff', nodeId: node.id, providerId: ctx.providerFor('browser') },
     async (step) => {
       let sessionId = inherited ? (cfg.sessionId as string) : undefined;
+
+      // A handoff opens its OWN browser only when no session was handed to it.
+      // Doing that with no url means handing a person about:blank, which is
+      // almost never what the author meant -- the common cause is a `url` whose
+      // {{ref}} resolved to nothing (see warnUnresolvedRefs) or a missing
+      // `sessionId` that should have inherited an earlier node's browser.
+      if (!inherited && (typeof cfg.url !== 'string' || cfg.url.trim() === '')) {
+        await ctx
+          .log(
+            'warn',
+            'Handoff "' +
+              node.label +
+              '" has neither a sessionId to inherit nor a url to open, so the person ' +
+              'will be handed a blank browser. Give it sessionId (to reuse the browser an ' +
+              'earlier node opened) or a url that resolves.',
+          )
+          .catch(() => undefined);
+      }
 
       if (!inherited) {
         const opened = await ctx
