@@ -1,5 +1,6 @@
 import { Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
+import { Compare } from './pages/Compare';
 import { GraphEditor } from './pages/GraphEditor';
 import { Home } from './pages/Home';
 import { RunDetail } from './pages/RunDetail';
@@ -10,6 +11,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/runs/:id" element={<RunDetail />} />
+        <Route path="/compare" element={<Compare />} />
         <Route path="/graphs" element={<GraphEditor />} />
         <Route path="/graphs/:id" element={<GraphEditor />} />
       </Routes>

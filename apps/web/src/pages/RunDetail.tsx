@@ -9,6 +9,7 @@ import { ApprovalPanel } from '../components/approvals/ApprovalPanel';
 import { EgressLedger } from '../components/egress/EgressLedger';
 import { GraphCanvas } from '../components/graph/GraphCanvas';
 import { Legend } from '../components/graph/Legend';
+import { CompareLinks } from '../components/runs/CompareLinks';
 import { StepTimeline } from '../components/runs/StepTimeline';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -75,6 +76,10 @@ export function RunDetail() {
         </p>
 
         {run.summary && <p className="mt-2 text-sm text-slate-300">{run.summary}</p>}
+
+        <div className="mt-3">
+          <CompareLinks run={run} />
+        </div>
       </div>
 
       {pending.map((approval) => (
@@ -105,7 +110,7 @@ export function RunDetail() {
           that works for every run, including hand-written playbooks with no
           graph behind them. */}
       <Card title="Steps">
-        <StepTimeline steps={steps} />
+        <StepTimeline steps={steps} run={run} />
       </Card>
 
       <Card title="Egress ledger">

@@ -2,6 +2,7 @@ import type { Step } from '@htn/shared';
 import { NODE_TYPE_ICON } from '@htn/shared';
 import { Badge } from '../ui/Badge';
 import { Spinner } from '../ui/Spinner';
+import { StepOutput } from './StepOutput';
 import { duration, humanStatus, STEP_STATUS_TONE } from '../../lib/format';
 
 /**
@@ -60,9 +61,7 @@ export function StepRow({ step }: { step: Step }) {
         {step.error && <p className="mt-1 text-xs text-rose-400">{step.error.message}</p>}
 
         {step.output !== undefined && step.status === 'succeeded' && (
-          <pre className="mt-1 max-h-24 overflow-auto rounded bg-slate-950/60 px-2 py-1 text-[11px] leading-relaxed text-slate-500">
-            {JSON.stringify(step.output, null, 1)}
-          </pre>
+          <StepOutput kind={step.kind} output={step.output} />
         )}
       </div>
     </div>

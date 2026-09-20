@@ -28,7 +28,7 @@
  */
 
 import type { AgentGraph, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
-import type { PlaybookContext, PlaybookOutcome } from '../playbooks/types.js';
+import type { PlaybookContext, PlaybookOutcome, RedactionOutput } from '../playbooks/types.js';
 import { resolveRefs, type RefScope } from './refs.js';
 import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
 
@@ -216,22 +216,36 @@ async function runRedact(
   const cfg = resolveRefs(node.config, scope);
   const text = typeof cfg.text === 'string' ? cfg.text : '';
 
-  const redaction = await ctx.step(
+  // The step callback's return value is what actually gets PERSISTED as
+  // Step.output (see ctx.step's contract) -- so it has to be the curated,
+  // safe-to-store shape directly, the same pattern runFetch uses. Returning
+  // ctx.redact()'s raw RedactionOutput here and building a separate curated
+  // `output` object below (as this used to do) meant that second object was
+  // silently never applied to anything: `spans` never reached the Step, so
+  // an assertion path like "nodes.redact.spans" could never resolve. `full`
+  // captures the raw result too, for `value` below -- downstream {{refs}}
+  // like {{redact.redacted}} need it, and it must never itself be persisted.
+  let full: RedactionOutput;
+  const output = await ctx.step(
     { label: node.label, kind: 'redact', nodeId: node.id },
-    async () => ctx.redact(text, cfg.field),
+    async () => {
+      full = await ctx.redact(text, cfg.field);
+      return { spans: full.redactions.length, hadSensitive: full.hadSensitive };
+    },
   );
+  const redaction = full!;
 
   return {
-    // `redacted` is placeholders-only and therefore safe, but keep it out of the
-    // step output anyway: outputs are persisted, and there is no reason to store
-    // a second copy of the document.
+    // `redacted` is placeholders-only and therefore safe, but kept out of the
+    // step output anyway: outputs are persisted, and there is no reason to
+    // store a second copy of the document.
     value: {
       redacted: redaction.redacted,
       redactions: redaction.redactions,
       hadSensitive: redaction.hadSensitive,
       spans: redaction.redactions.length,
     },
-    output: { spans: redaction.redactions.length, hadSensitive: redaction.hadSensitive },
+    output,
   };
 }
 

@@ -19,6 +19,8 @@ export const listRunsQuerySchema = z.object({
     .enum(['pending', 'running', 'awaiting_approval', 'succeeded', 'failed', 'cancelled'])
     .optional(),
   kind: z.string().optional(),
+  /** Every run launched against this graph -- the "history of this task" query. */
+  graphId: z.string().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 export type ListRunsQuery = z.infer<typeof listRunsQuerySchema>;

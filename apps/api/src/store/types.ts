@@ -28,6 +28,8 @@ import type {
 export interface ListRunsFilter {
   status?: RunStatus;
   kind?: string;
+  /** Every run launched against this graph -- the "history of this task" query. */
+  graphId?: string;
   limit?: number;
 }
 

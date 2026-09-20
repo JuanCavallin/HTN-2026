@@ -12,6 +12,7 @@ import {
   createRun,
   getRunDetail,
   listRuns,
+  saveRunAsGraph,
 } from '../services/runs.service.js';
 import { listEgress } from '../services/egress.service.js';
 import { HttpError, param, valid, validate } from './middleware/validate.js';
@@ -46,6 +47,13 @@ runsRouter.post('/runs/:id/cancel', async (req, res) => {
   const run = await cancelRun(param(req, 'id'));
   if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
   res.json({ run });
+});
+
+/** "Save as a new task" -- fork the graph THIS run executed into a new document. */
+runsRouter.post('/runs/:id/save-as-graph', async (req, res) => {
+  const graph = await saveRunAsGraph(param(req, 'id'));
+  if (!graph) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.status(201).json({ graph });
 });
 
 runsRouter.get('/runs/:id/egress', async (req, res) => {

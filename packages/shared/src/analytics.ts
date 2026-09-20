@@ -19,6 +19,7 @@
 
 import type { Approval, EgressEvent, Run, Step, StepStatus } from './domain.js';
 import type { ModelTier } from './providers.js';
+import type { GraphAssertion } from './schemas/graph.js';
 import type { ScheduleDecision } from './scheduling.js';
 
 /* -------------------------------------------------------------------------- */
@@ -292,4 +293,64 @@ export function rollup(input: RollupInput, now: number = Date.now()): RunAnalyti
       egress: egressSummary,
     },
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Assertions                                                                  */
+/* -------------------------------------------------------------------------- */
+
+export interface AssertionResult {
+  id: string;
+  description: string;
+  expected: string;
+  /** null when the path didn't resolve to anything -- a missing node, an
+   *  unrun step, or a field the step's output never set. */
+  actual: string | null;
+  passed: boolean;
+}
+
+function walkPath(value: unknown, segments: string[]): unknown {
+  let current = value;
+  for (const segment of segments) {
+    if (current === null || typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+/**
+ * Checks a graph's `assertions` against the STEPS a run actually produced --
+ * the same persisted `Step.output` the timeline and the egress ledger already
+ * read, not a second copy of interpreter internals. `path` is
+ * "nodes.<nodeId>.<field...>" (see schemas/graph.ts's graphAssertionSchema);
+ * the node is found by `Step.nodeId`, the rest of the path walks into that
+ * step's `output`.
+ *
+ * A swarm's parent and every worker share one `nodeId` -- if an assertion
+ * targets one, the FIRST step for that node id is used (the parent, since it
+ * is always appended before its children), which is fine for the deterministic
+ * per-node fields (a judge's `choice`, a redact node's `spans`) this is meant
+ * to check.
+ */
+export function evaluateAssertions(assertions: GraphAssertion[], steps: Step[]): AssertionResult[] {
+  const byNode = new Map<string, Step>();
+  for (const step of steps) {
+    if (step.nodeId !== undefined && !byNode.has(step.nodeId)) byNode.set(step.nodeId, step);
+  }
+
+  return assertions.map((assertion) => {
+    const segments = assertion.path.split('.');
+    const [root, nodeId, ...rest] = segments;
+    const step = root === 'nodes' && nodeId !== undefined ? byNode.get(nodeId) : undefined;
+    const resolved = step ? walkPath(step.output, rest) : undefined;
+    const actual = resolved === undefined ? null : String(resolved);
+
+    return {
+      id: assertion.id,
+      description: assertion.description,
+      expected: assertion.expected,
+      actual,
+      passed: actual !== null && actual === assertion.expected,
+    };
+  });
 }

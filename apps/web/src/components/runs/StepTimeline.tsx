@@ -1,4 +1,4 @@
-import type { Step } from '@htn/shared';
+import { isTerminal, type Run, type Step } from '@htn/shared';
 import { StepRow } from './StepRow';
 import { SwarmGrid } from './SwarmGrid';
 
@@ -6,12 +6,22 @@ import { SwarmGrid } from './SwarmGrid';
  * Renders top-level steps in sequence. A step that has children is a swarm, and
  * gets a SwarmGrid underneath it — no special step type, just parentStepId.
  */
-export function StepTimeline({ steps }: { steps: Step[] }) {
+export function StepTimeline({ steps, run }: { steps: Step[]; run?: Run }) {
   const roots = steps.filter((s) => s.parentStepId === null);
   const childrenOf = (id: string) => steps.filter((s) => s.parentStepId === id);
 
   if (roots.length === 0) {
-    return <p className="text-sm text-slate-500">Waiting for the first step…</p>;
+    // A terminal run with zero steps didn't run with no steps -- its step
+    // history just isn't available (e.g. the server restarted since it ran;
+    // steps are not durable the way the run row itself is). "Waiting for the
+    // first step" would be actively misleading here: nothing is coming.
+    return (
+      <p className="text-sm text-slate-500">
+        {run && isTerminal(run.status)
+          ? 'Step history unavailable for this run.'
+          : 'Waiting for the first step…'}
+      </p>
+    );
   }
 
   return (

@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { isTerminal } from '@htn/shared';
 import { api } from '../lib/api';
 import { useGraphs } from '../hooks/useGraph';
 import { usePlaybooks, useRuns } from '../hooks/useRuns';
+import { ActiveRunCard } from '../components/runs/ActiveRunCard';
 import { RunList } from '../components/runs/RunList';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -48,6 +50,13 @@ export function Home() {
   const [error, setError] = useState<string | null>(null);
 
   const selected = options.find((o) => o.key === selectedKey) ?? options[0];
+
+  // Split once here rather than filtering inside two different components --
+  // a run that just went terminal moves from the live grid to the plain list
+  // on the very next `useRuns()` refresh (the global /api/stream already
+  // drives that), with no risk of it briefly appearing in both.
+  const activeRuns = runs.filter((run) => !isTerminal(run.status));
+  const pastRuns = runs.filter((run) => isTerminal(run.status));
 
   const launch = async () => {
     if (!selected) return;
@@ -105,9 +114,21 @@ export function Home() {
         </p>
       </Card>
 
-      <Card title="Runs">
-        <RunList runs={runs} loading={loading} />
-      </Card>
+      {activeRuns.length > 0 && (
+        <Card title={'Active now (' + activeRuns.length + ')'}>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {activeRuns.map((run) => (
+              <ActiveRunCard key={run.id} runId={run.id} />
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {(pastRuns.length > 0 || activeRuns.length === 0) && (
+        <Card title="Runs">
+          <RunList runs={pastRuns} loading={loading} />
+        </Card>
+      )}
     </div>
   );
 }

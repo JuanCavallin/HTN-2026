@@ -39,6 +39,15 @@ export interface Run {
   status: RunStatus;
   /** Shape is validated per-kind by a zod schema in `schemas/playbooks`. */
   input: Json;
+  /**
+   * The graph this run is "for", hoisted out of the per-kind `input` blob so
+   * it is a queryable column rather than something only a `kind === 'graph'`
+   * check can find. Set for both `graph` runs and `baseline` runs launched
+   * against the same task, which is what lets "compare to the previous run"
+   * and "every attempt at this task" work across both. Undefined for a
+   * hand-written playbook like `demo` that has no graph behind it at all.
+   */
+  graphId?: string;
   /** One-line human result, rendered on the run card. */
   summary?: string;
   /** Per-kind payload. The UI picks a result renderer by `kind`. */
