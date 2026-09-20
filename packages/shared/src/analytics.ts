@@ -19,6 +19,7 @@
 
 import type { Approval, EgressEvent, Run, Step, StepStatus } from './domain.js';
 import type { ModelTier } from './providers.js';
+import type { GraphAssertion } from './schemas/graph.js';
 import type { ScheduleDecision } from './scheduling.js';
 
 /* -------------------------------------------------------------------------- */
@@ -90,6 +91,17 @@ export interface NodeMetrics {
   /** Self-reported by the agent runtime after the fact. */
   toolCallsActual?: number;
   modelTier?: ModelTier;
+  /** Distinct tool names Jev exposed to the harness for this node (union across every ScheduleDecision on it). */
+  exposedToolNames?: string[];
+  /** Distinct tool names the harness self-reported actually calling (post-hoc audit; see AgentTaskResult.toolCalls). */
+  calledToolNames?: string[];
+  /**
+   * `calledToolNames` minus `exposedToolNames` -- tools the harness touched
+   * that were never suggested. Tool restriction on the harness is BEST-EFFORT,
+   * not enforced (see hermes/live.ts), so this is an expected, sometimes-real
+   * signal to surface, not evidence of a bug.
+   */
+  toolDivergence?: string[];
 }
 
 export interface RunTotals {
@@ -195,6 +207,28 @@ function toolCallCount(steps: Step[]): number | undefined {
   return total;
 }
 
+/**
+ * Distinct tool names the runtime self-reported calling, from every step's
+ * `output.toolCalls` (see AgentTaskResult.toolCalls -- the same field
+ * `toolCallCount` above counts, this collects the names instead).
+ */
+function toolCallNames(steps: Step[]): string[] {
+  const names = new Set<string>();
+  for (const step of steps) {
+    const output = step.output;
+    if (!output || typeof output !== 'object' || Array.isArray(output)) continue;
+    const calls = (output as Record<string, unknown>).toolCalls;
+    if (!Array.isArray(calls)) continue;
+    for (const call of calls) {
+      if (call && typeof call === 'object' && !Array.isArray(call)) {
+        const tool = (call as Record<string, unknown>).tool;
+        if (typeof tool === 'string') names.add(tool);
+      }
+    }
+  }
+  return [...names];
+}
+
 function metricsFor(
   nodeId: string,
   steps: Step[],
@@ -208,6 +242,9 @@ function metricsFor(
 
   const toolsAvailable = mine.reduce((sum, d) => sum + d.availableTools.length, 0);
   const toolsExposed = mine.reduce((sum, d) => sum + d.exposedTools.length, 0);
+  const exposedToolNames = [...new Set(mine.flatMap((d) => d.exposedTools))];
+  const calledToolNames = toolCallNames(steps);
+  const toolDivergence = calledToolNames.filter((name) => !exposedToolNames.includes(name));
 
   return {
     nodeId,
@@ -227,6 +264,9 @@ function metricsFor(
     toolsExposed: mine.length > 0 ? toolsExposed : undefined,
     toolCallsActual: toolCallCount(steps),
     modelTier: mine[0]?.modelTier,
+    exposedToolNames: mine.length > 0 ? exposedToolNames : undefined,
+    calledToolNames: calledToolNames.length > 0 ? calledToolNames : undefined,
+    toolDivergence: toolDivergence.length > 0 ? toolDivergence : undefined,
   };
 }
 
@@ -292,4 +332,64 @@ export function rollup(input: RollupInput, now: number = Date.now()): RunAnalyti
       egress: egressSummary,
     },
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Assertions                                                                  */
+/* -------------------------------------------------------------------------- */
+
+export interface AssertionResult {
+  id: string;
+  description: string;
+  expected: string;
+  /** null when the path didn't resolve to anything -- a missing node, an
+   *  unrun step, or a field the step's output never set. */
+  actual: string | null;
+  passed: boolean;
+}
+
+function walkPath(value: unknown, segments: string[]): unknown {
+  let current = value;
+  for (const segment of segments) {
+    if (current === null || typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+/**
+ * Checks a graph's `assertions` against the STEPS a run actually produced --
+ * the same persisted `Step.output` the timeline and the egress ledger already
+ * read, not a second copy of interpreter internals. `path` is
+ * "nodes.<nodeId>.<field...>" (see schemas/graph.ts's graphAssertionSchema);
+ * the node is found by `Step.nodeId`, the rest of the path walks into that
+ * step's `output`.
+ *
+ * A swarm's parent and every worker share one `nodeId` -- if an assertion
+ * targets one, the FIRST step for that node id is used (the parent, since it
+ * is always appended before its children), which is fine for the deterministic
+ * per-node fields (a judge's `choice`, a redact node's `spans`) this is meant
+ * to check.
+ */
+export function evaluateAssertions(assertions: GraphAssertion[], steps: Step[]): AssertionResult[] {
+  const byNode = new Map<string, Step>();
+  for (const step of steps) {
+    if (step.nodeId !== undefined && !byNode.has(step.nodeId)) byNode.set(step.nodeId, step);
+  }
+
+  return assertions.map((assertion) => {
+    const segments = assertion.path.split('.');
+    const [root, nodeId, ...rest] = segments;
+    const step = root === 'nodes' && nodeId !== undefined ? byNode.get(nodeId) : undefined;
+    const resolved = step ? walkPath(step.output, rest) : undefined;
+    const actual = resolved === undefined ? null : String(resolved);
+
+    return {
+      id: assertion.id,
+      description: assertion.description,
+      expected: assertion.expected,
+      actual,
+      passed: actual !== null && actual === assertion.expected,
+    };
+  });
 }

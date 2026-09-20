@@ -13,8 +13,13 @@ import { demoInputSchema, type DemoInput } from '@htn/shared';
 import { successes } from '../swarm.js';
 import { definePlaybook } from './types.js';
 
-/** A fake case file. The SIN is a well-known test value and passes the Luhn check. */
-function caseFile(target: string, includeSensitive: boolean): string {
+/**
+ * A fake case file. The SIN is a well-known test value and passes the Luhn
+ * check. Exported so baseline.playbook.ts can hand the naive single-call
+ * comparison the EXACT same task text this playbook and graph_demo use --
+ * an apples-to-apples comparison needs the same input, not a similar one.
+ */
+export function caseFile(target: string, includeSensitive: boolean): string {
   const sensitive = includeSensitive
     ? 'Applicant SIN 046 454 286, contact avery.chen@example.edu, phone 519-555-0142.'
     : 'Applicant contact withheld.';

@@ -6,6 +6,7 @@
  */
 
 import type { Playbook } from './types.js';
+import { baselinePlaybook } from './baseline.playbook.js';
 import { demoPlaybook } from './demo.playbook.js';
 import { graphPlaybook } from './graph.playbook.js';
 
@@ -14,6 +15,7 @@ import { graphPlaybook } from './graph.playbook.js';
 const PLAYBOOKS: Playbook<never>[] = [
   demoPlaybook as unknown as Playbook<never>,
   graphPlaybook as unknown as Playbook<never>,
+  baselinePlaybook as unknown as Playbook<never>,
 ];
 
 const byKind = new Map<string, Playbook<never>>(PLAYBOOKS.map((p) => [p.kind, p]));

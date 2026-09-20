@@ -15,7 +15,7 @@
  * stuck tool call was genuinely cancelled and confirmed via Hermes's own
  * "Cancelled session" log line. See hermes-tester/ for that standalone proof.
  *
- * TWO HONEST LIMITS, DO NOT PAPER OVER THESE:
+ * THREE HONEST LIMITS, DO NOT PAPER OVER THESE:
  *
  *   1. Tool restriction is BEST-EFFORT, NOT ENFORCED. `_meta.enabled_toolsets`
  *      below is a documented ACP extension point, but empirically it did NOT
@@ -34,6 +34,21 @@
  *      stated invariant "irreversible tools never enter an unattended
  *      harness allowlist" — denying by default is the safe placeholder.
  *      Fixing this is the next real step, not a nice-to-have.
+ *
+ *   3. NO BROWSER. Measured on this install: every `check_browser_*` gate in
+ *      Hermes's own tool registry returns False, because the `agent-browser`
+ *      CLI is not installed. Hermes's browserbase plugin loads and our
+ *      BROWSERBASE_* credentials DO reach this subprocess (spawn inherits
+ *      process.env), but tools/browser_tool_install.py raises FileNotFoundError
+ *      on the CLI lookup and bails BEFORE it ever checks those credentials —
+ *      so credentials alone cannot switch the browser on. What Hermes does
+ *      have is `web_search` / `web_extract`, i.e. text fetch, no real page.
+ *      A goal that needs a live page (prices, seat availability, anything
+ *      behind interaction) therefore cannot be satisfied here, and the agent
+ *      will spend its whole budget approximating it via search — 21 searches
+ *      over 196s, observed. Route real browser work through OUR browser tool
+ *      family (core/tools/browser.ts, backed by providers/browserbase), which
+ *      is gated and ledgered; do not expect this harness to do it.
  *
  * `startTask`/`pollTask` bridge ACP's session+event model onto this
  * interface's start/poll/cancel shape: startTask opens a session and returns
@@ -57,6 +72,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 import type { AgentRuntimeAdapter, ProviderErrorCode, ProviderResult } from '@htn/shared';
@@ -72,6 +88,56 @@ function preview(text: string, n = 100): string {
   return flat.length > n ? flat.slice(0, n) + '…' : flat;
 }
 
+/**
+ * One tool call as the harness reported it.
+ *
+ * `status` and `result` are the load-bearing additions. Recording only the
+ * TITLE (as this did) meant a tool call that failed and one that succeeded
+ * were indistinguishable in the ledger and the UI -- observed live, two
+ * `browser_exec` calls both showed as plain tool calls while each actually
+ * returned the same 1457-character payload, and there was no way to tell from
+ * our side whether that was a result or an error repeated twice.
+ */
+interface HarnessToolCall {
+  tool: string;
+  /** ACP ToolCallStatus: pending | in_progress | completed | failed. */
+  status?: string;
+  /** Short preview of what the tool returned. Truncated -- see RESULT_PREVIEW_CHARS. */
+  result?: string;
+  args?: unknown;
+  at: string;
+}
+
+/** Enough to identify an error or a shape, not enough to bloat a step's output. */
+const RESULT_PREVIEW_CHARS = 400;
+
+/**
+ * Flatten ACP ToolCallContent into a short text preview.
+ *
+ * Only `type: 'content'` text blocks are readable as-is; a diff or a terminal
+ * block is summarised by kind rather than dumped, and anything unrecognised
+ * is named rather than silently dropped -- the same principle as drain()'s
+ * unhandled-update branch.
+ */
+function previewToolContent(content: unknown): string | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  const parts: string[] = [];
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue;
+    const b = block as { type?: string; content?: { type?: string; text?: string } };
+    if (b.type === 'content' && b.content?.type === 'text' && typeof b.content.text === 'string') {
+      parts.push(b.content.text);
+    } else if (typeof b.type === 'string') {
+      parts.push('[' + b.type + ']');
+    }
+  }
+  if (parts.length === 0) return undefined;
+  const joined = parts.join(' ').replace(/\s+/g, ' ').trim();
+  return joined.length > RESULT_PREVIEW_CHARS
+    ? joined.slice(0, RESULT_PREVIEW_CHARS) + '…'
+    : joined;
+}
+
 interface TaskRecord {
   status: 'running' | 'done' | 'failed';
   log: string[];
@@ -79,7 +145,7 @@ interface TaskRecord {
    * Derived from `toolCallsById` after every update — see the dedupe note on
    * that field. This is what pollTask() actually returns.
    */
-  toolCalls: { tool: string; args?: unknown; at: string }[];
+  toolCalls: HarnessToolCall[];
   /**
    * ONE ACP tool call arrives as a `tool_call` (pending, carries a title) plus
    * one or more `tool_call_update`s (status only, no title -- see the ACP SDK
@@ -90,7 +156,7 @@ interface TaskRecord {
    * different tool calls -- which is exactly the duplicate pattern a real
    * ledger showed: every titled call followed by an untitled twin.
    */
-  toolCallsById: Map<string, { tool: string; at: string }>;
+  toolCallsById: Map<string, HarnessToolCall>;
   result?: unknown;
   error?: string;
   session: Awaited<ReturnType<acp.SessionBuilder['start']>>;
@@ -297,13 +363,30 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           // the raw id only if we have genuinely never seen a title for it.
           const existing = record.toolCallsById.get(update.toolCallId);
           const tool = update.title ?? existing?.tool ?? update.toolCallId;
-          record.toolCallsById.set(update.toolCallId, { tool, at: new Date().toISOString() });
+          // Each field falls back to what the initiating tool_call already
+          // established: an update that doesn't change a field OMITS it (see
+          // the dedupe note on toolCallsById), so treating "absent" as
+          // "cleared" would wipe the title on every completion event.
+          const status = update.status ?? existing?.status;
+          const result = previewToolContent(update.content) ?? existing?.result;
+
+          record.toolCallsById.set(update.toolCallId, {
+            tool,
+            status: status ?? undefined,
+            result,
+            at: new Date().toISOString(),
+          });
           record.toolCalls = [...record.toolCallsById.values()];
           touch();
           debug(
             tag,
             update.sessionUpdate + ':',
             tool,
+            '[' + (status ?? 'no status') + ']',
+            // The whole point of capturing this: a failing tool is otherwise
+            // invisible from our side. Logged inline so the terminal shows it
+            // in real time, not only after the run finishes.
+            result ? '-> ' + preview(result, 160) : '',
             '(id=' +
               update.toolCallId +
               ', ' +
@@ -363,9 +446,27 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       try {
         const conn = await connect();
 
+        // The SESSION cwd, deliberately NOT cfg.cwd. cfg.cwd is where
+        // hermes-acp is spawned (it must be the checkout `uv run` resolves
+        // against); this is the directory Hermes's own `terminal` tool then
+        // operates in. Pointing the latter at the checkout made the agent
+        // treat the Hermes source tree as its scratch space — measured live,
+        // `ls -la` / `git status` / `find` across it burned the first 30s of a
+        // 39s task. A dedicated, empty workspace gives terminal nothing
+        // misleading to find. See config.ts's HERMES_WORKSPACE.
+        const workspace = cfg.workspace ?? (cfg.cwd as string);
+        try {
+          mkdirSync(workspace, { recursive: true });
+        } catch (err) {
+          // Non-fatal: if the directory can't be made, the session still
+          // starts, just somewhere less tidy. Failing the task over a scratch
+          // dir would be worse than the wandering it prevents.
+          console.warn('[hermes:live] could not create workspace', workspace, (err as Error).message);
+        }
+
         // Best-effort only — see file header limit #1. Never treat this as
         // an enforced boundary.
-        const request = conn.agent.buildSession(cfg.cwd as string).toRequest();
+        const request = conn.agent.buildSession(workspace).toRequest();
         request._meta = { enabled_toolsets: input.tools ?? [] };
         const session = await conn.agent.buildSession(request).start();
 
@@ -440,7 +541,19 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       if (record.status === 'running') {
         return {
           ok: true,
-          data: { status: 'running', log: record.log, lastActivityAt },
+          data: {
+            status: 'running',
+            log: record.log,
+            lastActivityAt,
+            // Report tool calls WHILE RUNNING, not only at the end. These used
+            // to be withheld until the task reached a terminal state, which
+            // meant the one question you actually ask a long-running agent --
+            // "what is it doing right now?" -- had no answer anywhere in the
+            // UI, and a task killed by a timeout took every trace of what it
+            // had invoked to the grave. The data already exists on the record
+            // from the first update; there was never a reason to hold it back.
+            toolCalls: record.toolCalls,
+          },
           meta: meta('pollTask', started, 'hermes-acp://local'),
         };
       }

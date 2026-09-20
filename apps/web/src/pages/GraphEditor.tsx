@@ -75,13 +75,35 @@ export function GraphEditor() {
     setConversation(null);
   }, [id]);
 
+  const DEMO_TARGET = 'ACME-2026-TERM-FEES';
+
   const launch = async () => {
     if (!graph) return;
     setLaunching(true);
     setLaunchError(null);
     try {
-      const { run } = await api.runGraph(graph.id, { target: 'ACME-2026-TERM-FEES' });
+      const { run } = await api.runGraph(graph.id, { target: DEMO_TARGET });
       navigate('/runs/' + run.id);
+    } catch (err) {
+      setLaunchError((err as Error).message);
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const launchWithBaseline = async () => {
+    if (!graph) return;
+    setLaunching(true);
+    setLaunchError(null);
+    try {
+      // Both POSTs fire before either is awaited -- genuinely parallel, not
+      // one blocking the other -- so the baseline's latency never adds to
+      // the graph run's, and vice versa.
+      const [{ run: graphRun }, { run: baselineRun }] = await Promise.all([
+        api.runGraph(graph.id, { target: DEMO_TARGET }),
+        api.createRun('baseline', { target: DEMO_TARGET, graphId: graph.id }),
+      ]);
+      navigate('/compare?a=' + graphRun.id + '&b=' + baselineRun.id);
     } catch (err) {
       setLaunchError((err as Error).message);
     } finally {
@@ -234,6 +256,13 @@ export function GraphEditor() {
           )}
           <Button onClick={() => void launch()} disabled={launching || !graph}>
             {launching ? 'Starting…' : 'Run graph'}
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void launchWithBaseline()}
+            disabled={launching || !graph}
+          >
+            Run + compare to baseline
           </Button>
         </div>
       </div>

@@ -9,11 +9,14 @@ export function relativeTime(iso: string): string {
   return Math.round(minutes / 60) + 'h ago';
 }
 
+export function msLabel(ms: number): string {
+  return ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(1) + 's';
+}
+
 export function duration(startedAt?: string, endedAt?: string): string {
   if (!startedAt) return '';
   const end = endedAt ? new Date(endedAt).getTime() : Date.now();
-  const ms = end - new Date(startedAt).getTime();
-  return ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+  return msLabel(end - new Date(startedAt).getTime());
 }
 
 export const RUN_STATUS_TONE: Record<RunStatus, 'ok' | 'warn' | 'bad' | 'muted' | 'accent'> = {
