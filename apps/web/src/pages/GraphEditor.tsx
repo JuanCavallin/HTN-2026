@@ -33,7 +33,7 @@ import { Card } from '../components/ui/Card';
 export function GraphEditor() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { graphs, refresh: refreshGraphs } = useGraphs();
+  const { graphs, refresh: refreshGraphs, error: graphListError } = useGraphs();
   const { graph: loaded, refresh: refreshGraph } = useGraph(id ?? undefined);
   const { tools } = useTools();
 
@@ -191,8 +191,8 @@ export function GraphEditor() {
   const selected = graph?.nodes.find((n) => n.id === selectedNodeId);
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="editor-workspace space-y-5">
+      <div className="editor-toolbar flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-semibold text-slate-100">{graph?.name ?? 'New workflow'}</h1>
         {graph && <Badge tone="muted">v{graph.version}</Badge>}
         {graph && <Badge tone="muted">{graph.nodes.length} nodes</Badge>}
@@ -238,6 +238,14 @@ export function GraphEditor() {
         </div>
       </div>
 
+      {graphListError && (
+        <div className="notice editor-offline" role="status">
+          The workflow API is unavailable. Start the backend to load or edit saved workflows.{' '}
+          <button className="text-link" onClick={() => void refreshGraphs()}>
+            Try again
+          </button>
+        </div>
+      )}
       {graph?.description && <p className="text-sm text-slate-400">{graph.description}</p>}
       {launchError && <p className="text-xs text-rose-400">{launchError}</p>}
       {chatBusy && (
@@ -261,7 +269,7 @@ export function GraphEditor() {
         </p>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
+      <div className="editor-layout">
         <ChatPanel
           conversation={conversation}
           graphId={graph?.id}

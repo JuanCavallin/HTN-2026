@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import './workspace.css';
 
 /*
  * Tailwind v4 — theme tokens are declared here, not in a JS config file.
@@ -7,12 +8,28 @@
  */
 
 @theme {
-  --color-ink: #0b0d12;
-  --color-surface: #12151d;
-  --color-raised: #1a1f2b;
-  --color-edge: #2a3140;
-  --color-muted: #8b95a8;
-  --color-accent: #6ea8fe;
+  /* Point Tailwind's theme at the workspace tokens so every page follows the active
+     theme instead of being pinned to the default world. */
+  --color-ink: var(--bg);
+  --color-surface: var(--panel);
+  --color-raised: var(--raised-panel);
+  --color-edge: var(--line);
+  --color-canvas: var(--canvas);
+  --color-muted: var(--secondary);
+  --color-accent: var(--accent);
+  --color-slate-950: #0b0e0d;
+  --color-slate-900: #151b16;
+  --color-slate-800: #273022;
+  --color-slate-700: #3c4635;
+  --color-slate-600: #a0ad95;
+  --color-slate-500: #a9b69e;
+  --color-slate-400: #b9c5b0;
+  --color-slate-300: #cbd7bf;
+  --color-slate-200: #dce6d2;
+  --color-slate-100: #e9eee7;
+  --color-sky-500: #c0d49e;
+  --color-sky-400: #d0dfb5;
+  --color-sky-300: #dce9c6;
   --color-ok: #4ade80;
   --color-warn: #fbbf24;
   --color-bad: #f87171;
@@ -25,8 +42,8 @@ body,
 }
 
 body {
-  background: var(--color-ink);
-  color: #e6e9f0;
+  background: var(--bg);
+  color: var(--text);
   font-family:
     ui-sans-serif,
     system-ui,

@@ -1,7 +1,7 @@
 # Tool registry handoff — Person 3 (3A, registry + MCP)
 
-`implementation_plan.md` M1 assigns you: *"Build tool registry with 50+ real/simulated tools;
-implement common tool interface and read/write classification."*
+`implementation_plan.md` M1 assigns you: _"Build tool registry with 50+ real/simulated tools;
+implement common tool interface and read/write classification."_
 
 The graph interpreter now depends on the second half of that sentence, and is currently
 standing in for it with a hardcoded table. This document is the contract it needs and, more
@@ -41,17 +41,17 @@ One field on the catalog entry. That is the whole ask.
 ```ts
 // packages/shared/src/providers.ts  —  ToolboxAdapter.listTools
 export interface ToolCatalogEntry {
-  name: string;          // exists today
-  description: string;   // exists today
+  name: string; // exists today
+  description: string; // exists today
 
   /** NEW. What calling this does, in core/risk.ts's vocabulary. */
-  actionKind: string;    // 'read_page' | 'send_email' | 'submit_form' | ...
+  actionKind: string; // 'read_page' | 'send_email' | 'submit_form' | ...
 
   /** NEW, optional. Overrides the kind→reversibility inference when you know better. */
   reversibility?: 'reversible' | 'recoverable' | 'irreversible';
 
   /** Optional, useful for the editor's tool picker. */
-  group?: string;        // 'browser' | 'mail' | 'sheets' | ...
+  group?: string; // 'browser' | 'mail' | 'sheets' | ...
 }
 ```
 
@@ -72,40 +72,48 @@ Two rules:
 Work down this list; the middle entries are the ones that get missed.
 
 ### 3.1 `packages/shared/src/providers.ts` — the type
+
 `ToolboxAdapter.listTools` currently returns `{ name, description }[]` inline. Promote it to a
 named `ToolCatalogEntry` and add the fields above. Additive and optional-where-possible, per the
 file's own editing rule.
 
 ### 3.2 `apps/api/src/providers/composio/index.ts` — the mock
+
 The `TOOLS` array has **4 entries**. This is the one that becomes 50+. It must stay
 **deterministic** — a rehearsed demo has to show the same catalog every time — and it is what
 every mock-mode demo and the smoke test actually reads.
 
 ### 3.3 `apps/api/src/providers/composio/live.ts` — the live adapter
-Must return the *same shape* as the mock, with names already translated into our vocabulary. If
+
+Must return the _same shape_ as the mock, with names already translated into our vocabulary. If
 live and mock disagree on names, graphs authored against mocks break the moment
 `COMPOSIO_MODE=live` — exactly the failure the mock/live split exists to prevent.
 
 ### 3.4 `apps/api/src/core/graph/toolRisk.ts` — **delete this file's table**
+
 Replace `toolRisk()` with a registry lookup. Keep the fail-closed behaviour for a tool that is
 genuinely absent from the catalog; keep `explicit` (a node's own `actionKind`) winning, since a
 graph author who names the kind knows more than the catalog does.
 
 ### 3.5 `apps/api/src/core/risk.ts` — the kind vocabulary
+
 `IRREVERSIBLE_KINDS` and `RECOVERABLE_KINDS` are the allowed values of `actionKind`. Anything
 not in either set is inferred `reversible` and runs unattended. **Every new kind your registry
 emits must be added here in the same change**, or it silently becomes auto-approved.
 
 ### 3.6 `apps/api/src/api/tools.routes.ts` — the endpoint
+
 Serves the catalog to the editor's tool picker. Has a 60s cache; if you add a "reload registry"
 path, invalidate it. The synthetic `runId: 'sys_catalog'` is deliberate — it keeps the catalog
 read in the egress ledger rather than bypassing it.
 
 ### 3.7 `apps/web/src/lib/api.ts` — the client type
+
 `api.tools()` declares the response shape inline. It has to gain the same fields or the editor
 cannot colour a tool by risk.
 
 ### 3.8 `apps/api/src/core/graph/demo.graph.ts` — the seeded graph
+
 Its `candidateTools` (on `notify`) and `availableTools` (on `followup`) name tools that must
 exist in your registry: `sheets.append`, `calendar.create`, `mail.send`, `browser.navigate`,
 `browser.extract`, `web.search`, `docs.read`, `docs.draft`, `forms.submit`. Keep these names or
@@ -113,13 +121,15 @@ update the graph in the same change — a seeded graph that references missing t
 thing anyone sees on the canvas.
 
 ### 3.9 `apps/api/src/core/playbooks/demo.playbook.ts` — a hardcoded array to delete
+
 `CANDIDATE_TOOLS` (~line 99) is a stand-in for your registry and says so in its comment. Once
 the registry exists, this reads from it. **Do not change this file before the registry lands** —
 it is the fallback run that works when graph execution doesn't.
 
 ### 3.10 `apps/api/src/providers/hermes/live.ts` — harness translation
+
 The harness gets tool names via `_meta.enabled_toolsets`. `AgentTaskSpec`'s doc is explicit that
-the candidate list is *not* tied to any one runtime's naming and that the harness adapter does
+the candidate list is _not_ tied to any one runtime's naming and that the harness adapter does
 the translating. If Hermes needs its own names, map them there, not in the registry.
 
 Also read that file's header before you assume tool restriction works: **Hermes does not enforce
@@ -128,6 +138,7 @@ in testing). That is why irreversible tools must never enter an `availableTools`
 first place.
 
 ### 3.11 Tests that assert the current catalog
+
 - `scripts/smoke.mjs` asserts **`4 tools`** and that every entry has a name and description.
 - `apps/api/scripts/graph-schema.check.ts` uses `sheets.append` in its fixtures.
 

@@ -1,0 +1,33 @@
+{
+  "target": "apps/web/src/pages/Workspace.tsx",
+  "scope": "Full frontend redesign, with existing API contracts and workflow editing behavior retained",
+  "mode": "operate",
+  "approval": "User ran a second surface-scope round on 2026-09-20, answered `route-map`, then refined it to a hybrid of Signal Desk and Route Map. Governing goal stated by the user: the graph is the hackathon MVP.",
+  "direction": "Hybrid — Signal Desk's persistent conversation lane and fixed metrics strip, Route Map's path-emphasis graph and selection inspector",
+  "thesis": "The decision graph is the product, not an illustration inside an answer. It grows one step at a time as execution reports, the conversation runs beside it as a narrow lane, and measurement sits on a fixed floor so the graph never has to share its space with numbers.",
+  "ownWorld": "Flat sage-tinted charcoal, with the canvas as the darkest surface in the app so lit nodes and active connectors are the brightest thing on screen. Glow means luminance contrast, never box-shadow bloom. Near-white readable type, pale-sage action and completed states, amber for waiting, tabular measured data, one-and-a-half-pixel SVG icons at a single stroke weight. No gradients, no bloom, no decorative charts, no invented reasoning.",
+  "story": "Connect Hermes, submit a task, watch the planned graph light up node by node — including nodes the runtime created that were never planned — select one to inspect its route and edit it, and intervene before any side effect.",
+  "firstViewport": "Row 0 is a slim header carrying the brand, the breadcrumb and the harness control; navigation folds into a drawer at every width rather than holding a permanent rail. Rows 1-8 are three regions: a 320px conversation lane with its composer anchored at the foot, the live route map as the dominant centre region, and an inspector that opens at the right only on selection. Row 9 is a fixed metrics strip holding status, tokens, estimated cost, elapsed time, step progress and the pause control. At phone width the graph and the conversation become tabs above the metrics strip.",
+  "signatureInteraction": "Selecting a node animates the reflow: the graph collapses from cols 3-11 to 3-8 and the inspector opens at 9-11. The graph itself is the second signature — planned nodes render as dim ghosts with dashed connectors and no measurements, materialize to full contrast as their step reports, and runtime-created nodes enter with emphasis because they were never in the plan. Node identity stays stable across that transition so layout never reshuffles.",
+  "form": "Hybrid of grounded candidates Signal Desk and Route Map; selected by the user after the earlier Run Notebook direction put the graph inside a chat bubble at a fixed 349px. Route Map supplies the path emphasis and interchange markers; Signal Desk supplies the lane and the floor.",
+  "finish": "unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance",
+  "buildPath": "code",
+  "implementationBoundaries": [
+    "No backend or policy changes — this work stays inside apps/web plus one contract document",
+    "No unmarked simulated data",
+    "Live pause and live mid-run editing stay disabled, with the reason stated, until the run API exposes pause/resume; never silently fall back to preview behaviour on a live run",
+    "Mid-run intervention is gated on a single `canInterveneLive` capability flag derived from the API surface",
+    "Whole-message chat replies are not mislabeled as token streaming",
+    "Hermes health is checked only on explicit user action",
+    "Planned graph structure is never presented as proof that an action happened",
+    "Unknown measurements render as an em dash, never as a measured zero"
+  ],
+  "verification": [
+    "TypeScript",
+    "Vite build",
+    "Node tests for preview and trace adapters, including planned/materialized/unplanned states and preview editing",
+    "Batched desktop and mobile browser inspection",
+    "Keyboard and pause/resume/approval/connection/error interactions",
+    "Reduced-motion still freezes the preview clock"
+  ]
+}
