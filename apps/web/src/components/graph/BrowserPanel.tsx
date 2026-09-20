@@ -246,14 +246,12 @@ export function BrowserPanel({
                 {handoff.question}
               </p>
               <p className="mt-1.5 text-[10px] leading-relaxed text-slate-500">
-                Type directly in the page on the left. Nothing you enter passes through this system
-                — it is not read, not logged, and not sent to a model.
+                {canEmbed
+                  ? 'Open the browser, do it there, then come back and confirm.'
+                  : 'Do this in your own browser, then come back and confirm.'}{' '}
+                Nothing you enter passes through this system — it is not read, not logged, and not
+                sent to a model.
               </p>
-              {!canEmbed && (
-                <p className="mt-1.5 text-[10px] leading-relaxed text-amber-400/90">
-                  No interactive view on this backend. Do it in your own browser, then confirm.
-                </p>
-              )}
               <div className="mt-2.5">
                 <Button onClick={() => onResume?.(handoff.id)} disabled={busy}>
                   Done — continue

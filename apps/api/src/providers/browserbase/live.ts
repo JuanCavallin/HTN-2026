@@ -319,17 +319,63 @@ async function bbGet<T>(apiKey: string, path: string): Promise<T | null> {
  * MUST BE CALLED WHILE THE SESSION IS RUNNING. `/debug` returns 410 Gone once a
  * session stops, so there is no second chance at this after the fact.
  */
+interface DebugPage {
+  id?: string;
+  url?: string;
+  debuggerFullscreenUrl?: string;
+}
+
+interface DebugResponse {
+  debuggerFullscreenUrl?: string;
+  pages?: DebugPage[];
+}
+
+/** Trailing-slash-insensitive, so "https://x.com" matches "https://x.com/". */
+function sameUrl(a: string, b: string): boolean {
+  const trim = (u: string) => u.replace(/\/+$/, '').toLowerCase();
+  return trim(a) === trim(b);
+}
+
+/**
+ * WHICH TAB the live view should show.
+ *
+ * The top-level `debuggerFullscreenUrl` points at the session's FIRST page,
+ * and that is the wrong one whenever a start URL was given: openSession calls
+ * `context.newPage(startUrl)`, which leaves page 0 sitting on about:blank and
+ * puts the real page second. Measured on a live session -- page 0
+ * `about:blank`, page 1 `https://example.com/` -- so someone following the
+ * handoff link landed on a blank tab and had no idea why.
+ *
+ * Preference order: the page matching the start URL, then the last page that
+ * is not blank, then whatever the top level said. The last fallback means this
+ * can only improve on the old behaviour, never do worse than it.
+ */
+function pickPage(debug: DebugResponse, startUrl?: string): string | undefined {
+  const pages = (debug.pages ?? []).filter((page) => page.debuggerFullscreenUrl);
+
+  if (startUrl) {
+    const exact = pages.find((page) => page.url && sameUrl(page.url, startUrl));
+    if (exact) return exact.debuggerFullscreenUrl;
+  }
+
+  const real = [...pages].reverse().find((page) => page.url && page.url !== 'about:blank');
+  return real?.debuggerFullscreenUrl ?? debug.debuggerFullscreenUrl;
+}
+
 async function liveViewUrl(
   apiKey: string,
   sessionId: string,
+  startUrl?: string,
 ): Promise<{ url?: string; region?: string }> {
   const [debug, session] = await Promise.all([
-    bbGet<{ debuggerFullscreenUrl?: string }>(apiKey, '/sessions/' + sessionId + '/debug'),
+    bbGet<DebugResponse>(apiKey, '/sessions/' + sessionId + '/debug'),
     bbGet<{ region?: string }>(apiKey, '/sessions/' + sessionId),
   ]);
 
+  const url = debug ? pickPage(debug, startUrl) : undefined;
+
   return {
-    ...(debug?.debuggerFullscreenUrl ? { url: debug.debuggerFullscreenUrl } : {}),
+    ...(url ? { url } : {}),
     ...(session?.region ? { region: session.region } : {}),
   };
 }
@@ -532,7 +578,9 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         const remoteSessionId = browser.sessionId;
         // Capture the live-view URL NOW. sessions.debug() returns 410 Gone once
         // the session stops, so there is no second chance at this.
-        const view = remoteSessionId ? await liveViewUrl(cfg.apiKey, remoteSessionId) : {};
+        const view = remoteSessionId
+          ? await liveViewUrl(cfg.apiKey, remoteSessionId, input.startUrl)
+          : {};
 
         const destination = view.region
           ? 'https://connect.' + view.region + '.browserbase.com'

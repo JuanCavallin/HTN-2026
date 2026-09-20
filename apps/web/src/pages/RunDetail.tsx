@@ -6,6 +6,7 @@ import { useRunGraph } from '../hooks/useGraph';
 import { api } from '../lib/api';
 import { humanStatus, relativeTime, RUN_STATUS_TONE } from '../lib/format';
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel';
+import { liveViewUrlFor } from '../lib/handoff';
 import { EgressLedger } from '../components/egress/EgressLedger';
 import { GraphCanvas } from '../components/graph/GraphCanvas';
 import { Legend } from '../components/graph/Legend';
@@ -174,9 +175,16 @@ export function RunDetail() {
         </div>
       </div>
 
-      {pending.map((approval) => (
-        <ApprovalPanel key={approval.id} approval={approval} />
-      ))}
+      {pending.map((approval) => {
+        const url = liveViewUrlFor(approval, browserSessions);
+        return (
+          <ApprovalPanel
+            key={approval.id}
+            approval={approval}
+            {...(url ? { liveViewUrl: url } : {})}
+          />
+        );
+      })}
 
       {graph && (
         <Card

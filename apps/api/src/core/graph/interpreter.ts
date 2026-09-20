@@ -963,7 +963,13 @@ async function runHandoff(
         // Irreversible so the gate can never classify this away. A handoff is
         // an explicit author decision, exactly like an `approval` node.
         reversibility: 'irreversible',
+        // The PAYLOAD is what reaches the UI: the orchestrator stores
+        // `action.payload ?? action` on the approval, so anything only on the
+        // ProposedAction wrapper (its own `kind`) is dropped. The discriminator
+        // has to be in here, or the approval panel cannot tell a handoff --
+        // "you do this part" -- from an ordinary "may the agent do this?".
         payload: {
+          kind: 'human_handoff',
           instruction: cfg.instruction,
           sessionId,
           resumeWhen: cfg.resumeWhen,
