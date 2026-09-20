@@ -63,12 +63,20 @@ export function Icon({
 }
 
 /**
- * The ZEPHYR mark: three staggered currents and a leading head.
+ * The ZEPHYR mark: the supplied Z letterform.
  *
- * It reads as moving air (the name) and as three parallel ranks resolving to one point
- * (the product) at once. Pure geometry — equal stroke weight, no curves, no opacity
- * tricks — so it survives being 22px next to the wordmark, which is where it actually
- * lives. The dot is the run's head and matches the interchange markers on the canvas.
+ * A brand asset the user provided, traced from
+ * `docs/frontend-design/Gemini_Generated_Image_niu0wtniu0wtniu0-removebg-preview.png`
+ * rather than redrawn by eye. The letterform's one idea is that the diagonal is *split*:
+ * an upper stroke hangs off the top arm and stops in mid-air at 85%, a lower stroke starts
+ * in mid-air at 15% and carries into the bottom arm. They are exactly parallel (-0.707
+ * run over rise), the same 9.4-unit width, and never meet — the constant 10.6-unit channel
+ * between them is the mark. So this is two disjoint shapes, not one Z outline.
+ *
+ * The box is 97x100 because the source is that much taller than wide; don't square it off.
+ * Filled geometry, not strokes, so weight scales with the glyph instead of going coarse at
+ * the 22px lockup size. The channel is the first thing to close up — recheck 22px and 38px
+ * after touching any number here.
  */
 export function Mark({ small = false }: { small?: boolean }) {
   return (
@@ -76,17 +84,12 @@ export function Mark({ small = false }: { small?: boolean }) {
       className={small ? 'brand-mark small' : 'brand-mark'}
       width="30"
       height="30"
-      viewBox="0 0 30 30"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.6"
-      strokeLinecap="round"
+      viewBox="0 0 97 100"
+      fill="currentColor"
       aria-hidden="true"
     >
-      <path d="M7 8h16" />
-      <path d="M4 15h19" />
-      <path d="M9 22h14" />
-      <circle cx="26" cy="15" r="2" fill="currentColor" stroke="none" />
+      <path d="M0 0H97L38.74 85H29.62L83.08 7H0Z" />
+      <path d="M67.62 15H58.5L0.24 100H97V93H14.16Z" />
     </svg>
   );
 }
