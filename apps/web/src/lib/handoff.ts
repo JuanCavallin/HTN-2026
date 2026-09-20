@@ -33,16 +33,17 @@ export function isHandoffApproval(approval: Approval): boolean {
 }
 
 /**
- * The interactive browser URL for a handoff approval, or undefined.
+ * The browser session id a handoff approval is parked on, or undefined.
  *
- * Undefined is a NORMAL outcome, not a failure: local and mocked browsers have
- * no viewable session, and Browserbase's debug URL is gone once the session
- * stops. Callers must render something sensible for it rather than a dead link.
+ * DELIBERATELY RETURNS AN ID, NOT A URL. The viewer URL is signed with a
+ * short-lived token and must be minted when the person actually clicks --
+ * see api.browserLiveView. Returning a URL from here is what produced a blank,
+ * uninteractive page in the first place.
  *
- * A CLOSED session returns undefined too. The URL 410s from the moment the
- * session ends, so offering it would hand someone a link to an error page.
+ * A CLOSED session returns undefined: its viewer cannot be re-minted, so
+ * offering the control would hand someone a dead end.
  */
-export function liveViewUrlFor(
+export function handoffSessionIdFor(
   approval: Approval,
   sessions: readonly SessionLike[],
 ): string | undefined {
@@ -50,6 +51,8 @@ export function liveViewUrlFor(
   if (typeof sessionId !== 'string') return undefined;
 
   const session = sessions.find((candidate) => candidate.sessionId === sessionId);
-  if (!session || session.closedAt) return undefined;
-  return session.liveViewUrl;
+  // A session we never saw announced is still worth offering: the stream may
+  // have been trimmed, and the server re-checks liveness when minting.
+  if (session?.closedAt) return undefined;
+  return sessionId;
 }

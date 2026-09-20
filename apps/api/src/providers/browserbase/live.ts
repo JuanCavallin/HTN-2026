@@ -92,6 +92,8 @@ interface Handle {
   stagehand?: Stagehand;
   /** The real Browserbase session id, for the live-view URL. */
   remoteSessionId?: string;
+  /** Where the session was pointed, so liveView can re-pick the right tab. */
+  startUrl?: string;
   /** Region-specific where known; approvals bind to this. */
   destination: string;
   snapshot?: Snapshot;
@@ -594,6 +596,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           stagehand,
           destination,
           ...(remoteSessionId ? { remoteSessionId } : {}),
+          ...(input.startUrl ? { startUrl: input.startUrl } : {}),
         });
 
         return {
@@ -844,6 +847,42 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
       } catch (err) {
         return failure<BrowserPerformResult>('perform', started, err, handle.destination);
       }
+    },
+
+    /**
+     * A FRESH viewer URL, minted now.
+     *
+     * The URL captured at openSession is signed with a short-lived token, so it
+     * is already dead by the time a person clicks a handoff link. Re-fetching
+     * per request is the whole point of this method -- do not cache what it
+     * returns. Verified: a stale URL renders "WebSocket disconnected" and
+     * accepts no input; a freshly minted one for the SAME session renders the
+     * live page and is interactive.
+     */
+    async liveView(sessionId, _ctx) {
+      const started = Date.now();
+      const handle = sessions.get(sessionId);
+      // No key means no REST call, so no viewer -- same normal, non-error state
+      // as a session we do not hold.
+      if (!handle?.remoteSessionId || !cfg.apiKey) {
+        // Not an error: a session we do not hold, or one with no remote id,
+        // simply has no viewer. The caller renders that state.
+        return {
+          ok: true as const,
+          data: { interactive: false },
+          meta: meta('liveView', started, handle?.destination ?? null),
+        };
+      }
+
+      const view = await liveViewUrl(cfg.apiKey, handle.remoteSessionId, handle.startUrl);
+      return {
+        ok: true as const,
+        data: {
+          ...(view.url ? { liveViewUrl: view.url } : {}),
+          interactive: Boolean(view.url),
+        },
+        meta: meta('liveView', started, handle.destination),
+      };
     },
 
     async closeSession(sessionId, _ctx) {

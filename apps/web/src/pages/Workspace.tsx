@@ -19,7 +19,7 @@ import { useHarness } from '../components/layout/AppShell';
 import { DecisionCanvas } from '../components/graph/DecisionCanvas';
 import { MetricsStrip, RunInspector, TaskComposer } from '../components/chat/WorkspacePanels';
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel';
-import { liveViewUrlFor } from '../lib/handoff';
+import { handoffSessionIdFor } from '../lib/handoff';
 import { EgressLedger } from '../components/egress/EgressLedger';
 import { Icon, Mark } from '../components/ui/Icon';
 
@@ -703,12 +703,12 @@ export function LiveRunWorkspace() {
                 // A handoff approval carries the id of a browser session the
                 // run is holding open. Passing its URL through is what turns
                 // "approve this" into "here is the browser, go and do it".
-                const url = liveViewUrlFor(approval, view.browserSessions);
+                const sessionId = handoffSessionIdFor(approval, view.browserSessions);
                 return (
                   <ApprovalPanel
                     key={approval.id}
                     approval={approval}
-                    {...(url ? { liveViewUrl: url } : {})}
+                    {...(sessionId ? { handoffSessionId: sessionId } : {})}
                   />
                 );
               })}

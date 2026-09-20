@@ -24,18 +24,48 @@ import { Button } from '../ui/Button';
  */
 export function ApprovalPanel({
   approval,
-  liveViewUrl,
+  handoffSessionId,
 }: {
   approval: Approval;
   /**
-   * The interactive browser for a handoff, when the backend produced one.
-   * Undefined is normal (local and mocked browsers have no viewable session),
-   * and the copy below says so rather than showing a dead control.
+   * The browser session a handoff is parked on, when there is one.
+   *
+   * DELIBERATELY NOT A URL. Browserbase signs its viewer with a short-lived
+   * token, so a URL handed down through props is already stale by the time
+   * anyone clicks it -- it opens a blank page that accepts no input, which is
+   * exactly the bug this replaced. The id is stable; the URL is fetched on
+   * click. Undefined is normal (local and mocked browsers have no viewer).
    */
-  liveViewUrl?: string;
+  handoffSessionId?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+
+  /**
+   * Mint a viewer URL and open it. The window is opened FIRST, synchronously,
+   * because a popup opened inside an await is a popup the browser blocks.
+   */
+  const openLiveView = async () => {
+    setOpening(true);
+    setError(null);
+    const tab = window.open('', '_blank', 'noopener,noreferrer');
+    try {
+      const { liveViewUrl } = await api.browserLiveView(approval.runId, handoffSessionId as string);
+      if (!liveViewUrl) {
+        tab?.close();
+        setError('That browser session is no longer viewable. It may have already closed.');
+        return;
+      }
+      if (tab) tab.location.href = liveViewUrl;
+      else window.open(liveViewUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      tab?.close();
+      setError((err as Error).message);
+    } finally {
+      setOpening(false);
+    }
+  };
 
   // Set by runHandoff's proposedAction. Matching on `kind` rather than on the
   // presence of a URL keeps the handoff wording correct even when no viewable
@@ -80,18 +110,16 @@ export function ApprovalPanel({
 
         <p className="mt-2 text-sm text-slate-100">{approval.question}</p>
 
-        {liveViewUrl ? (
+        {handoffSessionId ? (
           <>
-            <a
-              href={liveViewUrl}
-              target="_blank"
-              // noopener is the one that matters: without it the opened tab gets
-              // a handle on this window through `window.opener`.
-              rel="noopener noreferrer"
-              className="mt-3 inline-flex items-center gap-2 rounded-md bg-sky-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-sky-400"
+            <button
+              type="button"
+              onClick={() => void openLiveView()}
+              disabled={opening}
+              className="mt-3 inline-flex items-center gap-2 rounded-md bg-sky-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-sky-400 disabled:bg-slate-700 disabled:text-slate-500"
             >
-              Open live browser ↗
-            </a>
+              {opening ? 'Opening…' : 'Open live browser ↗'}
+            </button>
             <p className="mt-2 text-xs leading-relaxed text-slate-500">
               Opens in a new tab at full size. The run is holding this session open — do what you
               need to, then come back and confirm.
@@ -99,7 +127,7 @@ export function ApprovalPanel({
           </>
         ) : (
           <p className="mt-2 text-xs leading-relaxed text-amber-400/90">
-            This backend has no viewable session, so there is no link to open. Do this in your own
+            This backend has no viewable session, so there is nothing to open. Do this in your own
             browser, then confirm.
           </p>
         )}

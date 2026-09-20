@@ -189,6 +189,18 @@ export const api = {
   cancelRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/cancel', { method: 'POST' }),
 
   /** Blocks new work; whatever is already running finishes on its own. */
+  /**
+   * A CURRENT viewer URL for a handoff's browser session.
+   *
+   * Fetched WHEN THE PERSON CLICKS, never cached: Browserbase's debug URL is
+   * signed with a short-lived token, so the one captured when the session
+   * opened renders a blank, uninteractive page by the time anyone follows it.
+   */
+  browserLiveView: (runId: string, sessionId: string) =>
+    request<{ liveViewUrl: string | null; interactive: boolean }>(
+      '/runs/' + runId + '/browser/' + sessionId + '/live-view',
+    ),
+
   pauseRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/pause', { method: 'POST' }),
 
   resumeRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/resume', { method: 'POST' }),

@@ -260,6 +260,23 @@ export interface BrowserAdapter extends ProviderAdapter {
   ): Promise<ProviderResult<T>>;
   closeSession(sessionId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
 
+  /**
+   * Mint a CURRENT viewer URL for a running session.
+   *
+   * MUST BE CALLED WHEN THE VIEWER IS WANTED, not when the session opens.
+   * Browserbase signs its debug URL with a short-lived token: the URL captured
+   * at open time is dead minutes later, and the symptom is a blank page that
+   * accepts no input -- which is exactly what a `handoff` hands a person, since
+   * they click the link long after the session opened.
+   *
+   * Optional: an adapter with no viewable session (local, mocked) omits it, and
+   * callers must treat a missing URL as a normal state rather than an error.
+   */
+  liveView?(
+    sessionId: string,
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<{ liveViewUrl?: string; interactive: boolean }>>;
+
   /** Optional element-table path used by the Jev browser controller. */
   snapshot?(
     input: { sessionId: string; maxElements?: number },
