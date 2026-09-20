@@ -19,6 +19,8 @@
  */
 
 import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { Check, X } from 'lucide-react';
+import { motion } from 'motion/react';
 import {
   executorOf,
   styleOf,
@@ -26,6 +28,7 @@ import {
   type NodeMetrics,
   type StepStatus,
 } from '@htn/shared';
+import { NodeIcon } from './nodeIcons';
 import { EXECUTOR_CLASSES, STATUS_RING } from './palette';
 
 export interface NodeCardData extends Record<string, unknown> {
@@ -86,18 +89,20 @@ export function NodeCard({ data }: NodeProps) {
     <div
       onDoubleClick={() => onOpen?.(node.id)}
       className={
-        'w-56 rounded-lg border px-3 py-2 text-left transition-shadow ' +
+        'w-56 rounded-lg border px-3 py-2 text-left transition-[box-shadow,opacity] duration-300 ' +
         classes.shell +
         ' ' +
         (status ? (STATUS_RING[status] ?? '') : '') +
+        (status === 'running' ? ' beam beam-run' : '') +
+        (status === 'blocked' ? ' beam beam-block' : '') +
         (selected ? ' ring-2 ring-white/60' : '')
       }
     >
       <Handle type="target" position={Position.Top} className="!h-2 !w-2 !border-0 !bg-slate-500" />
 
       <div className="mb-1 flex items-center gap-1.5">
-        <span aria-hidden className="text-sm leading-none">
-          {style.icon}
+        <span className="text-slate-300">
+          <NodeIcon type={node.type} />
         </span>
         <span
           className={
@@ -112,6 +117,25 @@ export function NodeCard({ data }: NodeProps) {
         )}
         {status === 'blocked' && (
           <span className="ml-auto text-[10px] text-amber-300">waiting</span>
+        )}
+        {status === 'succeeded' && (
+          <motion.span
+            initial={{ scale: 0.4, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 18 }}
+            className="ml-auto text-emerald-400"
+          >
+            <Check aria-label="succeeded" className="h-3.5 w-3.5" strokeWidth={3} />
+          </motion.span>
+        )}
+        {status === 'failed' && (
+          <motion.span
+            initial={{ scale: 0.4, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="ml-auto text-rose-400"
+          >
+            <X aria-label="failed" className="h-3.5 w-3.5" strokeWidth={3} />
+          </motion.span>
         )}
         {editable && !status && (
           <button

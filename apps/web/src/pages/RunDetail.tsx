@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { History } from 'lucide-react';
+import { toast } from 'sonner';
 import { isTerminal, rollup } from '@htn/shared';
 import { useRunStream } from '../hooks/useRunStream';
 import { useRunGraph } from '../hooks/useGraph';
@@ -11,10 +13,13 @@ import { GraphCanvas } from '../components/graph/GraphCanvas';
 import { Legend } from '../components/graph/Legend';
 import { CompareLinks } from '../components/runs/CompareLinks';
 import { RunDevProvider } from '../components/runs/RunDevContext';
+import { ReplayBar, replaySteps, replayWindow, useReplay } from '../components/runs/RunReplay';
+import { RunStats } from '../components/runs/RunStats';
 import { StepTimeline } from '../components/runs/StepTimeline';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import { JsonView } from '../components/ui/JsonView';
 import { Spinner } from '../components/ui/Spinner';
 
 export function RunDetail() {
@@ -57,6 +62,41 @@ export function RunDetail() {
     () => (run ? rollup({ run, steps, egress, scheduleDecisions, approvals }) : null),
     [run, steps, egress, scheduleDecisions, approvals],
   );
+
+  // Replay: only for a finished run whose steps carry timestamps.
+  const replayWin = useMemo(() => replayWindow(steps), [steps]);
+  const replay = useReplay(replayWin);
+  const [replaying, setReplaying] = useState(false);
+  const replayable = !!graph && !!run && isTerminal(run.status) && replayWin !== null;
+  const toggleReplay = () => {
+    if (replaying) {
+      setReplaying(false);
+    } else {
+      setReplaying(true);
+      replay.restart();
+    }
+  };
+
+  // Tell the person the moment a run stops for them, even if this tab is in the
+  // background: a toast, plus the tab title so it shows in the tab strip.
+  const toasted = useRef(new Set<string>());
+  const pendingCount = approvals.filter((a) => a.status === 'pending').length;
+  useEffect(() => {
+    for (const approval of approvals) {
+      if (approval.status === 'pending' && !toasted.current.has(approval.id)) {
+        toasted.current.add(approval.id);
+        toast.warning('Approval needed', { description: approval.question, duration: 8000 });
+      }
+    }
+  }, [approvals]);
+  useEffect(() => {
+    if (pendingCount === 0) return;
+    const original = document.title;
+    document.title = '⚠ Approval needed — ' + original;
+    return () => {
+      document.title = original;
+    };
+  }, [pendingCount]);
 
   if (!run) {
     return (
@@ -108,51 +148,83 @@ export function RunDetail() {
         </div>
       </div>
 
+      <RunStats run={run} graph={graph} steps={steps} analytics={analytics} />
+
       {pending.map((approval) => (
         <ApprovalPanel key={approval.id} approval={approval} />
       ))}
 
-      {graph && (
+      {/* Canvas and timeline side by side on wide screens; the canvas stays
+          pinned while the timeline scrolls, so you can watch the graph and
+          read the step you are on without scrolling back up. */}
+      <div className={graph ? 'grid items-start gap-5 xl:grid-cols-[3fr_2fr]' : ''}>
+        {graph && (
+          <div className="xl:sticky xl:top-16">
+            <Card
+              title="Graph"
+              actions={
+                replayable && (
+                  <button
+                    type="button"
+                    onClick={toggleReplay}
+                    aria-pressed={replaying}
+                    className={
+                      'flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ' +
+                      (replaying
+                        ? 'border-sky-500/50 bg-sky-500/15 text-sky-300'
+                        : 'border-slate-700 text-slate-400 hover:text-slate-200')
+                    }
+                  >
+                    <History className="h-3 w-3" />
+                    {replaying ? 'Exit replay' : 'Replay'}
+                  </button>
+                )
+              }
+            >
+              <GraphCanvas
+                graph={graph}
+                steps={
+                  replaying && replayWin ? replaySteps(steps, replayWin, replay.offset) : steps
+                }
+                // Node metrics are end-of-run totals; mid-replay they would
+                // show spend that hasn't "happened" yet.
+                analytics={replaying ? null : analytics}
+                // Leave room under the canvas for the replay bar when it is up.
+                className={
+                  'h-[420px] xl:min-h-[380px] ' +
+                  (replaying ? 'xl:h-[calc(100vh-20rem)]' : 'xl:h-[calc(100vh-15rem)]')
+                }
+              />
+              {replaying && <ReplayBar replay={replay} />}
+              <div className="mt-3">
+                <Legend compact />
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* Kept alongside the canvas on purpose: the timeline is the fallback
+            that works for every run, including hand-written playbooks with no
+            graph behind them. */}
         <Card
-          title="Graph"
+          title="Steps"
           actions={
-            analytics && (
-              <span className="text-xs text-slate-500">
-                {analytics.totals.tokensIn + analytics.totals.tokensOut} tokens ·{' '}
-                {analytics.totals.llmCalls} model calls ·{' '}
-                {analytics.totals.estimatedCostCents.toFixed(4)}¢
-              </span>
-            )
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300">
+              <input
+                type="checkbox"
+                checked={devMode}
+                onChange={(e) => setDevMode(e.target.checked)}
+                className="h-3 w-3 accent-sky-500"
+              />
+              Dev view
+            </label>
           }
         >
-          <GraphCanvas graph={graph} steps={steps} analytics={analytics} className="h-[460px]" />
-          <div className="mt-3">
-            <Legend compact />
-          </div>
+          <RunDevProvider value={devValue}>
+            <StepTimeline steps={steps} run={run} />
+          </RunDevProvider>
         </Card>
-      )}
-
-      {/* Kept alongside the canvas on purpose: the timeline is the fallback
-          that works for every run, including hand-written playbooks with no
-          graph behind them. */}
-      <Card
-        title="Steps"
-        actions={
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300">
-            <input
-              type="checkbox"
-              checked={devMode}
-              onChange={(e) => setDevMode(e.target.checked)}
-              className="h-3 w-3 accent-sky-500"
-            />
-            Dev view
-          </label>
-        }
-      >
-        <RunDevProvider value={devValue}>
-          <StepTimeline steps={steps} run={run} />
-        </RunDevProvider>
-      </Card>
+      </div>
 
       <Card title="Egress ledger">
         <EgressLedger events={egress} piiSpans={piiSpans} />
@@ -160,9 +232,7 @@ export function RunDetail() {
 
       {run.result !== undefined && (
         <Card title="Result">
-          <pre className="overflow-x-auto text-[11px] leading-relaxed text-slate-400">
-            {JSON.stringify(run.result, null, 2)}
-          </pre>
+          <JsonView value={run.result} className="max-h-96" />
         </Card>
       )}
 

@@ -16,7 +16,7 @@
  * flat `result` object using the SAME expected values, matched by field name.
  */
 
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   evaluateAssertions,
@@ -30,7 +30,16 @@ import { api, type RunDetail } from '../lib/api';
 import { humanStatus, msLabel, relativeTime, RUN_STATUS_TONE } from '../lib/format';
 import { Badge } from '../components/ui/Badge';
 import { Card } from '../components/ui/Card';
+import { Skeleton } from '../components/ui/Skeleton';
 import { Spinner } from '../components/ui/Spinner';
+
+// recharts is the heaviest dependency in the app; only this page needs it.
+const CompareCharts = lazy(() => import('../components/runs/CompareCharts'));
+
+function chartLabel(side: { run: Run; graph: AgentGraph | null }): string {
+  if (side.run.kind === 'baseline') return 'Baseline';
+  return side.graph ? 'Graph v' + side.graph.version : 'Run';
+}
 
 interface Side {
   run: Run;
@@ -120,6 +129,26 @@ export function Compare() {
   return (
     <div className="space-y-5">
       <h1 className="text-lg font-semibold text-slate-100">Compare runs</h1>
+
+      <Card title="At a glance">
+        <Suspense
+          fallback={
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-44" />
+              ))}
+            </div>
+          }
+        >
+          <CompareCharts
+            a={{ label: chartLabel(a), analytics: a.analytics }}
+            b={{ label: chartLabel(b), analytics: b.analytics }}
+          />
+        </Suspense>
+        <p className="mt-2 text-[11px] text-slate-500">
+          Lower is better. The chip shows the right-hand run against the left-hand one.
+        </p>
+      </Card>
 
       <div className="grid grid-cols-[10rem_1fr_1fr] gap-x-4 gap-y-1 text-sm">
         <div />

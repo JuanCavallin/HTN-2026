@@ -15,6 +15,8 @@
 
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { LayoutGrid } from 'lucide-react';
+import { toast } from 'sonner';
 import type { AgentGraph, Conversation, GraphEdge, GraphNodeType } from '@htn/shared';
 import { GRAPH_NODE_TYPES } from '@htn/shared';
 import { useGraph, useGraphs } from '../hooks/useGraph';
@@ -22,6 +24,7 @@ import { useTools } from '../hooks/useTools';
 import { api, ApiError } from '../lib/api';
 import { newClientId } from '../lib/ids';
 import { ChatPanel } from '../components/chat/ChatPanel';
+import { computeLayout } from '../components/graph/autoLayout';
 import { GraphCanvas } from '../components/graph/GraphCanvas';
 import { Legend } from '../components/graph/Legend';
 import { NodeInspector } from '../components/graph/NodeInspector';
@@ -54,6 +57,8 @@ export function GraphEditor() {
   // be merged into a rewrite the model already computed without seeing it --
   // so canvas mutation is locked for the duration rather than raced against.
   const [chatBusy, setChatBusy] = useState(false);
+  const [layingOut, setLayingOut] = useState(false);
+  const [fitSignal, setFitSignal] = useState(0);
 
   useEffect(() => {
     if (loaded) setGraph(loaded);
@@ -155,6 +160,38 @@ export function GraphEditor() {
     }
   };
 
+  // Positions are persisted one node at a time (each patch bumps the graph
+  // version, so they must chain). Setting the graph after every patch lets the
+  // canvas glide nodes into place one by one rather than snapping at the end.
+  const autoLayout = async () => {
+    if (!graph) return;
+    setLayingOut(true);
+    try {
+      const positions = await computeLayout(graph);
+      let current = graph;
+      for (const node of graph.nodes) {
+        const position = positions.get(node.id);
+        if (!position) continue;
+        const { graph: next } = await api.patchNode(
+          current.id,
+          node.id,
+          { position },
+          current.version,
+        );
+        current = next;
+        setGraph(next);
+      }
+      setMutationError(null);
+      setFitSignal((n) => n + 1);
+      toast.success('Layout applied');
+    } catch (err) {
+      reportMutationError(err);
+      void refreshGraph();
+    } finally {
+      setLayingOut(false);
+    }
+  };
+
   const moveNode = async (nodeId: string, position: { x: number; y: number }) => {
     if (!graph) return;
     try {
@@ -252,6 +289,15 @@ export function GraphEditor() {
               <Button variant="ghost" onClick={() => void addNode()} disabled={chatBusy}>
                 + Add node
               </Button>
+              <Button
+                variant="ghost"
+                onClick={() => void autoLayout()}
+                disabled={chatBusy || layingOut}
+                title="Arrange nodes top-to-bottom"
+              >
+                <LayoutGrid className="h-3.5 w-3.5" />
+                {layingOut ? 'Arranging…' : 'Auto-layout'}
+              </Button>
             </>
           )}
           <Button onClick={() => void launch()} disabled={launching || !graph}>
@@ -315,7 +361,8 @@ export function GraphEditor() {
             onConnectNodes={(source, target) => void connectNodes(source, target)}
             onDeleteNode={(nodeId) => void deleteNode(nodeId)}
             onDeleteEdge={(edgeId) => void deleteEdge(edgeId)}
-            className="h-[560px]"
+            fitSignal={fitSignal}
+            className={'h-[560px] ' + (layingOut ? 'layout-anim' : '')}
           />
         ) : (
           <div className="flex h-[560px] items-center justify-center rounded-lg border border-dashed border-slate-800 text-sm text-slate-600">

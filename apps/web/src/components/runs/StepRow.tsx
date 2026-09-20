@@ -1,18 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { Step } from '@htn/shared';
-import { NODE_TYPE_ICON } from '@htn/shared';
+import { NodeIcon } from '../graph/nodeIcons';
 import { Badge } from '../ui/Badge';
 import { Spinner } from '../ui/Spinner';
 import { StepOutput } from './StepOutput';
 import { StepDevPanel } from './StepDevPanel';
 import { useRunDev } from './RunDevContext';
 import { duration, humanStatus, STEP_STATUS_TONE } from '../../lib/format';
-
-/**
- * Sourced from @htn/shared so the timeline and the graph canvas cannot show
- * different marks for the same work. Adding a node type there adds it here.
- */
-const ICONS: Record<string, string> = NODE_TYPE_ICON;
 
 export function StepRow({ step }: { step: Step }) {
   const tone = STEP_STATUS_TONE[step.status];
@@ -58,7 +52,7 @@ export function StepRow({ step }: { step: Step }) {
                 : 'bg-slate-700/50 text-slate-400')
         }
       >
-        {ICONS[step.kind] ?? '▸'}
+        <NodeIcon type={step.kind} className="h-2.5 w-2.5" />
       </button>
 
       <div className="min-w-0 flex-1">

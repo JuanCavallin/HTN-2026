@@ -1,3 +1,4 @@
+import { useAutoAnimate } from '@formkit/auto-animate/react';
 import { isTerminal, type Run, type Step } from '@htn/shared';
 import { StepRow } from './StepRow';
 import { SwarmGrid } from './SwarmGrid';
@@ -7,6 +8,8 @@ import { SwarmGrid } from './SwarmGrid';
  * gets a SwarmGrid underneath it — no special step type, just parentStepId.
  */
 export function StepTimeline({ steps, run }: { steps: Step[]; run?: Run }) {
+  // New steps ease in as the run streams them, rather than popping into place.
+  const [listRef] = useAutoAnimate<HTMLOListElement>({ duration: 240 });
   const roots = steps.filter((s) => s.parentStepId === null);
   const childrenOf = (id: string) => steps.filter((s) => s.parentStepId === id);
 
@@ -25,7 +28,7 @@ export function StepTimeline({ steps, run }: { steps: Step[]; run?: Run }) {
   }
 
   return (
-    <ol className="space-y-1">
+    <ol ref={listRef} className="space-y-1">
       {roots.map((step, index) => {
         const children = childrenOf(step.id);
         return (

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useAutoAnimate } from '@formkit/auto-animate/react';
 import { useNavigate } from 'react-router-dom';
 import { isTerminal } from '@htn/shared';
 import { api } from '../lib/api';
@@ -8,6 +9,8 @@ import { ActiveRunCard } from '../components/runs/ActiveRunCard';
 import { RunList } from '../components/runs/RunList';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import { NumberTicker } from '../components/ui/NumberTicker';
+import { Stat } from '../components/ui/Stat';
 
 /**
  * Graphs only, deliberately -- a graph IS the task; a run is just one
@@ -31,6 +34,9 @@ export function Home() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedGraphId = selectedId ?? graphs[0]?.id ?? null;
+  const selectedGraph = graphs.find((g) => g.id === selectedGraphId);
+  // Active cards slide out of this grid as their run finishes.
+  const [activeGridRef] = useAutoAnimate<HTMLDivElement>({ duration: 220 });
 
   // Split once here rather than filtering inside two different components --
   // a run that just went terminal moves from the live grid to the plain list
@@ -55,6 +61,23 @@ export function Home() {
 
   return (
     <div className="space-y-6">
+      {runs.length > 0 && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat label="Runs">
+            <NumberTicker value={runs.length} />
+          </Stat>
+          <Stat label="Active" tone={activeRuns.length > 0 ? 'warn' : 'default'}>
+            <NumberTicker value={activeRuns.length} />
+          </Stat>
+          <Stat label="Succeeded" tone="ok">
+            <NumberTicker value={runs.filter((r) => r.status === 'succeeded').length} />
+          </Stat>
+          <Stat label="Failed" tone={runs.some((r) => r.status === 'failed') ? 'bad' : 'default'}>
+            <NumberTicker value={runs.filter((r) => r.status === 'failed').length} />
+          </Stat>
+        </div>
+      )}
+
       <Card title="Launch a run">
         <p className="mb-3 text-sm text-slate-400">
           Every run follows the same shape: it works through steps, fans out when there is
@@ -96,6 +119,15 @@ export function Home() {
           </div>
         )}
 
+        {selectedGraph?.description && (
+          <p className="mt-3 text-sm text-slate-300">
+            {selectedGraph.description}
+            <span className="ml-2 text-xs text-slate-500">
+              {selectedGraph.nodes.length} nodes · v{selectedGraph.version}
+            </span>
+          </p>
+        )}
+
         {error && <p className="mt-2 text-xs text-rose-400">{error}</p>}
 
         <p className="mt-3 text-xs text-slate-600">
@@ -105,7 +137,7 @@ export function Home() {
 
       {activeRuns.length > 0 && (
         <Card title={'Active now (' + activeRuns.length + ')'}>
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div ref={activeGridRef} className="grid gap-2 sm:grid-cols-2">
             {activeRuns.map((run) => (
               <ActiveRunCard key={run.id} runId={run.id} />
             ))}
