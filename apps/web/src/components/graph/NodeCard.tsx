@@ -30,6 +30,9 @@ export interface NodeCardData extends Record<string, unknown> {
   metrics?: NodeMetrics;
   selected?: boolean;
   onOpen?: (nodeId: string) => void;
+  /** Canvas is in edit mode (GraphEditor, not a live/past run view). */
+  editable?: boolean;
+  onDelete?: (nodeId: string) => void;
 }
 
 /** The concrete callee, so the canvas names real things rather than categories. */
@@ -68,7 +71,7 @@ function tokens(metrics?: NodeMetrics): number {
 }
 
 export function NodeCard({ data }: NodeProps) {
-  const { node, status, metrics, selected, onOpen } = data as NodeCardData;
+  const { node, status, metrics, selected, onOpen, editable, onDelete } = data as NodeCardData;
   const style = styleOf(node.type);
   const classes = EXECUTOR_CLASSES[executorOf(node.type)];
 
@@ -105,6 +108,20 @@ export function NodeCard({ data }: NodeProps) {
         )}
         {status === 'blocked' && (
           <span className="ml-auto text-[10px] text-amber-300">waiting</span>
+        )}
+        {editable && !status && (
+          <button
+            type="button"
+            title="Delete node"
+            aria-label="Delete node"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete?.(node.id);
+            }}
+            className="ml-auto rounded px-1 text-[11px] leading-none text-slate-500 hover:bg-rose-500/20 hover:text-rose-300"
+          >
+            ×
+          </button>
         )}
       </div>
 
