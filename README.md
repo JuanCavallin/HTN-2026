@@ -19,7 +19,7 @@ authorized, and what needs a human first.
 | **Supervised**         | Actions are classified by **reversibility**. Irreversible ones pause on the exact payload: approve, reject, or revise.             |
 | **Observable**         | A live, replayable trace of every decision, model call, tool call and approval. Pause, resume, cancel.                             |
 
-**Start here:** [demo script](docs/DEMO.md) · [sponsor tracks](docs/SPONSORS.md) ·
+**Start here:** [demo script](docs/DEMO.md) · [keys for the demo laptop](docs/DEMO-KEYS.md) · [sponsor tracks](docs/SPONSORS.md) ·
 [Devpost copy](docs/DEVPOST.md) · [design spec](docs/agentos-design.md)
 
 ## Quick start

@@ -85,6 +85,8 @@ the run pauses. That is the system working, but it is not the email demo.
 
 ## What is live on which machine
 
+Full key-by-key setup, installs and a pre-flight checklist: **[DEMO-KEYS.md](DEMO-KEYS.md)**.
+
 | Capability          | Needs                                                                     |
 | ------------------- | ------------------------------------------------------------------------- |
 | Jev decisions       | `AI_GATEWAY_API_KEY`, `JEV_MODE=live`                                     |
