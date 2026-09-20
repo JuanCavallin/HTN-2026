@@ -20,12 +20,13 @@ Then open http://localhost:5173 and click **Launch**.
 There is no `.env` step. With no API keys at all, every provider falls back to a mock and
 the full demo runs end to end. That is deliberate, not a placeholder.
 
-| Command          | What it does                          |
-| ---------------- | ------------------------------------- |
-| `pnpm dev`       | api on :8787 and web on :5173         |
-| `pnpm typecheck` | all three packages                    |
-| `pnpm smoke`     | end-to-end test against a running api |
-| `pnpm format`    | prettier                              |
+| Command                | What it does                          |
+| ---------------------- | ------------------------------------- |
+| `pnpm dev`             | api on :8787 and web on :5173         |
+| `pnpm typecheck`       | all three packages                    |
+| `pnpm smoke`           | end-to-end test against a running api |
+| `pnpm check:providers` | live Ollama + provider wiring check   |
+| `pnpm format`          | prettier                              |
 
 ## What it already does
 
@@ -78,10 +79,11 @@ Nothing else changes. Not the store, not the routes, not the streaming, not the 
 
 ## Going live with a provider
 
-Every provider has `index.ts` (factory + mock) and, where applicable, a `live.ts` adapter.
-Browserbase and Jev have live implementations. Hermes, Anthropic, and Composio remain
-explicit `NOT_IMPLEMENTED` stubs until their real endpoints and credentials are available.
-Map vendor shapes onto our interfaces; vendor types must not escape the adapter file.
+Every provider has an internal adapter boundary. Hermes, Jev, Browserbase, OpenRouter,
+Ollama, and Composio have live paths; Anthropic remains the legacy bound text-model
+fallback. OpenRouter supplies configured cloud tiers, Ollama supplies the local/private
+route, and Composio tools are executable only after they appear in AgentOS's reviewed
+registry. Vendor types must not escape provider files.
 
 Flip one `<PROVIDER>_MODE=live` at a time. Anything not working by hour 30 stays mocked;
 the app does not care.
@@ -127,7 +129,8 @@ session recordings are retrievable (free demo evidence).
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `MOCK_ALL=true`         | Forces every provider to mock. **Rehearse the demo with this on at least once — it is your venue-wifi insurance.** |
 | `MOCK_FAILURE_RATE=0.2` | Mocks fail randomly, so error states get built before keys land                                                    |
-| `PERSIST_TO_DISK=true`  | Debounced JSON snapshot to `.data/`, so runs survive an api restart                                                |
+| `PERSIST_TO_DISK=true`  | SQLite persistence in `.data/`, so control-plane history survives API restarts                                     |
+| `SQLITE_PATH=...`       | Optional SQLite path resolved from `apps/api` (default `../../.data/agentos.sqlite`)                               |
 
 ## Things that will bite you
 
@@ -140,6 +143,5 @@ session recordings are retrievable (free demo evidence).
 
 ## Deliberately skipped
 
-Docker · CI · auth · a database · TS project references · ESLint · pre-commit hooks ·
-a state-management library · Next.js. Each is a known hackathon time sink. The only test is
-`scripts/smoke.mjs`.
+Docker · CI · application auth · TS project references · ESLint · pre-commit hooks ·
+a state-management library · Next.js. Each is a known hackathon time sink.

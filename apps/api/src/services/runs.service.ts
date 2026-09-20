@@ -7,6 +7,7 @@
  */
 
 import type {
+  AgentSessionState,
   Approval,
   EgressEvent,
   Json,
@@ -14,6 +15,7 @@ import type {
   Run,
   ScheduleDecision,
   Step,
+  StoredEvent,
 } from '@htn/shared';
 import { stripPiiValue } from '@htn/shared';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
@@ -41,6 +43,7 @@ export interface RunDetail {
   /** Values are stripped — the client only ever sees placeholders and classes. */
   piiSpans: PiiSpan[];
   scheduleDecisions: ScheduleDecision[];
+  agentSessions: AgentSessionState[];
 }
 
 export function availablePlaybooks(): { kind: string; title: string }[] {
@@ -113,17 +116,24 @@ export async function getRun(id: string): Promise<Run | null> {
   return store.getRun(id);
 }
 
+export async function getRunEvents(id: string, since = 0): Promise<StoredEvent[] | null> {
+  if (!(await store.getRun(id))) return null;
+  return store.eventsSince(id, Math.max(0, since));
+}
+
 export async function getRunDetail(id: string): Promise<RunDetail | null> {
   const run = await store.getRun(id);
   if (!run) return null;
 
-  const [steps, approvals, egress, piiWithValues, scheduleDecisions] = await Promise.all([
-    store.listSteps(id),
-    store.listApprovals(id),
-    store.listEgress(id),
-    store.listPiiSpans(id),
-    store.listScheduleDecisions(id),
-  ]);
+  const [steps, approvals, egress, piiWithValues, scheduleDecisions, agentSessions] =
+    await Promise.all([
+      store.listSteps(id),
+      store.listApprovals(id),
+      store.listEgress(id),
+      store.listPiiSpans(id),
+      store.listScheduleDecisions(id),
+      store.listSessionStates(id),
+    ]);
 
   return {
     run,
@@ -132,6 +142,7 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
     egress,
     piiSpans: piiWithValues.map(stripPiiValue),
     scheduleDecisions,
+    agentSessions,
   };
 }
 

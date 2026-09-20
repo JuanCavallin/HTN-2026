@@ -10,6 +10,7 @@ import {
   availablePlaybooks,
   cancelRun,
   createRun,
+  getRunEvents,
   getRunDetail,
   listRuns,
 } from '../services/runs.service.js';
@@ -40,6 +41,15 @@ runsRouter.get('/runs/:id', async (req, res) => {
   const detail = await getRunDetail(param(req, 'id'));
   if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
   res.json(detail);
+});
+
+/** JSON replay for debugging/export; live clients should use the SSE endpoint. */
+runsRouter.get('/runs/:id/events', async (req, res) => {
+  const rawSince = Number(req.query.since ?? 0);
+  const since = Number.isFinite(rawSince) && rawSince > 0 ? rawSince : 0;
+  const events = await getRunEvents(param(req, 'id'), since);
+  if (!events) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json({ events, lastSeq: events.at(-1)?.seq ?? since });
 });
 
 runsRouter.post('/runs/:id/cancel', async (req, res) => {

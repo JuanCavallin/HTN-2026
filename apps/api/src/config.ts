@@ -29,6 +29,7 @@ const envSchema = z.object({
 
   MOCK_ALL: boolish,
   PERSIST_TO_DISK: boolish,
+  SQLITE_PATH: z.string().default('../../.data/agentos.sqlite'),
   MOCK_FAILURE_RATE: z.coerce.number().min(0).max(1).default(0),
   MOCK_MIN_LATENCY_MS: z.coerce.number().int().min(0).default(250),
   MOCK_MAX_LATENCY_MS: z.coerce.number().int().min(0).default(900),
@@ -36,10 +37,16 @@ const envSchema = z.object({
   HERMES_MODE: modeEnum.default('mock'),
   // Hermes is driven as a local subprocess over ACP (`uv run hermes-acp`), not
   // an HTTP API — there is no bearer key. What live mode actually needs is the
-  // absolute path to a `hermes-agent` checkout with the `acp` extra installed.
+  // absolute path to a `hermes-agent` checkout with the `acp` and `mcp` extras installed.
   HERMES_CWD: z.string().optional(),
+  HERMES_PROFILE_DIR: z.string().optional(),
   HERMES_API_KEY: z.string().optional(),
   HERMES_BASE_URL: z.string().optional(),
+
+  MODEL_GATEWAY_BASE_URL: optionalUrl,
+  MODEL_GATEWAY_API_KEY: z.string().default('agentos-local'),
+  MCP_GATEWAY_URL: optionalUrl,
+  MCP_GATEWAY_API_KEY: z.string().default('agentos-mcp-local'),
 
   AI_GATEWAY_API_KEY: z.string().optional(),
   AI_GATEWAY_BASE_URL: optionalUrl,
@@ -54,6 +61,22 @@ const envSchema = z.object({
 
   COMPOSIO_MODE: modeEnum.default('mock'),
   COMPOSIO_API_KEY: z.string().optional(),
+  COMPOSIO_BASE_URL: optionalUrl,
+  COMPOSIO_USER_ID: z.string().default('agentos-demo-user'),
+  COMPOSIO_AUTH_CONFIG_ID: z.string().optional(),
+  COMPOSIO_TOOL_SLUGS: z.string().default('GMAIL_SEND_EMAIL'),
+  COMPOSIO_TOOLKITS: z.string().default(''),
+  COMPOSIO_DISCOVERY_LIMIT: z.coerce.number().int().min(1).max(100).default(24),
+
+  OPENROUTER_MODE: modeEnum.default('mock'),
+  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_BASE_URL: optionalUrl,
+  OPENROUTER_CHEAP_MODEL: z.string().default('openai/gpt-5.6-luna'),
+  OPENROUTER_FRONTIER_MODEL: z.string().default('openai/gpt-5.6-sol'),
+
+  OLLAMA_MODE: modeEnum.default('mock'),
+  OLLAMA_BASE_URL: optionalUrl,
+  OLLAMA_MODEL: z.string().default('qwen3:8b'),
 
   ANTHROPIC_MODE: modeEnum.default('mock'),
   ANTHROPIC_API_KEY: z.string().optional(),
@@ -81,6 +104,24 @@ export interface ProviderConfig {
   projectId?: string;
   /** Absolute path to a local checkout the provider drives as a subprocess (Hermes only). */
   cwd?: string;
+  /** Isolated provider profile directory (Hermes only). */
+  profileDir?: string;
+  /** AgentOS-owned MCP endpoint injected into the isolated Hermes profile. */
+  mcpUrl?: string;
+  /** Local bearer credential passed to Hermes by environment reference. */
+  mcpApiKey?: string;
+  /** Stable application user used to isolate third-party OAuth connections. */
+  userId?: string;
+  /** Composio auth config selected by the application, never by the model. */
+  authConfigId?: string;
+  /** Provider-native tool slugs explicitly reviewed by AgentOS. */
+  toolSlugs?: string[];
+  /** Optional provider toolkit filter used for task-time catalog discovery. */
+  toolkits?: string[];
+  /** Maximum catalog candidates fetched before local policy and Jev filtering. */
+  discoveryLimit?: number;
+  /** Explicit model allowlist exposed to Jev. */
+  models?: { cheap: string; frontier: string };
   /** Name of the env var that would enable live mode. Shown in health detail. */
   keyVar: string;
 }
@@ -107,7 +148,29 @@ function resolveHermes(): ProviderConfig {
   let mode: ProviderMode = env.HERMES_MODE;
   if (env.MOCK_ALL) mode = 'mock';
   else if (mode === 'live' && !env.HERMES_CWD) mode = 'mock';
-  return { mode, cwd: env.HERMES_CWD, baseUrl: env.HERMES_BASE_URL, keyVar: 'HERMES_CWD' };
+  return {
+    mode,
+    cwd: env.HERMES_CWD,
+    profileDir: env.HERMES_PROFILE_DIR,
+    baseUrl: env.HERMES_BASE_URL ?? env.MODEL_GATEWAY_BASE_URL ?? `http://127.0.0.1:${env.PORT}/v1`,
+    apiKey: env.MODEL_GATEWAY_API_KEY,
+    mcpUrl: env.MCP_GATEWAY_URL ?? `http://127.0.0.1:${env.PORT}/mcp`,
+    mcpApiKey: env.MCP_GATEWAY_API_KEY,
+    keyVar: 'HERMES_CWD',
+  };
+}
+
+/** Local HTTP providers need no secret, so live mode is gated only by MOCK_ALL. */
+function resolveLocal(
+  requested: ProviderMode,
+  keyVar: string,
+  extra: Partial<ProviderConfig>,
+): ProviderConfig {
+  return {
+    mode: env.MOCK_ALL ? 'mock' : requested,
+    keyVar,
+    ...extra,
+  };
 }
 
 const providers: Record<ProviderId, ProviderConfig> = {
@@ -121,7 +184,30 @@ const providers: Record<ProviderId, ProviderConfig> = {
   browserbase: resolve(env.BROWSERBASE_MODE, env.BROWSERBASE_API_KEY, 'BROWSERBASE_API_KEY', {
     projectId: env.BROWSERBASE_PROJECT_ID,
   }),
-  composio: resolve(env.COMPOSIO_MODE, env.COMPOSIO_API_KEY, 'COMPOSIO_API_KEY'),
+  composio: resolve(env.COMPOSIO_MODE, env.COMPOSIO_API_KEY, 'COMPOSIO_API_KEY', {
+    baseUrl: env.COMPOSIO_BASE_URL ?? 'https://backend.composio.dev',
+    userId: env.COMPOSIO_USER_ID,
+    authConfigId: env.COMPOSIO_AUTH_CONFIG_ID,
+    toolSlugs: env.COMPOSIO_TOOL_SLUGS.split(',')
+      .map((slug) => slug.trim())
+      .filter(Boolean),
+    toolkits: env.COMPOSIO_TOOLKITS.split(',')
+      .map((toolkit) => toolkit.trim().toLowerCase())
+      .filter(Boolean),
+    discoveryLimit: env.COMPOSIO_DISCOVERY_LIMIT,
+  }),
+  openrouter: resolve(env.OPENROUTER_MODE, env.OPENROUTER_API_KEY, 'OPENROUTER_API_KEY', {
+    baseUrl: env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1',
+    models: {
+      cheap: env.OPENROUTER_CHEAP_MODEL,
+      frontier: env.OPENROUTER_FRONTIER_MODEL,
+    },
+  }),
+  ollama: resolveLocal(env.OLLAMA_MODE, 'OLLAMA_BASE_URL', {
+    baseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
+    models: { cheap: env.OLLAMA_MODEL, frontier: env.OLLAMA_MODEL },
+  }),
+  mcp: resolveLocal('live', 'MCP_CONNECTIONS', {}),
   anthropic: resolve(env.ANTHROPIC_MODE, env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY'),
   gptzero: resolve(env.GPTZERO_MODE, env.GPTZERO_API_KEY, 'GPTZERO_API_KEY'),
 };
@@ -132,6 +218,15 @@ export const config = Object.freeze({
   port: env.PORT,
   webOrigin: env.WEB_ORIGIN,
   persistToDisk: env.PERSIST_TO_DISK,
+  sqlitePath: env.SQLITE_PATH,
+  modelGateway: {
+    baseUrl: env.MODEL_GATEWAY_BASE_URL ?? `http://127.0.0.1:${env.PORT}/v1`,
+    apiKey: env.MODEL_GATEWAY_API_KEY,
+  },
+  mcpGateway: {
+    url: env.MCP_GATEWAY_URL ?? `http://127.0.0.1:${env.PORT}/mcp`,
+    apiKey: env.MCP_GATEWAY_API_KEY,
+  },
   mock: {
     all: env.MOCK_ALL,
     failureRate: env.MOCK_FAILURE_RATE,
@@ -145,4 +240,13 @@ export function logConfigSummary(): void {
   const summary = PROVIDER_IDS.map((id) => id + '=' + providers[id].mode).join('  ');
   console.log('[config] port=' + config.port + '  mockAll=' + config.mock.all);
   console.log('[config] providers: ' + summary);
+  if (env.OPENROUTER_MODE === 'live' && providers.openrouter.mode !== 'live') {
+    console.warn('[setup] OPENROUTER_MODE=live requires OPENROUTER_API_KEY; using mock mode.');
+  }
+  if (env.COMPOSIO_MODE === 'live' && providers.composio.mode !== 'live') {
+    console.warn('[setup] COMPOSIO_MODE=live requires COMPOSIO_API_KEY; using mock mode.');
+  }
+  if (providers.composio.mode === 'live' && !providers.composio.authConfigId) {
+    console.warn('[setup] COMPOSIO_AUTH_CONFIG_ID is needed to create a new OAuth connection.');
+  }
 }

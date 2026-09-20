@@ -13,6 +13,8 @@ import type { ZodType } from 'zod';
 import type {
   Capability,
   CapabilityMap,
+  CompletionDecision,
+  DataLabel,
   IntelligenceLevel,
   Json,
   ModelTier,
@@ -21,6 +23,7 @@ import type {
   ProviderCallContext,
   ProviderId,
   ScheduleDecision,
+  SessionCheckpoint,
   Step,
 } from '@htn/shared';
 import type { FanOutOutcome } from '../swarm.js';
@@ -67,12 +70,16 @@ export interface AgentTaskSpec {
   goal: string;
   /** Extra context passed through untouched — redact it first if it might be sensitive. */
   context?: unknown;
+  /** Redacted objective eligible for a remote completion judgment. */
+  sanitizedGoal?: string;
+  /** Labels for the canonical task state. Defaults to public. */
+  dataLabels?: DataLabel[];
   /**
    * Full candidate tool list BEFORE Jev filters it. Not tied to any one
    * provider's tool-name format — the harness-specific `live.ts` is
    * responsible for translating these into whatever that runtime expects.
-   * Do NOT include tools classified irreversible; see hermes/live.ts's safety
-   * rule for why.
+   * Irreversible tools may be proposed, but every exact action is still gated
+   * by AgentOS and requires approval before the executor is called.
    */
   availableTools: string[];
   /** The graph node this task belongs to. See Step.nodeId. */
@@ -82,6 +89,8 @@ export interface AgentTaskSpec {
   pollIntervalMs?: number;
   /** Give up and cancel after this many polls, so a stuck task can't hang the run. Default 20. */
   maxPolls?: number;
+  /** Maximum Hermes turns in the AgentOS outer loop. Defaults to 3. */
+  maxTurns?: number;
 }
 
 export interface AgentTaskResult {
@@ -90,6 +99,7 @@ export interface AgentTaskResult {
   scheduleDecision: ScheduleDecision;
   /** Self-reported by the runtime; our only post-hoc visibility into its internal loop. */
   toolCalls: { tool: string; args?: unknown; at: string }[];
+  completionDecision: CompletionDecision;
 }
 
 export interface PlaybookContext {
@@ -144,6 +154,9 @@ export interface PlaybookContext {
    * Blocks until the task reports done, fails, or maxPolls is exceeded.
    */
   runAgentTask(spec: AgentTaskSpec): Promise<AgentTaskResult>;
+
+  /** Evaluate an explicit checkpoint through the same verified completion gate. */
+  judgeCompletion(checkpoint: SessionCheckpoint, stepId?: string): Promise<CompletionDecision>;
 
   /**
    * Record a routing decision made OUTSIDE runAgentTask.

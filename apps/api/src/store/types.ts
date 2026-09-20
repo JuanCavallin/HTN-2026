@@ -12,9 +12,11 @@
  */
 
 import type {
+  AgentSessionState,
   AgentGraph,
   Approval,
   EgressEvent,
+  McpConnection,
   PiiSpanWithValue,
   Run,
   RunEvent,
@@ -48,6 +50,21 @@ export interface Store {
   getApproval(id: string): Promise<Approval | null>;
   patchApproval(id: string, patch: Partial<Approval>): Promise<Approval>;
   listApprovals(runId: string): Promise<Approval[]>;
+
+  // Canonical AgentOS session state. Harnesses and decision models are views
+  // over this state; neither is allowed to become the source of truth.
+  createSessionState(state: AgentSessionState): Promise<AgentSessionState>;
+  getSessionState(id: string): Promise<AgentSessionState | null>;
+  getSessionStateByHarnessSession(harnessSessionId: string): Promise<AgentSessionState | null>;
+  patchSessionState(id: string, patch: Partial<AgentSessionState>): Promise<AgentSessionState>;
+  listSessionStates(runId?: string): Promise<AgentSessionState[]>;
+
+  // User-configured upstream MCP servers. Secret values are environment refs,
+  // never fields on this record.
+  saveMcpConnection(connection: McpConnection): Promise<McpConnection>;
+  getMcpConnection(id: string): Promise<McpConnection | null>;
+  listMcpConnections(): Promise<McpConnection[]>;
+  deleteMcpConnection(id: string): Promise<boolean>;
 
   // Egress ledger (append-only)
   appendEgress(event: EgressEvent): Promise<EgressEvent>;

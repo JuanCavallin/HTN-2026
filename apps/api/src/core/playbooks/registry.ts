@@ -6,12 +6,14 @@
  */
 
 import type { Playbook } from './types.js';
+import { agentPlaybook } from './agent.playbook.js';
 import { demoPlaybook } from './demo.playbook.js';
 import { graphPlaybook } from './graph.playbook.js';
 
 // demo stays registered alongside graph deliberately: it is the fallback run
 // that works even if graph execution breaks.
 const PLAYBOOKS: Playbook<never>[] = [
+  agentPlaybook as unknown as Playbook<never>,
   demoPlaybook as unknown as Playbook<never>,
   graphPlaybook as unknown as Playbook<never>,
 ];

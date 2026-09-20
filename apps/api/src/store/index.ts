@@ -7,8 +7,11 @@
 
 import { config } from '../config.js';
 import { createMemoryStore } from './memory.js';
+import { createSqliteStore } from './sqlite.js';
 
-export const store = createMemoryStore({ persistToDisk: config.persistToDisk });
+export const store = config.persistToDisk
+  ? createSqliteStore(config.sqlitePath)
+  : createMemoryStore();
 
 export type { ListRunsFilter, Store } from './types.js';
 export { NotFoundError } from './types.js';

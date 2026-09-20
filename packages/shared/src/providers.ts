@@ -11,6 +11,9 @@ export type ProviderId =
   | 'jev' // fast / cheap decision layer
   | 'browserbase' // cloud browser automation
   | 'composio' // SaaS tools + OAuth brokering
+  | 'openrouter' // multi-model cloud inference gateway
+  | 'ollama' // local/private model runtime
+  | 'mcp' // user-configured upstream MCP connections
   | 'anthropic' // frontier text model
   | 'gptzero'; // OUT OF SCOPE — slot only
 
@@ -19,6 +22,9 @@ export const PROVIDER_IDS = [
   'jev',
   'browserbase',
   'composio',
+  'openrouter',
+  'ollama',
+  'mcp',
   'anthropic',
   'gptzero',
 ] as const satisfies readonly ProviderId[];
@@ -129,6 +135,12 @@ export interface AgentRuntimeAdapter extends ProviderAdapter {
       toolCalls?: { tool: string; args?: unknown; at: string }[];
     }>
   >;
+  /** Continue the same harness session after AgentOS decides more work is required. */
+  continueTask(
+    taskId: string,
+    input: { instruction: string; context?: unknown },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<null>>;
   cancelTask(taskId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
 }
 
@@ -138,6 +150,53 @@ export interface DecisionAdapter extends ProviderAdapter {
     input: { question: string; options: string[]; evidence?: string },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<{ choice: string; confidence: number; rationale?: string }>>;
+
+  /** Choose exactly one policy-eligible model route supplied by AgentOS. */
+  selectModel(
+    input: {
+      state: import('./control.js').DecisionState;
+      candidates: import('./control.js').ModelRoute[];
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ModelSelectionDecision>>;
+
+  /** Select zero or more useful tool families from the supplied family IDs. */
+  selectToolFamilies(
+    input: {
+      state: import('./control.js').DecisionState;
+      candidateFamilies: string[];
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ToolFamilySelectionDecision>>;
+
+  /** Select zero or more tools from policy-eligible descriptor metadata. */
+  selectTools(
+    input: {
+      state: import('./control.js').DecisionState;
+      candidates: import('./control.js').ToolDescriptor[];
+      maxTools?: number;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ToolSelectionDecision>>;
+
+  /** Recommend semantic action policy; deterministic AgentOS policy remains final. */
+  recommendActionPolicy(
+    input: {
+      action: import('./control.js').ToolAction;
+      descriptor: import('./control.js').ToolDescriptor;
+      state: import('./control.js').DecisionState;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ActionPolicyRecommendation>>;
+
+  /** Judge a sanitized checkpoint as done, continue, or blocked. */
+  judgeCompletion(
+    input: {
+      checkpoint: import('./control.js').SessionCheckpoint;
+      sanitizedState: import('./control.js').DecisionState;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').CompletionJudgment>>;
 
   /**
    * Route a subtask BEFORE it starts: pick a model tier and filter the
@@ -179,13 +238,34 @@ export interface BrowserAdapter extends ProviderAdapter {
   closeSession(sessionId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
 }
 
+export interface ToolboxToolDefinition {
+  /** Provider-native immutable tool identifier (for example GMAIL_SEND_EMAIL). */
+  name: string;
+  description: string;
+  version?: string;
+  toolkit?: string;
+  inputSchema?: import('./domain.js').Json;
+  requiredScopes?: string[];
+  connectedAccountId?: string;
+}
+
 export interface ToolboxAdapter extends ProviderAdapter {
-  listTools(
+  /** Resolve explicitly configured provider-native tools. */
+  listTools(ctx: ProviderCallContext): Promise<ProviderResult<ToolboxToolDefinition[]>>;
+  /** Search the provider catalog for a task before the harness starts. */
+  searchTools(
+    input: { query: string; toolkits?: string[]; limit?: number },
     ctx: ProviderCallContext,
-  ): Promise<ProviderResult<{ name: string; description: string }[]>>;
+  ): Promise<ProviderResult<ToolboxToolDefinition[]>>;
   connectUrl(app: string, ctx: ProviderCallContext): Promise<ProviderResult<{ url: string }>>;
   callTool(
-    input: { name: string; args: Record<string, unknown> },
+    input: {
+      name: string;
+      args: Record<string, unknown>;
+      version?: string;
+      userId?: string;
+      connectedAccountId?: string;
+    },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<unknown>>;
 }

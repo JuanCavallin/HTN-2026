@@ -70,6 +70,13 @@ function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
         { tokensIn: 0, tokensOut: 180 },
       );
     },
+    async continueTask(taskId, _input, ctx) {
+      return mockCall('hermes', 'continueTask', cfg.mode, ctx, () => {
+        const task = tasks.get(taskId);
+        if (task) task.polls = 0;
+        return null;
+      });
+    },
     async cancelTask(taskId, ctx) {
       return mockCall('hermes', 'cancelTask', cfg.mode, ctx, () => {
         tasks.delete(taskId);

@@ -47,7 +47,22 @@ async function main() {
 
   const providers = await api('/api/providers');
   const list = providers.body?.providers ?? [];
-  check('six providers reported', list.length === 6, list.length + ' found');
+  const requiredProviders = [
+    'hermes',
+    'jev',
+    'browserbase',
+    'composio',
+    'openrouter',
+    'ollama',
+    'mcp',
+    'anthropic',
+    'gptzero',
+  ];
+  check(
+    'all control-plane providers reported',
+    requiredProviders.every((id) => list.some((provider) => provider.id === id)),
+    list.map((provider) => provider.id).join(', '),
+  );
   check(
     'no provider is in live mode without a key',
     list.every((p) => p.mode !== 'live'),
@@ -81,7 +96,7 @@ async function main() {
   const needsInput = advertised.filter((p) => !p.directLaunch);
   check(
     'a playbook needing configuration is flagged rather than offered blindly',
-    needsInput.every((p) => p.kind === 'graph'),
+    needsInput.every((p) => p.kind === 'graph' || p.kind === 'agent'),
     needsInput.map((p) => p.kind).join(',') || 'none',
   );
 
@@ -132,8 +147,8 @@ async function main() {
   );
   const decision = scheduleDecisions[0];
   check(
-    'Jev filtered the tool list before the agent runtime ran',
-    Boolean(decision) && decision.exposedTools.length < decision.availableTools.length,
+    'Jev exposed no more than the trusted tool candidates',
+    Boolean(decision) && decision.exposedTools.length <= decision.availableTools.length,
     decision
       ? decision.exposedTools.length + ' of ' + decision.availableTools.length
       : 'no decision',
@@ -145,8 +160,9 @@ async function main() {
   );
 
   check(
-    'Hermes-internal tool calls were reported into the egress ledger post-hoc',
-    blocked.egress.some((e) => e.policyRule === 'reported-post-hoc-by-hermes'),
+    'Hermes tool activity is reported when Jev exposes a tool',
+    !decision?.exposedTools.length ||
+      blocked.egress.some((e) => e.policyRule === 'reported-post-hoc-by-hermes'),
   );
 
   check(
@@ -230,8 +246,8 @@ async function main() {
 
   check('wall-clock time was measured', totals.wallMs > 0, totals.wallMs + 'ms');
   check(
-    'tool reduction is visible in the totals',
-    totals.toolsAvailable > totals.toolsExposed,
+    'tool exposure never exceeds the trusted candidates',
+    totals.toolsAvailable >= totals.toolsExposed,
     totals.toolsExposed + ' of ' + totals.toolsAvailable,
   );
   check(

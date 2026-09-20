@@ -17,13 +17,11 @@
  *
  * TWO HONEST LIMITS, DO NOT PAPER OVER THESE:
  *
- *   1. Tool restriction is BEST-EFFORT, NOT ENFORCED. `_meta.enabled_toolsets`
- *      below is a documented ACP extension point, but empirically it did NOT
- *      change Hermes's own tool_search "kept" count in testing. Real
- *      enforcement of "only Jev-approved tools" has to happen upstream — Jev
- *      must not hand this adapter a tool list wider than what's actually
- *      safe, because this adapter cannot currently guarantee Hermes will
- *      respect a narrower one.
+ *   1. `_meta.enabled_toolsets` remains only a best-effort Hermes hint. Actual
+ *      model-visible restriction happens in AgentOS's model gateway, which
+ *      strips every tool schema lacking a trusted, Jev-selected descriptor.
+ *      Calls to configured AgentOS MCP tools are intercepted by the trusted
+ *      registry, exact-action broker, and registered local/provider executor.
  *
  *   2. Permission requests are DENIED BY DEFAULT, not routed to our own
  *      approval gate. Hermes's ACP server asks the client for permission
@@ -46,6 +44,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 import type { AgentRuntimeAdapter, ProviderErrorCode, ProviderResult } from '@htn/shared';
@@ -70,7 +70,12 @@ function meta(op: string, started: number, destination: string | null) {
   };
 }
 
-function failure<T>(op: string, started: number, code: ProviderErrorCode, message: string): ProviderResult<T> {
+function failure<T>(
+  op: string,
+  started: number,
+  code: ProviderErrorCode,
+  message: string,
+): ProviderResult<T> {
   return {
     ok: false,
     error: { code, message, retryable: code === 'UPSTREAM' || code === 'TIMEOUT' },
@@ -83,6 +88,55 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
   let connection: acp.ClientConnection | null = null;
   let connecting: Promise<acp.ClientConnection> | null = null;
   let hermesProc: ChildProcess | null = null;
+  const connectedToolIds = new Set<string>();
+
+  function resetConnection(): void {
+    const processToStop = hermesProc;
+    connection = null;
+    connecting = null;
+    hermesProc = null;
+    connectedToolIds.clear();
+    if (processToStop && processToStop.exitCode === null) processToStop.kill('SIGTERM');
+  }
+
+  async function prepareProfile(): Promise<string> {
+    if (!cfg.baseUrl) throw new Error('AgentOS model gateway base URL is not configured');
+    if (!cfg.mcpUrl) throw new Error('AgentOS MCP gateway URL is not configured');
+    const profileDir = cfg.profileDir ?? resolve(process.cwd(), '.data/hermes-agentos');
+    await mkdir(profileDir, { recursive: true });
+    const configYaml = [
+      'model:',
+      '  default: agentos-router',
+      '  provider: custom',
+      '  base_url: ' + JSON.stringify(cfg.baseUrl),
+      '  key_env: AGENTOS_GATEWAY_API_KEY',
+      '  context_length: 131072',
+      'agent:',
+      '  max_turns: 20',
+      // AgentOS already narrows the catalog before starting Hermes and its
+      // model gateway independently filters every schema against the current
+      // Jev-selected capability set. Keep those MCP schemas eager here so
+      // Hermes cannot hide the selected tool behind its own tool-search
+      // bridge before the request reaches AgentOS.
+      'tools:',
+      '  tool_search:',
+      '    enabled: off',
+      'mcp_servers:',
+      '  agentos:',
+      '    enabled: true',
+      '    url: ' + JSON.stringify(cfg.mcpUrl),
+      '    headers:',
+      '      Authorization: "Bearer ${AGENTOS_MCP_API_KEY}"',
+      '    trust: full',
+      '    timeout: 900',
+      '    tools:',
+      '      resources: false',
+      '      prompts: false',
+      '',
+    ].join('\n');
+    await writeFile(resolve(profileDir, 'config.yaml'), configYaml, 'utf8');
+    return profileDir;
+  }
 
   async function connect(): Promise<acp.ClientConnection> {
     if (connection) return connection;
@@ -90,6 +144,7 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
 
     connecting = (async () => {
       if (!cfg.cwd) throw new Error('HERMES_CWD is not set');
+      const profileDir = await prepareProfile();
 
       // NOT shell:true. `uv` is a real .exe on PATH — Windows CreateProcess
       // resolves that directly. shell:true instead routes through cmd.exe
@@ -98,10 +153,18 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       // process spawn) with `spawn C:\WINDOWS\system32\cmd.exe ENOENT` —
       // reproduced live, not theoretical. Passing argv separately here also
       // sidesteps shell quoting entirely, which is more robust regardless.
-      hermesProc = spawn('uv', ['run', 'hermes-acp'], {
+      const spawned = spawn('uv', ['run', 'hermes-acp'], {
         cwd: cfg.cwd,
         stdio: ['pipe', 'pipe', 'inherit'], // stderr inherited: Hermes's own logs stay visible
+        env: {
+          ...process.env,
+          HERMES_HOME: profileDir,
+          HERMES_ACP_SKIP_CONFIGURED_MCP: '0',
+          AGENTOS_GATEWAY_API_KEY: cfg.apiKey ?? 'agentos-local',
+          AGENTOS_MCP_API_KEY: cfg.mcpApiKey ?? 'agentos-mcp-local',
+        },
       });
+      hermesProc = spawned;
 
       // spawn() returning tells you nothing about whether the process
       // actually started — a bad path/executable surfaces asynchronously as
@@ -110,28 +173,26 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       // whole API server (and with it the web dev server's proxy) the one
       // time this fired — always attach this before doing anything else.
       await new Promise<void>((resolve, reject) => {
-        hermesProc!.once('error', reject);
-        hermesProc!.once('spawn', () => {
-          hermesProc!.removeListener('error', reject);
+        spawned.once('error', reject);
+        spawned.once('spawn', () => {
+          spawned.removeListener('error', reject);
           resolve();
         });
       });
 
-      hermesProc.on('exit', (code) => {
+      spawned.on('exit', (code) => {
         console.error('[hermes:live] hermes-acp exited (code ' + code + ')');
-        connection = null;
-        connecting = null;
+        if (hermesProc === spawned) resetConnection();
       });
       // A LATER error (e.g. the process dies mid-session) must not crash the
       // server either — same reasoning as above, ongoing rather than one-shot.
-      hermesProc.on('error', (err) => {
+      spawned.on('error', (err) => {
         console.error('[hermes:live] hermes-acp process error:', err.message);
-        connection = null;
-        connecting = null;
+        if (hermesProc === spawned) resetConnection();
       });
 
-      const input = Writable.toWeb(hermesProc.stdin!);
-      const output = Readable.toWeb(hermesProc.stdout!);
+      const input = Writable.toWeb(spawned.stdin!);
+      const output = Readable.toWeb(spawned.stdout!);
       const stream = acp.ndJsonStream(input, output);
 
       const conn = acp
@@ -144,7 +205,9 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
               ctx.params.toolCall.title,
           );
           const deny = options.find((o) => o.optionId === 'deny') ?? options[options.length - 1];
-          return Promise.resolve({ outcome: { outcome: 'selected' as const, optionId: deny.optionId } });
+          return Promise.resolve({
+            outcome: { outcome: 'selected' as const, optionId: deny.optionId },
+          });
         })
         .onRequest(acp.methods.client.fs.writeTextFile, async () => ({}))
         .onRequest(acp.methods.client.fs.readTextFile, async () => ({ content: '' }))
@@ -182,7 +245,10 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
         const update = message.notification.update;
         if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
           chunks.push(update.content.text);
-        } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+        } else if (
+          update.sessionUpdate === 'tool_call' ||
+          update.sessionUpdate === 'tool_call_update'
+        ) {
           record.toolCalls.push({
             tool: 'title' in update ? (update.title ?? update.toolCallId) : update.toolCallId,
             at: new Date().toISOString(),
@@ -218,21 +284,47 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
     async startTask(input) {
       const started = Date.now();
       try {
+        const requestedTools = [...new Set(input.tools ?? [])];
+        const catalogChanged = requestedTools.some((toolId) => !connectedToolIds.has(toolId));
+        if (connection && catalogChanged) {
+          if ([...tasks.values()].some((task) => task.status === 'running')) {
+            return failure(
+              'startTask',
+              started,
+              'UPSTREAM',
+              'Hermes must finish the current session before its MCP catalog can refresh.',
+            );
+          }
+          // Hermes discovers MCP schemas when its ACP process starts. Restart
+          // between sessions when task-time discovery added a new selected tool.
+          for (const task of tasks.values()) task.session.dispose();
+          tasks.clear();
+          resetConnection();
+        }
         const conn = await connect();
+        requestedTools.forEach((toolId) => connectedToolIds.add(toolId));
 
         // Best-effort only — see file header limit #1. Never treat this as
         // an enforced boundary.
         const request = conn.agent.buildSession(cfg.cwd as string).toRequest();
-        request._meta = { enabled_toolsets: input.tools ?? [] };
+        request._meta = { enabled_toolsets: requestedTools };
         const session = await conn.agent.buildSession(request).start();
 
         const record: TaskRecord = { status: 'running', log: ['started'], toolCalls: [], session };
         tasks.set(session.sessionId, record);
 
-        session.prompt(input.context ? input.goal + '\n\nContext:\n' + JSON.stringify(input.context) : input.goal);
+        session.prompt(
+          input.context
+            ? input.goal + '\n\nContext:\n' + JSON.stringify(input.context)
+            : input.goal,
+        );
         void drain(record);
 
-        return { ok: true, data: { taskId: session.sessionId }, meta: meta('startTask', started, 'hermes-acp://local') };
+        return {
+          ok: true,
+          data: { taskId: session.sessionId },
+          meta: meta('startTask', started, 'hermes-acp://local'),
+        };
       } catch (err) {
         return failure('startTask', started, 'UPSTREAM', (err as Error).message);
       }
@@ -260,6 +352,38 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
         },
         meta: meta('pollTask', started, 'hermes-acp://local'),
       };
+    },
+
+    async continueTask(taskId, input) {
+      const started = Date.now();
+      const record = tasks.get(taskId);
+      if (!record)
+        return failure('continueTask', started, 'BAD_INPUT', 'Unknown taskId: ' + taskId);
+      if (record.status === 'running') {
+        return failure('continueTask', started, 'BAD_INPUT', 'Task is still running: ' + taskId);
+      }
+
+      try {
+        record.status = 'running';
+        record.result = undefined;
+        record.error = undefined;
+        record.toolCalls = [];
+        record.log.push('continued');
+        record.session.prompt(
+          input.context
+            ? input.instruction + '\n\nContext:\n' + JSON.stringify(input.context)
+            : input.instruction,
+        );
+        void drain(record);
+        return {
+          ok: true,
+          data: null,
+          meta: meta('continueTask', started, 'hermes-acp://local'),
+        };
+      } catch (err) {
+        record.status = 'failed';
+        return failure('continueTask', started, 'UPSTREAM', (err as Error).message);
+      }
     },
 
     async cancelTask(taskId) {

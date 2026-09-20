@@ -5,6 +5,10 @@ Read [agentos-design.md](./agentos-design.md) for the source-of-truth architectu
 from options AgentOS constructs; it does not generate plans, prose, tool arguments, or
 tool calls.
 
+The immediate provider work is broken into mergeable tasks in
+[provider-integration-plan.md](./provider-integration-plan.md). Follow that order for the
+AgentOS MCP gateway, Composio, OpenRouter, and the live email acceptance test.
+
 ## Decisions locked for the MVP
 
 - The user starts the task in the AgentOS dashboard, not the Hermes CLI. The dashboard
@@ -27,6 +31,44 @@ tool calls.
 - Composio credentials and execution stay behind the AgentOS MCP tool gateway. Hermes
   never receives direct authority to call Composio.
 - TypeScript remains the implementation stack.
+
+## Current implementation status — September 20, 2026
+
+- Complete: typed Jev model/tool/risk/completion operations, local eligibility,
+  candidate bounding, deterministic verification, and fail-closed fallbacks.
+- Complete: AgentOS-owned session state with objective, sanitized objective, data
+  labels, compact context history, context version, turn, budget, model/tool routing,
+  harness session ID, latest checkpoint, and lifecycle status. It is persisted,
+  returned with run detail, and emitted as `session.updated` for the UI workstream.
+- Complete: bounded Hermes outer loop with same-session continuation and verified
+  `done | continue | blocked` handling.
+- Complete: authenticated OpenAI-compatible model gateway, per-request Jev routing,
+  trusted tool-descriptor filtering, streaming responses, and a `ChatModelBackend`
+  seam for the OpenRouter workstream.
+- Complete: isolated Hermes profile targeting AgentOS. A live Hermes ACP run was
+  observed making successful requests through `/v1/chat/completions`.
+- Complete: provider-neutral trusted tool registry and exact-action broker with pinned
+  descriptor versions, JSON Schema validation, confirmed-scope checks, Jev risk
+  recommendation, deterministic authorization, approval pause/resume, executor
+  isolation, canonical-state updates, and `tool.lifecycle` events.
+- Complete: turn-scoped tool exposure grants, trusted MCP/model wire-name mapping,
+  tool-result label propagation, and tool-capable route enforcement.
+- Complete: authenticated stateless Streamable HTTP `/mcp` gateway, isolated Hermes
+  profile injection, and one real local read executor. Hermes's own MCP probe discovers
+  the tool.
+- Complete: OpenRouter Chat Completions backend with explicit cheap/frontier OpenAI
+  routes, trusted function-schema forwarding, tool-call validation, timeout/retry,
+  token/cost egress accounting, and live credential health checks.
+- Complete: Ollama local/private, tool-capable backend. The local machine is configured
+  with `qwen3:8b`, and live text/tool-call probes pass without cloud egress.
+- Complete: Composio v3.1 REST adapter, stable user/account isolation, OAuth link/status/
+  refresh APIs, schema/version discovery, and reviewed `GMAIL_SEND_EMAIL` registration
+  behind the exact-action broker. Live execution awaits Composio credentials and OAuth.
+- Deliberate demo constraint: model requests are correlated to the only active Hermes
+  session and fail closed if concurrent sessions are ambiguous. Add per-session gateway
+  credentials before supporting concurrent users.
+- Remaining integrations: configure Composio and run the real approved-email acceptance
+  test; dashboard rendering and Browserbase remain team-owned.
 
 ## Milestone 1 — Fully wired Jev decision layer [P0]
 
@@ -210,16 +252,16 @@ mocks so independent work can begin immediately after the shared contracts land.
 ## MVP acceptance checklist
 
 - [ ] A task entered in the AgentOS UI starts the Hermes loop.
-- [ ] Every Hermes model request passes through the AgentOS model gateway.
-- [ ] Jev chooses only among policy-eligible models and tool schemas on each request.
+- [x] Every Hermes model request passes through the AgentOS model gateway.
+- [x] Jev chooses only among policy-eligible models and tool schemas on each request.
 - [ ] OpenRouter provides multiple cloud model families; local inference remains a
       separate truthful route.
 - [ ] Every executable tool call passes through the AgentOS MCP gateway and exact-action
       authorization before Composio/local execution.
-- [ ] Unknown/unselected tools and missing policy decisions fail closed.
+- [x] Unknown/unselected tools and missing policy decisions fail closed.
 - [ ] The UI shows models, candidate/exposed/called tools, Jev decisions, confidence,
       privacy, risk, approval, completion, latency, tokens, and cost live.
-- [ ] Jev returns `done | continue | blocked` from sanitized session state; only verified
+- [x] Jev returns `done | continue | blocked` from sanitized session state; only verified
       `done` ends the Hermes run.
 - [ ] One side effect demonstrates approve, reject, and revised-payload paths.
 - [ ] AgentOS beats the all-tools/frontier baseline without reducing task success.

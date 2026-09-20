@@ -10,13 +10,19 @@
 import type {
   Capability,
   CapabilityMap,
+  CompletionDecision,
+  ControlDecisionOperation,
+  DataLabel,
+  DecisionState,
   Json,
   ProposedAction,
   ProviderCallContext,
   ProviderId,
   Run,
   ScheduleDecision,
+  SessionCheckpoint,
   Step,
+  ToolDescriptor,
 } from '@htn/shared';
 import { stripPiiValue } from '@htn/shared';
 import type { Store } from '../store/types.js';
@@ -26,6 +32,9 @@ import type { RunBus } from './bus.js';
 import { buildEgressEvent } from './ledger.js';
 import { detectPii } from './redaction.js';
 import { classify } from './risk.js';
+import type { DecisionService } from './decisions/service.js';
+import type { SessionStateService } from './sessions/service.js';
+import type { ToolRegistry } from './tools/registry.js';
 import { fanOut, type FanOutOutcome } from './swarm.js';
 import { getPlaybook } from './playbooks/registry.js';
 import type {
@@ -47,6 +56,19 @@ export interface OrchestratorDeps {
   provider: <C extends Capability>(capability: C) => CapabilityMap[C];
   /** Reads the registry's live BINDINGS, so a re-point is reflected everywhere. */
   providerFor: (capability: Capability) => ProviderId;
+  decisionService: DecisionService;
+  sessionStateService: SessionStateService;
+  toolRegistry?: ToolRegistry;
+  toolDiscovery?: {
+    discoverForTask(input: {
+      query: string;
+      runId: string;
+      stepId?: string;
+      signal?: AbortSignal;
+    }): Promise<{ registered: string[]; skipped: string[]; warning?: string }>;
+  };
+  /** Cached/local catalog sources, including user-configured MCP servers. */
+  localToolCandidates?: () => Promise<string[]>;
 }
 
 export class Orchestrator {
@@ -146,7 +168,7 @@ export class Orchestrator {
   /* ------------------------------------------------------------------ */
 
   private createContext(runId: string, signal: AbortSignal): PlaybookContext {
-    const { store, bus, provider, providerFor } = this.deps;
+    const { store, bus, provider, providerFor, decisionService, sessionStateService } = this.deps;
     /** Keeps placeholder numbering unique across every field in this run. */
     let piiCounter = 0;
 
@@ -178,6 +200,35 @@ export class Orchestrator {
       });
       await bus.emit(runId, { type: 'step.upserted', step });
       return step;
+    };
+
+    const judgeCheckpoint = async (
+      checkpoint: SessionCheckpoint,
+      stepId?: string,
+    ): Promise<CompletionDecision> => {
+      const decision = await decisionService.judgeCompletion(
+        checkpoint,
+        buildCallContext({ stepId, policyRule: 'verified-completion-checkpoint' }),
+      );
+      const fallback = decision.reasonCodes.some(
+        (reason) => reason.includes('fallback') || reason.includes('deterministic'),
+      );
+      await bus.emit(runId, {
+        type: 'control.decided',
+        decision: {
+          id: newId('ctl'),
+          runId,
+          stepId,
+          operation: 'judge_completion',
+          candidateIds: ['done', 'continue', 'blocked'],
+          selectedIds: [decision.status],
+          confidence: decision.confidence,
+          reasonCodes: decision.reasonCodes,
+          source: fallback ? 'fallback' : 'jev',
+          at: nowIso(),
+        },
+      });
+      return decision;
     };
 
     const ctx: PlaybookContext = {
@@ -335,6 +386,8 @@ export class Orchestrator {
 
       callContext: buildCallContext,
 
+      judgeCompletion: judgeCheckpoint,
+
       runAgentTask: async (spec: AgentTaskSpec): Promise<AgentTaskResult> => {
         const step = await createStep({
           label: spec.label,
@@ -353,16 +406,97 @@ export class Orchestrator {
         // healthy call almost immediately.
         const pollIntervalMs = spec.pollIntervalMs ?? 1500;
         const maxPolls = spec.maxPolls ?? 40;
+        const maxTurns = spec.maxTurns ?? 3;
+        let sessionStateId: string | undefined;
 
         try {
-          // 1. Route BEFORE starting the task. This is where tool/model
-          //    optimization actually happens — see AgentTaskSpec's doc comment
-          //    for why it's subtask-granularity, not per-turn.
-          const decider = provider('decision');
-          const routed = await decider.route(
-            { task: spec.goal, availableTools: spec.availableTools },
-            buildCallContext({ stepId: step.id, policyRule: 'subtask-routing' }),
+          // 1. Search and normalize only task-relevant provider tools. Private
+          //    objectives use an explicitly sanitized query; secret/local-only
+          //    objectives never leave the machine for catalog discovery.
+          const labels: DataLabel[] = spec.dataLabels ?? ['public'];
+          const sanitizedTask =
+            spec.sanitizedGoal ??
+            (labels.every((label) => label === 'public') ? spec.goal : undefined);
+          const remoteForbidden = labels.some(
+            (label) => label === 'secret' || label === 'local_only',
           );
+          const decisionState: DecisionState = {
+            taskSummary: sanitizedTask ?? 'Sensitive objective withheld.',
+            dataLabels: labels,
+            sanitizedForRemote: Boolean(sanitizedTask) && !remoteForbidden,
+          };
+
+          const discoveredIds: string[] = [];
+          if (this.deps.localToolCandidates) {
+            discoveredIds.push(...(await this.deps.localToolCandidates()));
+          }
+          if (this.deps.toolDiscovery && sanitizedTask && !remoteForbidden) {
+            const discovery = await this.deps.toolDiscovery.discoverForTask({
+              query: sanitizedTask,
+              runId,
+              stepId: step.id,
+              signal,
+            });
+            discoveredIds.push(...discovery.registered);
+            if (discovery.warning) {
+              await ctx.log('warn', 'Tool discovery failed closed: ' + discovery.warning);
+            }
+            if (discovery.skipped.length > 0) {
+              await ctx.log(
+                'info',
+                'Skipped ' + discovery.skipped.length + ' unclassified provider tool(s).',
+              );
+            }
+          } else if (this.deps.toolDiscovery && (!sanitizedTask || remoteForbidden)) {
+            await ctx.log('info', 'Skipped remote tool discovery for sensitive task state.');
+          }
+
+          // Resolve all candidates through the trusted registry, then use Jev's
+          // typed family/tool decisions before Hermes can start its inner loop.
+          let availableTools = [...new Set([...spec.availableTools, ...discoveredIds])];
+          let selectedBeforeLegacyRoute = availableTools;
+          if (this.deps.toolRegistry) {
+            const descriptors = eligibleTaskTools(
+              await this.deps.toolRegistry.resolve(availableTools),
+              decisionState,
+            );
+            availableTools = descriptors.map((descriptor) => descriptor.id);
+            selectedBeforeLegacyRoute = await selectTaskTools(
+              descriptors,
+              decisionState,
+              decisionService,
+              buildCallContext({ stepId: step.id, policyRule: 'task-tool-selection' }),
+              async (operation, candidateIds, selectedIds, confidence, reasonCodes) => {
+                await bus.emit(runId, {
+                  type: 'control.decided',
+                  decision: {
+                    id: newId('ctl'),
+                    runId,
+                    stepId: step.id,
+                    operation,
+                    candidateIds,
+                    selectedIds,
+                    confidence,
+                    reasonCodes,
+                    source: decisionSource(reasonCodes),
+                    at: nowIso(),
+                  },
+                });
+              },
+            );
+          }
+
+          // The legacy route call still provides the coarse privacy/tier fields
+          // used by ScheduleDecision. It can only narrow the already selected
+          // registry IDs and is skipped for unsanitized remote state.
+          const decider = provider('decision');
+          const routed =
+            decider.mode !== 'live' || decisionState.sanitizedForRemote
+              ? await decider.route(
+                  { task: decisionState.taskSummary, availableTools: selectedBeforeLegacyRoute },
+                  buildCallContext({ stepId: step.id, policyRule: 'subtask-routing' }),
+                )
+              : null;
 
           // FAIL CLOSED, not open — docs/agentos-design.md is explicit:
           // "Routing... failures fail closed; failure never exposes all
@@ -370,8 +504,13 @@ export class Orchestrator {
           // widen it. The task still runs (as a tool-less LLM turn) rather
           // than aborting outright — that's a judgment call, not a spec
           // requirement, and worth revisiting if it turns out to be wrong.
-          const routeResult = routed.ok
-            ? routed.data
+          const routeResult = routed?.ok
+            ? {
+                ...routed.data,
+                exposedTools: routed.data.exposedTools.filter((toolId) =>
+                  selectedBeforeLegacyRoute.includes(toolId),
+                ),
+              }
             : {
                 privacy: 'private' as const,
                 intelligence: 'high' as const,
@@ -381,9 +520,10 @@ export class Orchestrator {
                 exposedTools: [],
                 confidence: 0,
                 rationale:
-                  'Routing failed (' +
-                  routed.error.code +
-                  '); using safe local execution with no tools.',
+                  (routed
+                    ? 'Routing failed (' + routed.error.code + ')'
+                    : 'Remote routing was ineligible for unsanitized state') +
+                  '; using safe local execution with no tools.',
               };
 
           const decision: ScheduleDecision = {
@@ -397,17 +537,35 @@ export class Orchestrator {
             privacyConfidence: routeResult.privacyConfidence,
             intelligenceConfidence: routeResult.intelligenceConfidence,
             modelTier: routeResult.modelTier,
-            availableTools: spec.availableTools,
+            availableTools,
             exposedTools: routeResult.exposedTools,
             confidence: routeResult.confidence,
             escalated: false,
-            rule: routed.ok ? 'jev-routed' : 'route-failed-safe-local',
+            rule: routed?.ok ? 'jev-routed' : 'route-failed-safe-local',
             at: nowIso(),
           };
           await store.createScheduleDecision(decision);
           await bus.emit(runId, { type: 'schedule.decided', decision });
 
-          // 2. Start the task with ONLY the tools Jev exposed.
+          // 2. Register AgentOS's canonical state BEFORE Hermes can make its
+          // first model request. The model gateway resolves this active record
+          // and never treats Hermes's internal transcript as canonical state.
+          const sessionState = await sessionStateService.create({
+            runId,
+            stepId: step.id,
+            harness: 'hermes',
+            objective: spec.goal,
+            sanitizedObjective:
+              spec.sanitizedGoal ??
+              (labels.every((label) => label === 'public') ? spec.goal : undefined),
+            dataLabels: labels,
+            budget: { stepsRemaining: maxTurns },
+            candidateToolIds: decision.exposedTools,
+          });
+          sessionStateId = sessionState.id;
+          await sessionStateService.beginTurn(sessionState.id);
+
+          // 3. Start the task with ONLY the tools Jev exposed.
           const runtime = provider('agent.runtime');
           const started = await runtime.startTask(
             { goal: spec.goal, context: spec.context, tools: decision.exposedTools },
@@ -415,43 +573,206 @@ export class Orchestrator {
           );
           if (!started.ok) throw new Error('Failed to start agent task: ' + started.error.message);
           const taskId = started.data.taskId;
+          await sessionStateService.bindHarnessSession(sessionState.id, taskId);
 
-          // 3. Poll to completion, bounded so a stuck task cannot hang the run.
+          await bus.emit(runId, {
+            type: 'harness.turn',
+            turn: {
+              id: newId('turn'),
+              runId,
+              sessionId: taskId,
+              turnId: taskId + ':1',
+              phase: 'started',
+              at: nowIso(),
+            },
+          });
+
+          // 4. AgentOS owns the bounded outer loop. Hermes owns each inner turn.
           let toolCalls: { tool: string; args?: unknown; at: string }[] = [];
           let finalResult: unknown = null;
           let completed = false;
+          let completionDecision: CompletionDecision | null = null;
+          const requiresToolAction = requiresExternalAction(spec.goal);
 
-          for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-            if (signal.aborted) throw new Error('Run aborted while awaiting agent task');
+          for (let turn = 1; turn <= maxTurns; turn += 1) {
+            let turnCompleted = false;
+            let turnToolCalls: { tool: string; args?: unknown; at: string }[] = [];
+            let pollAttempts = 0;
+            while (pollAttempts < maxPolls) {
+              if (signal.aborted) throw new Error('Run aborted while awaiting agent task');
 
-            const polled = await runtime.pollTask(
-              taskId,
-              buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
+              const polled = await runtime.pollTask(
+                taskId,
+                buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
+              );
+              if (!polled.ok) throw new Error('Agent task polling failed: ' + polled.error.message);
+              if (polled.data.status === 'failed')
+                throw new Error('Agent task ' + taskId + ' failed');
+
+              if (polled.data.status === 'done') {
+                finalResult = polled.data.result ?? null;
+                turnToolCalls = polled.data.toolCalls ?? [];
+                toolCalls.push(...turnToolCalls);
+                turnCompleted = true;
+                break;
+              }
+              const currentRun = await store.getRun(runId);
+              // Human review time is not harness execution time. Keep polling
+              // while the exact action is awaiting approval without consuming
+              // the bounded Hermes poll budget.
+              if (currentRun?.status !== 'awaiting_approval') pollAttempts += 1;
+              await sleep(pollIntervalMs);
+            }
+
+            if (!turnCompleted) break;
+
+            await bus.emit(runId, {
+              type: 'harness.turn',
+              turn: {
+                id: newId('turn'),
+                runId,
+                sessionId: taskId,
+                turnId: taskId + ':' + turn,
+                phase: 'quiescent',
+                payload: toJson({ toolCallCount: turnToolCalls.length }),
+                at: nowIso(),
+              },
+            });
+
+            const hasResult = finalResult !== null && finalResult !== undefined;
+            // Harness tool-result messages include provider errors as well as
+            // successes. Only the broker's authoritative lifecycle event proves
+            // that the exact action passed policy, approval, execution, and
+            // verification; never infer success from a role=tool transcript entry.
+            const hasSuccessfulToolResult = (await store.eventsSince(runId, 0)).some(
+              ({ event }) =>
+                event.type === 'tool.lifecycle' &&
+                event.lifecycle.stepId === step.id &&
+                event.lifecycle.phase === 'succeeded',
             );
-            if (!polled.ok) throw new Error('Agent task polling failed: ' + polled.error.message);
-            if (polled.data.status === 'failed')
-              throw new Error('Agent task ' + taskId + ' failed');
+            const verifiedOutcome = hasResult && (!requiresToolAction || hasSuccessfulToolResult);
+            const outstandingRequirements = [
+              ...(!hasResult ? ['agent-result-missing'] : []),
+              ...(requiresToolAction && !hasSuccessfulToolResult
+                ? ['required-tool-action-not-completed']
+                : []),
+            ];
+            const checkpoint: SessionCheckpoint = {
+              runId,
+              objective: spec.goal,
+              sanitizedObjective:
+                spec.sanitizedGoal ??
+                (labels.every((label) => label === 'public') ? spec.goal : undefined),
+              steps: [
+                {
+                  id: step.id + ':turn:' + turn,
+                  label: spec.label + ' turn ' + turn,
+                  status: 'succeeded',
+                  required: true,
+                  sanitizedSummary: hasResult
+                    ? 'Hermes produced a result for the requested objective.'
+                    : 'Harness produced no result.',
+                },
+              ],
+              artifacts: [
+                {
+                  id: step.id + ':result',
+                  kind: 'harness_result',
+                  required: true,
+                  verified: verifiedOutcome,
+                  dataLabels: labels,
+                  sanitizedSummary: verifiedOutcome
+                    ? 'The required harness result and tool action are present and verified.'
+                    : undefined,
+                },
+              ],
+              verifications: [
+                {
+                  id: step.id + ':result-present',
+                  passed: hasResult,
+                  required: true,
+                  reasonCode: hasResult ? 'result-present' : 'result-missing',
+                },
+                ...(requiresToolAction
+                  ? [
+                      {
+                        id: step.id + ':tool-action-completed',
+                        passed: hasSuccessfulToolResult,
+                        required: true,
+                        reasonCode: hasSuccessfulToolResult
+                          ? 'required-tool-action-completed'
+                          : 'required-tool-action-not-completed',
+                      },
+                    ]
+                  : []),
+              ],
+              outstandingRequirements,
+              pendingApprovalIds: [],
+              dataLabels: labels,
+              budget: { stepsRemaining: Math.max(0, maxTurns - turn) },
+              at: nowIso(),
+            };
+            await sessionStateService.checkpoint(sessionState.id, checkpoint);
+            completionDecision = await judgeCheckpoint(checkpoint, step.id);
 
-            if (polled.data.status === 'done') {
-              finalResult = polled.data.result ?? null;
-              toolCalls = polled.data.toolCalls ?? [];
+            if (completionDecision.status === 'done' && completionDecision.verified) {
               completed = true;
+              await sessionStateService.setStatus(sessionState.id, 'completed');
               break;
             }
-            await sleep(pollIntervalMs);
+            if (completionDecision.status === 'blocked') {
+              await sessionStateService.setStatus(sessionState.id, 'blocked');
+              throw new Error(
+                'Agent task blocked: ' +
+                  (completionDecision.verificationFailures.join(', ') ||
+                    completionDecision.reasonCodes.join(', ')),
+              );
+            }
+            if (turn < maxTurns) {
+              await sessionStateService.beginTurn(sessionState.id);
+              const continued = await runtime.continueTask(
+                taskId,
+                {
+                  instruction:
+                    'Continue working toward the original objective. You must use an available tool when the objective requests an external action; do not claim completion until the tool succeeds. Resolve every missing verification before stopping.',
+                  context: { previousResultPresent: hasResult },
+                },
+                buildCallContext({ stepId: step.id, policyRule: 'bounded-agent-continuation' }),
+              );
+              if (!continued.ok) {
+                throw new Error('Failed to continue agent task: ' + continued.error.message);
+              }
+              await bus.emit(runId, {
+                type: 'harness.turn',
+                turn: {
+                  id: newId('turn'),
+                  runId,
+                  sessionId: taskId,
+                  turnId: taskId + ':' + (turn + 1),
+                  phase: 'started',
+                  at: nowIso(),
+                },
+              });
+            }
           }
 
-          if (!completed) {
+          if (!completed || !completionDecision) {
+            await sessionStateService.setStatus(sessionState.id, 'blocked');
             await runtime.cancelTask(
               taskId,
-              buildCallContext({ stepId: step.id, policyRule: 'poll-timeout-cancel' }),
+              buildCallContext({ stepId: step.id, policyRule: 'outer-loop-budget-cancel' }),
             );
             throw new Error(
-              'Agent task ' + taskId + ' did not complete within ' + maxPolls + ' polls',
+              'Agent task ' + taskId + ' did not reach verified completion within its budget',
             );
           }
 
-          // 4. Post-hoc audit. The runtime ran its own loop internally, so this
+          await runtime.cancelTask(
+            taskId,
+            buildCallContext({ stepId: step.id, policyRule: 'completed-session-close' }),
+          );
+
+          // 5. Post-hoc audit. The runtime ran its own loop internally, so this
           //    is our only visibility into what it touched — recorded into the
           //    SAME ledger real provider calls go through, so "every outbound
           //    call is logged" still holds, just after the fact rather than
@@ -475,12 +796,26 @@ export class Orchestrator {
 
           await this.upsertStep(step.id, {
             status: 'succeeded',
-            output: toJson({ result: finalResult, toolCallCount: toolCalls.length, toolCalls }),
+            output: toJson({
+              result: finalResult,
+              toolCallCount: toolCalls.length,
+              toolCalls,
+              completionDecision,
+            }),
             endedAt: nowIso(),
           });
 
-          return { result: finalResult, scheduleDecision: decision, toolCalls };
+          return { result: finalResult, scheduleDecision: decision, toolCalls, completionDecision };
         } catch (err) {
+          if (sessionStateId) {
+            const state = await sessionStateService.get(sessionStateId);
+            if (state && !['completed', 'blocked', 'cancelled'].includes(state.status)) {
+              await sessionStateService.setStatus(
+                sessionStateId,
+                signal.aborted ? 'cancelled' : 'failed',
+              );
+            }
+          }
           await this.upsertStep(step.id, {
             status: 'failed',
             error: { code: 'AGENT_TASK_FAILED', message: (err as Error).message },
@@ -493,6 +828,73 @@ export class Orchestrator {
 
     return ctx;
   }
+}
+
+function eligibleTaskTools(descriptors: ToolDescriptor[], state: DecisionState): ToolDescriptor[] {
+  return descriptors.filter(
+    (descriptor) =>
+      descriptor.availability === 'available' &&
+      descriptor.baselineEffect !== 'unknown' &&
+      descriptor.simulated !== true &&
+      state.dataLabels.every((label) => descriptor.allowedDataLabels.includes(label)),
+  );
+}
+
+function requiresExternalAction(goal: string): boolean {
+  return /^(?:please\s+)?(?:send|email|message|reply|forward|post|publish|submit|create|update|delete|remove|invite|schedule|book|purchase|pay|transfer)\b/i.test(
+    goal.trim(),
+  );
+}
+
+async function selectTaskTools(
+  descriptors: ToolDescriptor[],
+  state: DecisionState,
+  decisions: DecisionService,
+  ctx: ProviderCallContext,
+  emit: (
+    operation: ControlDecisionOperation,
+    candidateIds: string[],
+    selectedIds: string[],
+    confidence: number,
+    reasonCodes: string[],
+  ) => Promise<void>,
+): Promise<string[]> {
+  const families = [...new Set(descriptors.map((descriptor) => descriptor.family))];
+  const familyDecision = await decisions.selectToolFamilies(state, families, ctx);
+  await emit(
+    'select_tool_families',
+    families,
+    familyDecision.selectedFamilies,
+    average(Object.values(familyDecision.confidences)),
+    familyDecision.reasonCodes,
+  );
+  const selectedFamilies = new Set(familyDecision.selectedFamilies);
+  const narrowed = descriptors.filter((descriptor) => selectedFamilies.has(descriptor.family));
+  const toolDecision = await decisions.selectTools(state, narrowed, ctx);
+  await emit(
+    'select_tools',
+    narrowed.map((descriptor) => descriptor.id),
+    toolDecision.selectedToolIds,
+    average(Object.values(toolDecision.confidences)),
+    toolDecision.reasonCodes,
+  );
+  const selectedIds = new Set(toolDecision.selectedToolIds);
+  return narrowed.filter((descriptor) => selectedIds.has(descriptor.id)).map((tool) => tool.id);
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) return 1;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function decisionSource(reasonCodes: string[]): 'jev' | 'deterministic' | 'fallback' {
+  if (reasonCodes.some((reason) => reason.includes('fallback') || reason.includes('fail-closed'))) {
+    return 'fallback';
+  }
+  if (reasonCodes.some((reason) => reason.includes('deterministic') || reason.startsWith('no-'))) {
+    return 'deterministic';
+  }
+  return 'jev';
 }
 
 /** Best-effort conversion to a storable Json value. Never throws. */

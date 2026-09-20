@@ -2,15 +2,19 @@ import { createApp } from './app.js';
 import { config, logConfigSummary } from './config.js';
 import { seedGraphs } from './services/graphs.service.js';
 import { store } from './store/index.js';
+import { initializeRuntimeProviders, recoverInterruptedRuns } from './services/runtime.js';
 
 async function main(): Promise<void> {
   logConfigSummary();
 
-  // No-op unless PERSIST_TO_DISK=true.
+  // SQLite performs schema setup at construction; memory hydrate is a no-op.
   await store.hydrate();
+  await recoverInterruptedRuns();
 
   // So the canvas is never empty on a cold start. Never overwrites an edit.
   await seedGraphs();
+
+  await initializeRuntimeProviders();
 
   const app = createApp();
   const server = app.listen(config.port, () => {
@@ -21,7 +25,10 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string): void => {
     console.log('[api] ' + signal + ' received, closing');
-    server.close(() => process.exit(0));
+    server.close(() => {
+      if ('close' in store && typeof store.close === 'function') store.close();
+      process.exit(0);
+    });
     // Do not let a hung SSE connection block the exit.
     setTimeout(() => process.exit(0), 2000).unref();
   };
