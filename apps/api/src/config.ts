@@ -102,6 +102,12 @@ const envSchema = z.object({
   GEMINI_CHEAP_MODEL: z.string().default('gemini-3.5-flash-lite'),
   GEMINI_FRONTIER_MODEL: z.string().default('gemini-3.8-flash'),
 
+  // Observability. Entirely inert without SENTRY_DSN: the no-key clone must
+  // still boot and run the full demo, so this may never become required.
+  SENTRY_DSN: z.string().optional(),
+  SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(1),
+  SENTRY_RELEASE: z.string().optional(),
+
   // Mock by default so a keyless clone still exercises the outbound-text check
   // end to end; GPTZERO_API_KEY plus GPTZERO_MODE=live scores for real.
   GPTZERO_MODE: modeEnum.default('mock'),
@@ -283,6 +289,11 @@ export const config = Object.freeze({
   },
   contentCheck: {
     escalationThreshold: env.GPTZERO_ESCALATION_THRESHOLD,
+  },
+  sentry: {
+    dsn: env.SENTRY_DSN,
+    tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
+    release: env.SENTRY_RELEASE,
   },
   browser: {
     maxSessions: env.BROWSER_MAX_SESSIONS,

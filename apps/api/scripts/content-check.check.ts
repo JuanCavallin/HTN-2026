@@ -237,7 +237,199 @@ function mailAction(body: string): ToolAction {
   assert.equal(shortProbe.calls(), 0, 'short text must not spend a call');
 }
 
+// =============================================================================
+// INTEGRATION: the same rules, through the REAL ToolBroker.
+//
+// Everything above tests the checker in isolation. That proves the logic and
+// nothing about whether it is actually wired, so this drives a real broker with
+// a real authorization path and asserts the OBSERVABLE consequence: an action
+// the gate cleared for 'auto' stops at the approval gate instead of executing.
+// =============================================================================
+
+{
+  const { RunBus } = await import('../src/core/bus.js');
+  const { DecisionService } = await import('../src/core/decisions/service.js');
+  const { ToolBroker } = await import('../src/core/tools/broker.js');
+  const { InMemoryToolExecutorRegistry } = await import('../src/core/tools/executors.js');
+  const { InMemoryToolRegistry } = await import('../src/core/tools/registry.js');
+  const { SessionStateService } = await import('../src/core/sessions/service.js');
+  const { createMemoryStore } = await import('../src/store/memory.js');
+
+  const store = createMemoryStore();
+  const bus = new RunBus((runId, event) => store.appendEvent(runId, event));
+
+  // Captured off the bus rather than read back from the store, because the bus
+  // is what the dashboard actually subscribes to.
+  const seen: { runId: string; event: { type: string; [k: string]: unknown } }[] = [];
+  bus.subscribeAll((stored) => {
+    seen.push({ runId: stored.runId, event: stored.event as never });
+  });
+  const sessions = new SessionStateService(store, bus);
+
+  // A decision layer that always says 'auto' — so any stop MUST come from the
+  // content check and cannot be the risk gate doing it anyway.
+  const decisions = new DecisionService({
+    id: 'jev',
+    mode: 'mock',
+    capabilities: ['decision'],
+    async recommendActionPolicy() {
+      return {
+        ok: true,
+        data: {
+          policy: 'auto',
+          confidence: 0.99,
+          probabilities: { auto: 0.99 },
+          reasonCodes: ['test-auto'],
+        },
+        meta: {
+          provider: 'jev',
+          op: 'recommendActionPolicy',
+          mode: 'mock',
+          latencyMs: 0,
+          destination: 'mock://jev',
+        },
+      };
+    },
+  } as never);
+
+  const descriptor = {
+    id: 'mail.send',
+    version: '1',
+    providerId: 'check',
+    family: 'mail',
+    description: 'Send one email.',
+    inputSchemaRef: 'agentos://schemas/mail.send/1',
+    transport: 'mcp',
+    baselineEffect: 'write',
+    reversibility: 'recoverable',
+    requiredScopes: [],
+    allowedDataLabels: ['public'],
+    availability: 'available',
+    executorRef: 'check://mail.send',
+  } as unknown as ToolDescriptor;
+
+  const registry = new InMemoryToolRegistry();
+  registry.register({
+    descriptor,
+    inputSchema: {
+      type: 'object',
+      properties: { to: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } },
+      required: ['to', 'body'],
+      additionalProperties: false,
+    },
+  });
+
+  let executions = 0;
+  const executors = new InMemoryToolExecutorRegistry();
+  executors.register({
+    ref: 'check://mail.send',
+    destinationFor({ arguments: a }) {
+      const args = a as { to?: string };
+      return typeof args.to === 'string' ? 'mailto:' + args.to : undefined;
+    },
+    async execute() {
+      executions += 1;
+      // `verified` because the deterministic risk gate assigns 'verify' to an
+      // unapproved write; without it the broker fails the action for reasons
+      // that have nothing to do with the content check.
+      return { output: {}, summary: 'sent', dataLabels: ['public'], verified: true };
+    },
+  });
+
+  const approvalsRequested: string[] = [];
+  const approvalGate = {
+    async request({ action }: { action: ToolAction }) {
+      approvalsRequested.push(action.id);
+      return { approvalId: 'apr_content_1' };
+    },
+  };
+
+  async function send(analysis: ContentAnalysisAdapter, body: string, runId: string) {
+    const broker = new ToolBroker(registry, executors, decisions, sessions, bus, {
+      approvalGate: approvalGate as never,
+      contentCheck: { analysis },
+    });
+    const state = await sessions.create({
+      runId,
+      stepId: runId + '_step',
+      harness: 'hermes',
+      objective: 'Send an email.',
+      sanitizedObjective: 'Send an email.',
+      dataLabels: ['public'],
+      budget: { stepsRemaining: 2 },
+    });
+    await sessions.beginTurn(state.id);
+    await sessions.grantToolExposure(state.id, {
+      modelCallId: 'chatcmpl_' + runId,
+      selectedToolVersions: { 'mail.send': '1' },
+    });
+    return broker.execute({
+      sessionStateId: state.id,
+      toolId: 'mail.send',
+      arguments: { to: 'alex@example.com', subject: 'Hi', body },
+    });
+  }
+
+  // Machine-sounding body: the gate said auto, so a human prompt proves the
+  // check is wired into the real execution path.
+  const escalated = await send(analysisReturning(0.98, 'ai'), MACHINE_BODY, 'run_escalate');
+  assert.equal(escalated.authorization.finalPolicy, 'ask_user', 'broker must adopt the escalation');
+  assert.equal(approvalsRequested.length, 1, 'the approval gate must actually have been asked');
+  assert.equal(escalated.approvalId, 'apr_content_1');
+  assert.ok(
+    escalated.authorization.reasonCodes.includes('outbound_text_reads_machine_written'),
+    'the reason must survive onto the authorization the trace records',
+  );
+  assert.equal(executions, 1, 'it still executes once approved, it does not block');
+
+  // Human-sounding body: no human prompt added, and it executes unattended.
+  const before = executions;
+  const passed = await send(analysisReturning(0.02, 'human'), MACHINE_BODY, 'run_pass');
+  assert.notEqual(
+    passed.authorization.finalPolicy,
+    'ask_user',
+    'a passing score must not add friction',
+  );
+  assert.equal(approvalsRequested.length, 1, 'no new approval may be requested');
+  assert.equal(executions, before + 1, 'it must still send');
+
+  // Outage: unchanged, still sends. The advisory component cannot block.
+  const degraded = await send(analysisFailing(), MACHINE_BODY, 'run_outage');
+  assert.notEqual(
+    degraded.authorization.finalPolicy,
+    'ask_user',
+    'an outage must not escalate a permitted send',
+  );
+  assert.equal(approvalsRequested.length, 1, 'an outage must not request approval');
+  assert.equal(executions, before + 2, 'an outage must not block the send');
+
+  // And the trace carries the decision for the UI to render.
+  const decision = seen.find(
+    (entry) =>
+      entry.runId === 'run_escalate' &&
+      entry.event.type === 'control.decided' &&
+      (entry.event.decision as { operation?: string }).operation === 'check_outbound_text',
+  );
+  assert.ok(decision, 'the outbound-text decision must reach the event stream');
+  const record = decision.event.decision as { selectedIds: string[]; reasonCodes: string[] };
+  assert.deepEqual(record.selectedIds, ['escalated']);
+  assert.ok(record.reasonCodes.includes('outbound_text_reads_machine_written'));
+
+  // A run whose check merely passed must still be traceable as HAVING RUN —
+  // silence would be indistinguishable from the check being disabled.
+  assert.ok(
+    seen.some(
+      (entry) =>
+        entry.runId === 'run_pass' &&
+        entry.event.type === 'control.decided' &&
+        (entry.event.decision as { operation?: string }).operation === 'check_outbound_text',
+    ),
+    'a passing check must still be recorded',
+  );
+}
+
 console.log(
   'PASS: outbound-text check escalates only, fails open on provider error, ' +
-    'and never scores denied actions, reads, headers, or short strings.',
+    'never scores denied actions, reads, headers, or short strings, ' +
+    'and escalates a real ToolBroker execution to the approval gate.',
 );

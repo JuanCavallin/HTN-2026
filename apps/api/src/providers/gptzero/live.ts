@@ -48,6 +48,19 @@ const CAPABILITIES: readonly Capability[] = ['content.analysis'];
 const DEFAULT_BASE_URL = 'https://api.gptzero.me';
 const TIMEOUT_MS = 12_000;
 
+/**
+ * Our own deadline, ALWAYS applied.
+ *
+ * A caller-supplied signal is a cancellation, not a timeout — a run that is
+ * never cancelled would otherwise let a hung GPTZero request hold the tool
+ * broker open indefinitely, and the broker is mid-authorization when it calls
+ * here. Same shape as jev/live.ts decisionSignal().
+ */
+function scoringSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /** GPTZero rejects trivially short input; below this we do not spend the call. */
 const MIN_SCOREABLE_CHARS = 32;
 /** The API's own document ceiling. Longer text is scored on its leading slice. */
@@ -131,7 +144,7 @@ export function createLiveGptzero(cfg: ProviderConfig): ContentAnalysisAdapter {
         accept: 'application/json',
       },
       body: JSON.stringify(body),
-      signal: signal ?? AbortSignal.timeout(TIMEOUT_MS),
+      signal: scoringSignal(signal),
     });
     if (!response.ok) {
       return {
@@ -156,7 +169,7 @@ export function createLiveGptzero(cfg: ProviderConfig): ContentAnalysisAdapter {
         const result = await post<RawResponse>(
           '/v2/predict/text',
           { document: 'AgentOS provider health probe. '.repeat(3) },
-          AbortSignal.timeout(TIMEOUT_MS),
+          undefined,
         );
         if (!result.ok) {
           return {
@@ -248,7 +261,13 @@ export function createLiveGptzero(cfg: ProviderConfig): ContentAnalysisAdapter {
           meta: meta(cfg, 'analyze', started),
         };
       } catch (error) {
-        const timedOut = error instanceof DOMException && error.name === 'TimeoutError';
+        // AbortError = the run cancelled us; TimeoutError = our own deadline.
+        // Both are timeouts as far as the caller is concerned, and neither is
+        // an upstream fault, so do not report them as one.
+        const aborted =
+          error instanceof DOMException &&
+          (error.name === 'TimeoutError' || error.name === 'AbortError');
+        const timedOut = aborted;
         return {
           ok: false,
           error: {

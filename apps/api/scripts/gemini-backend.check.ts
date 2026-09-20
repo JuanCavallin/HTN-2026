@@ -39,7 +39,11 @@ import {
       role: 'assistant',
       content: '',
       tool_calls: [
-        { id: 'call_abc', type: 'function', function: { name: 'mail_send', arguments: '{"to":"a@b.c"}' } },
+        {
+          id: 'call_abc',
+          type: 'function',
+          function: { name: 'mail_send', arguments: '{"to":"a@b.c"}' },
+        },
       ],
     },
     { role: 'tool', tool_call_id: 'call_abc', content: 'delivered' },
@@ -48,9 +52,7 @@ import {
 
   const model = out.contents[1];
   assert.equal(model?.role, 'model', 'assistant must map to the model role');
-  assert.deepEqual(model?.parts, [
-    { functionCall: { name: 'mail_send', args: { to: 'a@b.c' } } },
-  ]);
+  assert.deepEqual(model?.parts, [{ functionCall: { name: 'mail_send', args: { to: 'a@b.c' } } }]);
 
   // The tool result must be addressed by NAME, recovered from the call id.
   const toolTurn = out.contents[2];
@@ -87,7 +89,11 @@ import {
     properties: {
       to: { type: 'string' },
       cc: { type: 'array', items: { type: 'string' }, default: [] },
-      nested: { type: 'object', additionalProperties: false, properties: { a: { type: 'string' } } },
+      nested: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { a: { type: 'string' } },
+      },
     },
     required: ['to'],
   }) as Record<string, any>;
@@ -108,7 +114,10 @@ import {
 // --- tools wrap into a single functionDeclarations block --------------------
 {
   const tools = toGeminiTools([
-    { type: 'function', function: { name: 'mail_send', description: 'send', parameters: { type: 'object' } } },
+    {
+      type: 'function',
+      function: { name: 'mail_send', description: 'send', parameters: { type: 'object' } },
+    },
     { type: 'function', function: { name: 'browser_open' } },
   ]) as { functionDeclarations: { name: string }[] }[];
 
@@ -126,7 +135,10 @@ import {
     tools: [{ type: 'function', function: { name: 'mail_send' } }],
   } as ChatModelBackendInput;
 
-  const allowed = parseToolCalls([{ functionCall: { name: 'mail_send', args: { to: 'a@b.c' } } }], input);
+  const allowed = parseToolCalls(
+    [{ functionCall: { name: 'mail_send', args: { to: 'a@b.c' } } }],
+    input,
+  );
   assert.equal(allowed.length, 1);
   assert.equal(allowed[0]?.function.name, 'mail_send');
   assert.equal(allowed[0]?.function.arguments, '{"to":"a@b.c"}', 'args must be JSON-stringified');
@@ -145,7 +157,11 @@ import {
 // --- routes only exist when the provider is actually live -------------------
 {
   assert.deepEqual(
-    geminiModelRoutes({ mode: 'mock', keyVar: 'GEMINI_API_KEY', models: { cheap: 'a', frontier: 'b' } }),
+    geminiModelRoutes({
+      mode: 'mock',
+      keyVar: 'GEMINI_API_KEY',
+      models: { cheap: 'a', frontier: 'b' },
+    }),
     [],
     'a mock provider must advertise no cloud routes',
   );

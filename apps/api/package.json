@@ -29,6 +29,7 @@
     "@browserbasehq/stagehand": "^4.1.0",
     "@htn/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@sentry/node": "^10.75.0",
     "ai": "^7.0.107",
     "ajv": "^8.20.0",
     "express": "^5.2.1",

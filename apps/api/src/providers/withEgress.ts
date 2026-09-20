@@ -12,10 +12,16 @@
  *
  * `health()` is exempt: it is a liveness probe, carries no user data, and would
  * otherwise flood the ledger.
+ *
+ * SENTRY TRACING RIDES ON THIS SAME PROXY, deliberately. Putting the span here
+ * rather than in each adapter means "an untraced outbound call is unreachable"
+ * holds for exactly the same structural reason "an unlogged one is unreachable"
+ * does. The span is a no-op without SENTRY_DSN.
  */
 
 import type { ProviderAdapter, ProviderCallContext, ProviderResult } from '@htn/shared';
 import type { EgressInput } from '../core/ledger.js';
+import { annotateEgress, traceProviderCall } from '../lib/observability.js';
 
 export type RecordEgress = (input: EgressInput) => Promise<void>;
 
@@ -36,9 +42,16 @@ export function withEgress(
       if (typeof value !== 'function' || EXEMPT.has(String(prop))) return value;
 
       return async (...args: unknown[]) => {
-        const result = (await (value as (...a: unknown[]) => Promise<unknown>).apply(
-          target,
-          args,
+        const callCtx = args[args.length - 1];
+        const traced = isCallContext(callCtx)
+          ? { runId: callCtx.runId, stepId: callCtx.stepId }
+          : { runId: 'unattributed' };
+
+        // The span wraps the call itself, so latency and thrown errors are the
+        // provider's real ones rather than ours.
+        const result = (await traceProviderCall(
+          { providerId: target.id, op: String(prop), ...traced },
+          () => (value as (...a: unknown[]) => Promise<unknown>).apply(target, args),
         )) as ProviderResult<unknown>;
 
         const ctx = args[args.length - 1];
@@ -52,7 +65,7 @@ export function withEgress(
         }
 
         try {
-          await record({
+          const entry: EgressInput = {
             id: newId('egr'),
             runId: ctx.runId,
             stepId: ctx.stepId,
@@ -67,7 +80,11 @@ export function withEgress(
             tokensIn: result?.meta?.tokensIn,
             tokensOut: result?.meta?.tokensOut,
             estimatedCostCents: result?.meta?.estimatedCostCents,
-          });
+          };
+          // Same numbers on the span and in the ledger, from one source, so the
+          // two can never disagree about what a call cost or where it went.
+          annotateEgress(entry);
+          await record(entry);
         } catch (err) {
           // Never fail a provider call because the ledger write failed.
           console.error('[egress] failed to record:', (err as Error).message);

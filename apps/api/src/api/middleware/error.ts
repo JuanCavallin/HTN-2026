@@ -14,6 +14,7 @@ import {
 } from '../../services/graphs.service.js';
 import { ValidationError } from '../../services/runs.service.js';
 import { NotFoundError } from '../../store/types.js';
+import { captureError } from '../../lib/observability.js';
 import { HttpError } from './validate.js';
 
 export const notFoundHandler: RequestHandler = (req, res) => {
@@ -71,6 +72,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   }
 
   const message = err instanceof Error ? err.message : 'Unknown error';
+  // Only genuinely unhandled faults are captured. Every branch above is the
+  // API behaving correctly — reporting a 404 or a refused revision as an error
+  // would bury the real ones.
+  captureError(err);
   console.error('[api] unhandled error:', err);
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message } });
 };

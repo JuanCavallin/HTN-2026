@@ -80,7 +80,18 @@ export const demoPlaybook = definePlaybook<DemoInput>({
           // Summarizing redacted text is a cheap-tier task by nature — real
           // demonstration of Jev's model_tier reaching an actual model choice
           // (Haiku here), not just a label recorded for telemetry.
-          { prompt: redaction.redacted, maxTokens: 256, tier: 'cheap' },
+          // A bare document with no instruction makes a live model answer with a
+          // refusal-shaped disclaimer. The placeholders are explained so the model
+          // treats them as opaque tokens rather than as missing data.
+          {
+            prompt:
+              'Summarise the case file below in 2-3 plain sentences for a reviewer: what is ' +
+              'being disputed and what needs checking. Tokens like [[PII_1]] are redaction ' +
+              'placeholders; keep them verbatim and do not comment on them.\n\n' +
+              redaction.redacted,
+            maxTokens: 256,
+            tier: 'cheap',
+          },
           ctx.callContext({
             stepId: step.id,
             policyRule: 'redacted-payload-may-leave',
@@ -93,7 +104,7 @@ export const demoPlaybook = definePlaybook<DemoInput>({
 
     /* 3.5. Delegate a bounded subtask to the agent runtime (Hermes). ------ */
     // CANDIDATE_TOOLS stands in for the real 50+ tool registry (a separate
-    // workstream — see docs/implementation_plan.md M1 Person 3). Jev filters
+    // workstream — see docs/archive/implementation_plan.md M1 Person 3). Jev filters
     // this list down before the agent runtime ever sees it; swap this for the
     // real registry's tool names once it exists, nothing else here changes.
     const CANDIDATE_TOOLS = [

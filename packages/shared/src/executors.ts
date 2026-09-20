@@ -13,7 +13,7 @@
  * must agree on exactly one mapping.
  *
  * The palette is not invented here — it matches the classDefs already used in
- * docs/example_flow.md, which the team agreed on before any of this existed.
+ * docs/archive/example_flow.md, which the team agreed on before any of this existed.
  */
 
 import type { GraphNodeType } from './schemas/graph.js';
@@ -78,7 +78,7 @@ export interface ExecutorStyle {
   color: 'slate' | 'emerald' | 'amber' | 'violet' | 'zinc' | 'rose' | 'sky';
   /**
    * True when we cannot see inside the work. RENDER THIS AS A DASHED BORDER —
-   * it is the most honest single mark on the canvas, and docs/example_flow.md
+   * it is the most honest single mark on the canvas, and docs/archive/example_flow.md
    * already uses stroke-dasharray for exactly these boxes.
    */
   opaque: boolean;
