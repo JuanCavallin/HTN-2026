@@ -61,7 +61,11 @@ const FIXTURES: GraphFixture[] = [
             args: {
               'sheets.append': { row: '{{collect.result}}' },
               'calendar.create': { title: 'Review overdue invoices' },
-              'mail.send': { subject: 'Overdue invoices found' },
+              'mail.send': {
+                to: 'avery.chen@example.edu',
+                subject: 'Overdue invoices found',
+                body: '{{collect.result}}',
+              },
             },
           },
         },
@@ -123,7 +127,11 @@ const FIXTURES: GraphFixture[] = [
             args: {
               'sheets.append': { row: '{{summarise.text}}' },
               'docs.draft': { body: '{{summarise.text}}' },
-              'mail.send': { subject: 'Document summary' },
+              'mail.send': {
+                to: 'avery.chen@example.edu',
+                subject: 'Document summary',
+                body: '{{summarise.text}}',
+              },
             },
           },
         },
@@ -174,7 +182,11 @@ const DEFAULT_FIXTURE: Record<string, unknown> = {
         args: {
           'sheets.append': { row: '{{investigate.result}}' },
           'calendar.create': { title: 'Follow up' },
-          'mail.send': { subject: 'Action required' },
+          'mail.send': {
+            to: 'avery.chen@example.edu',
+            subject: 'Action required',
+            body: '{{investigate.result}}',
+          },
         },
       },
     },

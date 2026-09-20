@@ -198,6 +198,21 @@ export interface PlaybookContext {
   }): Promise<{ output: Json; summary: string } | null>;
 
   /**
+   * Which of these tool ids the registry can actually execute right now.
+   *
+   * A decision layer must never be offered a candidate that cannot run. Graph
+   * authors write candidate lists by hand (and a generated graph writes them
+   * from a model), so a list can easily name a tool that no provider
+   * registers — `sheets.append` is the standing example. Without this, the
+   * choice succeeds, the call fails deep inside the toolbox, and the error
+   * blames Composio for a name it was never taught.
+   *
+   * OPTIONAL on purpose: a caller with no registry wired keeps the old
+   * behaviour rather than losing the ability to dispatch at all.
+   */
+  registeredToolIds?(candidates: string[]): Promise<string[]>;
+
+  /**
    * Announce a browser session the UI can offer a live view of.
    *
    * Same shape as `recordSchedule`: core declares what it needs, the

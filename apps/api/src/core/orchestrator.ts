@@ -421,6 +421,19 @@ export class Orchestrator {
         };
       },
 
+      registeredToolIds: async (candidates: string[]): Promise<string[]> => {
+        const registry = this.deps.toolRegistry;
+        if (!registry) return candidates;
+        const resolved = await registry.resolve(candidates);
+        const executable = new Set(
+          resolved
+            .filter((descriptor) => descriptor.availability === 'available')
+            .map((descriptor) => descriptor.id),
+        );
+        // Preserve the caller's ordering; it is the author's stated preference.
+        return candidates.filter((id) => executable.has(id));
+      },
+
       callBrokeredTool: async ({ stepId, toolId, args }) => {
         const broker = this.deps.toolBroker;
         const registry = this.deps.toolRegistry;

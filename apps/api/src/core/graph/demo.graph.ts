@@ -88,7 +88,15 @@ export function buildDemoGraph(at: string): AgentGraph {
           args: {
             'sheets.append': { row: '{{summary.text}}' },
             'calendar.create': { title: 'Review case {{input.target}}' },
-            'mail.send': { subject: 'Case summary {{input.target}}' },
+            // `to` and `body` are REQUIRED by the mail.send schema. Supplying
+            // only a subject made this node fail argument validation inside the
+            // broker. example.edu is reserved and unroutable, so even an
+            // approved send cannot reach a real inbox.
+            'mail.send': {
+              to: 'avery.chen@example.edu',
+              subject: 'Case summary {{input.target}}',
+              body: '{{summary.text}}',
+            },
           },
           argsFrom: 'static',
           evidence: 'The summary is already redacted; no raw values are in play.',
