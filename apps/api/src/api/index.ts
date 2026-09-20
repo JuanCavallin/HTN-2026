@@ -7,6 +7,7 @@
 import type { Express } from 'express';
 import { Router } from 'express';
 import { approvalsRouter } from './approvals.routes.js';
+import { conversationsRouter } from './conversations.routes.js';
 import { graphsRouter } from './graphs.routes.js';
 import { providersRouter } from './providers.routes.js';
 import { runsRouter } from './runs.routes.js';
@@ -27,6 +28,9 @@ export function mountRoutes(app: Express): void {
   api.use(graphsRouter);
   api.use(runsRouter);
   api.use(approvalsRouter);
+  // The chat that AUTHORS a graph. This is the workspace composer's endpoint --
+  // without it the app's front door returns 404 and nothing can be created.
+  api.use(conversationsRouter);
   api.use(streamRouter);
   api.use(toolsRouter);
   api.use(mcpConnectionsRouter);
