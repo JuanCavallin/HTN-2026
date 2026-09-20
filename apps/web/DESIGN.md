@@ -187,7 +187,7 @@ signal hues that never vary by theme.
   than one thing on screen is this color, the screen is wrong.
 - **Sage Lift** (`accent-bright`): the hover state of the primary action, and the top rung
   of the ladder. Never used at rest.
-- **Sage Ink** (`accent-ink`): the near-black that sits *on* the accent. Type on the accent
+- **Sage Ink** (`accent-ink`): the near-black that sits _on_ the accent. Type on the accent
   is this, never the page text color.
 
 ### Secondary
@@ -298,7 +298,7 @@ glance during a run, not browsed.
 
 **There are no shadows in this system.** Not one `box-shadow` exists in `workspace.css`, and
 none should be added. Depth is expressed entirely as tonal layering against the luminance
-ladder: a surface's lightness *is* its elevation, and a 1px hairline at the matching rung
+ladder: a surface's lightness _is_ its elevation, and a 1px hairline at the matching rung
 separates it from its neighbour.
 
 This is why the ladder is generated. With shadows, a surface that lands on the wrong rung
@@ -311,7 +311,7 @@ not look slightly off, it makes the hierarchy unreadable.
 and nothing may sit below it. In `daylight` the rule inverts to its light-ground equivalent:
 `canvas` is the quietest surface and executed work carries the most ink.
 
-**The Recessive Plan Rule.** Planned structure sits *below* materialized work on the ladder
+**The Recessive Plan Rule.** Planned structure sits _below_ materialized work on the ladder
 in all five worlds, `daylight` included. Dimming is not a styling preference here; it is the
 visual form of "we have not observed this yet."
 
@@ -342,7 +342,8 @@ appears nowhere else. Dashed means "told to us, not observed."
 - **Secondary:** `surface-3` ground, 1px `line-3` border, accent-tinted type.
 - **Icon:** transparent at rest, `hover` ground on hover, 5px radius, 6px padding.
 - **Disabled:** a disabled control keeps its shape and states its reason in adjacent copy.
-  "Pause unavailable" stays visibly disabled on a live run rather than disappearing.
+  "Pause unavailable" stays visibly disabled once a run has finished, rather than
+  disappearing — pause/resume itself is implemented and enabled while a run is live.
 
 ### Cards / Containers
 
@@ -383,7 +384,7 @@ of three mutually exclusive states that the product forbids blurring:
 
 Off-path nodes drop to 0.58 opacity unless selected. A junction dot (6px, `mark` border,
 `canvas` fill) marks more than one route in or out. State transitions run 300ms on
-background, border, color and opacity together so a node *becoming* real is legible as a
+background, border, color and opacity together so a node _becoming_ real is legible as a
 change rather than a repaint.
 
 ### Browser Surfaces

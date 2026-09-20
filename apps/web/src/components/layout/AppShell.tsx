@@ -63,6 +63,12 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   };
 
+  // Load provider health once on mount. Without this the composer's backend mode sees an
+  // empty provider list and refuses the first send until the user opens this dialog by hand.
+  useEffect(() => {
+    void connect();
+  }, []);
+
   return (
     <HarnessContext.Provider value={{ providers, openConnection: () => setConnectionOpen(true) }}>
       <div className="app-shell">
@@ -106,7 +112,11 @@ export function AppShell({ children }: { children: ReactNode }) {
                     ? 'Run history'
                     : location.pathname.startsWith('/runs/')
                       ? 'Execution'
-                      : 'Conversation'}
+                      : location.pathname === '/connections'
+                        ? 'Connections'
+                        : location.pathname === '/compare'
+                          ? 'Compare'
+                          : 'Conversation'}
               </strong>
             </div>
             <button

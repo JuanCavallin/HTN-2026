@@ -260,7 +260,7 @@ progress in parallel.
 | Person 4 | Dashboard, metrics and demo            | Dashboard                                                                | UI task entry and Hermes-run wrapper; live trace; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation                                                                                                                                                | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints                     |
 
 Person 3's scope is split across two people — **3A (tool registry and MCP)** and
-**3B (browser and Browserbase)**. See [person-3.md](./person-3.md) for that breakdown,
+**3B (browser and Browserbase)**. See [person-3.md](./archive/person-3.md) for that breakdown,
 the seam between the two tracks, and the files each one owns.
 
 ### Handoffs

@@ -32,27 +32,37 @@ calling, no agent loop.
 | Write a selector, plan, or any prose | **no** — use a generative model                            |
 | Decide what to type into a field     | **no** — Jev picks the field, a small LLM writes the value |
 
+We reach Jev through the Vercel AI SDK's AI Gateway. **`@typesafe-ai/sdk` is NOT a
+dependency of this repo and must not become one.**
+
 ```bash
-npm install @typesafe-ai/sdk     # Node 20+; TYPESAFE_API_KEY in the root .env
+# `ai` is already a dependency of @htn/api. AI_GATEWAY_API_KEY goes in the root .env.
 ```
 
 ```ts
-import { choice, noul, score, TypeSafeClient } from '@typesafe-ai/sdk';
+import { createGateway, experimental_evaluate as evaluate } from 'ai';
 
-const client = new TypeSafeClient(); // model: "jev-latest"
-const r = await client.systemOne({
+const model = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY }) //
+  .evaluationModel('typesafe-ai/jev');
+
+const response = await evaluate({
+  model,
   state: { document: 'I was charged twice.' },
   questions: {
-    billing: noul('Is this about billing?'),
-    tone: choice('Tone?', { calm: null, angry: null }),
-    urgency: score('How urgent?', ['can wait', 'this week', 'today']),
+    billing: { type: 'noul', instructions: 'Is this about billing?' },
+    tone: { type: 'choice', instructions: 'Tone?', criteria: { calm: null, angry: null } },
+    urgency: {
+      type: 'score',
+      instructions: 'How urgent?',
+      criteria: ['can wait', 'this week', 'today'],
+    },
   },
 });
 
-r.answers.billing.noul; // 0..1
-r.answers.tone.choice; // a criteria key — type-inferred
-r.answers.urgency.score; // float, e.g. 1.3
-r.answers.tone.confidence; // calibrated
+response.answers.billing.noul; // 0..1
+response.answers.tone.choice; // a criteria key — type-inferred
+response.answers.urgency.score; // float, e.g. 1.3
+response.answers.tone.probabilities; // distribution — derive confidence from this
 ```
 
 Many questions in one request is cheap — latency is per-request. Batch aggressively.
@@ -152,9 +162,11 @@ Tick a checkbox when a command proved it, not when the code was written.
 ```bash
 pnpm typecheck  # all packages
 pnpm dev        # api on :8787, web on :5173
+pnpm test       # check:all (apps/api/scripts/check-*.ts) + node --test web tests
 pnpm smoke      # end-to-end against a running api
 pnpm format     # prettier
 ```
 
-There is **no test runner in the repo yet** — adding one (vitest) is root tooling, which
-Person 4 owns. The browser work needs it: the fail-closed gate paths are unit tests.
+CI (`.github/workflows/ci.yml`) runs `pnpm typecheck`, `pnpm test`, and `pnpm build` on
+every push/PR to `main`. `check:analytics` is deliberately excluded from CI because it
+needs a live API — run it locally against `pnpm dev:api`.

@@ -16,7 +16,10 @@ cross it.
   `ToolAction`, calls `authorizeAction`, waits for exact-action approval when required,
   invokes one executor once, and records a compact result in canonical session state.
 - `apps/api/src/core/tools/approval.ts` connects `ask_user` to the existing persisted
-  approval and in-memory pause/resume mechanism.
+  approval and in-memory pause/resume mechanism. A revision
+  (`ToolApprovalReceipt.revisedArguments`) is re-validated by `broker.ts`, which rejects
+  any attempt to change the destination and reruns `authorizeAction` before executing —
+  failing closed unless the revision comes back a clean allow.
 - `apps/api/src/services/runtime.ts` exports `toolRegistry`, `toolExecutors`, and
   `toolBroker` for the MCP transport or a provider bootstrapper.
 - `apps/api/src/providers/composio/register.ts` performs task-scoped catalog discovery,
@@ -120,6 +123,19 @@ changed, privacy-ineligible, denied, or unapproved actions fail closed before ex
 code runs. `tool.lifecycle`, `control.decided`, `approval.*`, `session.updated`, and
 `harness.turn` events give the dashboard the complete trace.
 
+## Outbound-text authenticity check (GPTZero)
+
+`apps/api/src/core/tools/contentCheck.ts` runs between `authorizeAction` and execution
+for tools that send prose in the user's name (`mail.send`, `localbrowser.type`,
+`browserbase.type`). It scores the outbound text with GPTZero
+(`apps/api/src/providers/gptzero/live.ts`) and is **escalate-only**: it can move the
+final policy `auto -> verify -> ask_user`, never the reverse, and it can never turn
+`deny` into anything or mark an unauthorized action allowed. It is also the one place in
+the broker that fails **open** — a GPTZero outage or missing key leaves the
+already-authorized policy untouched rather than blocking a permitted send, and the trace
+records `unavailable` rather than implying the text was checked. The check is optional
+(`ToolBrokerOptions.contentCheck`); omitting it disables scoring entirely.
+
 ## Verification
 
 Run:
@@ -129,6 +145,7 @@ pnpm check:model-gateway
 pnpm check:mcp-gateway
 pnpm check:tool-broker
 pnpm check:composio-catalog
+pnpm check:content-check
 pnpm typecheck
 ```
 
