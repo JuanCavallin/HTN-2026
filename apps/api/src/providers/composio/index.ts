@@ -28,22 +28,77 @@ const CAPABILITIES: readonly Capability[] = ['toolbox'];
  */
 const TOOLS: ToolCatalogEntry[] = [
   // Reads. Reversible, so they run automatically.
-  { name: 'browser.navigate', description: 'Open a URL in a browser session.', actionKind: 'read_page', group: 'browser' },
-  { name: 'browser.extract', description: 'Extract text from the current page.', actionKind: 'read_page', group: 'browser' },
-  { name: 'web.search', description: 'Search the public web.', actionKind: 'read_page', group: 'web' },
-  { name: 'docs.read', description: 'Read the contents of a document.', actionKind: 'read_page', group: 'docs' },
+  {
+    name: 'browser.navigate',
+    description: 'Open a URL in a browser session.',
+    actionKind: 'read_page',
+    group: 'browser',
+  },
+  {
+    name: 'browser.extract',
+    description: 'Extract text from the current page.',
+    actionKind: 'read_page',
+    group: 'browser',
+  },
+  {
+    name: 'web.search',
+    description: 'Search the public web.',
+    actionKind: 'read_page',
+    group: 'web',
+  },
+  {
+    name: 'docs.read',
+    description: 'Read the contents of a document.',
+    actionKind: 'read_page',
+    group: 'docs',
+  },
 
   // Recoverable: undoable, but only via a human or a support path.
-  { name: 'sheets.append', description: 'Append a row to a spreadsheet ledger.', actionKind: 'update_profile', group: 'sheets' },
-  { name: 'calendar.create', description: 'Create a calendar event.', actionKind: 'schedule', group: 'calendar' },
-  { name: 'docs.draft', description: 'Create a draft document.', actionKind: 'create_draft', group: 'docs' },
+  {
+    name: 'sheets.append',
+    description: 'Append a row to a spreadsheet ledger.',
+    actionKind: 'update_profile',
+    group: 'sheets',
+  },
+  {
+    name: 'calendar.create',
+    description: 'Create a calendar event.',
+    actionKind: 'schedule',
+    group: 'calendar',
+  },
+  {
+    name: 'docs.draft',
+    description: 'Create a draft document.',
+    actionKind: 'create_draft',
+    group: 'docs',
+  },
 
   // Irreversible. These always stop for a human.
-  { name: 'forms.submit', description: 'Submit a web form on the user behalf.', actionKind: 'submit_form', group: 'browser' },
+  {
+    name: 'forms.submit',
+    description: 'Submit a web form on the user behalf.',
+    actionKind: 'submit_form',
+    group: 'browser',
+  },
   { name: 'mail.send', description: 'Send an email.', actionKind: 'send_email', group: 'mail' },
-  { name: 'notify.slack', description: 'Post a message to a Slack channel.', actionKind: 'send_message', group: 'chat' },
-  { name: 'notify.sms', description: 'Send an SMS message.', actionKind: 'send_message', group: 'chat' },
-  { name: 'payments.charge', description: 'Charge a payment method.', actionKind: 'make_payment', group: 'billing' },
+  {
+    name: 'notify.slack',
+    description: 'Post a message to a Slack channel.',
+    actionKind: 'send_message',
+    group: 'chat',
+  },
+  {
+    name: 'notify.sms',
+    description: 'Send an SMS message.',
+    actionKind: 'send_message',
+    group: 'chat',
+  },
+  {
+    name: 'payments.charge',
+    description: 'Charge a payment method.',
+    actionKind: 'make_payment',
+    group: 'billing',
+  },
 ];
 
 export function create(cfg: ProviderConfig): ToolboxAdapter {
