@@ -474,10 +474,90 @@ export class Orchestrator {
           let availableTools = [...new Set([...spec.availableTools, ...discoveredIds])];
           let selectedBeforeLegacyRoute = availableTools;
           if (this.deps.toolRegistry) {
-            const descriptors = eligibleTaskTools(
-              await this.deps.toolRegistry.resolve(availableTools),
-              decisionState,
+            const resolved = await this.deps.toolRegistry.resolve(availableTools);
+
+            // SAY SO WHEN A CANDIDATE DOES NOT EXIST. `resolve` drops unknown
+            // ids silently, and `eligibleTaskTools` drops unavailable ones, so
+            // a graph naming tools that were renamed or never registered hands
+            // the harness an EMPTY toolset and looks, from the outside, like
+            // the harness simply failing at its job. That is exactly what
+            // happened with `web.search`/`docs.read` in demo.graph: 0 of 7
+            // resolved, Hermes fell back to its own tools, and the only symptom
+            // was three `browser_exec` failures in a row.
+            //
+            // Warn, do not throw: an unknown candidate is an authoring mistake
+            // to surface, not a reason to abort a run that may still succeed on
+            // the tools that did resolve.
+            const unknown = availableTools.filter(
+              (id) => !resolved.some((descriptor) => descriptor.id === id),
             );
+            if (unknown.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" named ' +
+                  unknown.length +
+                  ' tool(s) that are not in the registry, so they were dropped: ' +
+                  unknown.join(', ') +
+                  '. Use the ids from GET /api/tools.',
+              );
+            }
+
+            const descriptors = eligibleTaskTools(resolved, decisionState);
+
+            // Report WHY each tool was dropped, separately. Lumping these
+            // together sends you hunting the wrong cause: the first time this
+            // fired it blamed data labels when the real reason was that every
+            // browser tool registers as `unavailable` outside live mode.
+            const unavailable = resolved.filter(
+              (descriptor) =>
+                descriptor.availability !== 'available' ||
+                descriptor.baselineEffect === 'unknown' ||
+                descriptor.simulated === true,
+            );
+            const mislabelled = resolved.filter(
+              (descriptor) =>
+                !unavailable.includes(descriptor) &&
+                !descriptors.some((kept) => kept.id === descriptor.id),
+            );
+            if (unavailable.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" dropped ' +
+                  unavailable.length +
+                  ' tool(s) as unavailable or unclassified: ' +
+                  unavailable
+                    .map((descriptor) => descriptor.id + ' (' + descriptor.availability + ')')
+                    .join(', '),
+              );
+            }
+            if (mislabelled.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" dropped ' +
+                  mislabelled.length +
+                  ' tool(s) whose data labels do not cover this task (' +
+                  decisionState.dataLabels.join(', ') +
+                  '): ' +
+                  mislabelled.map((descriptor) => descriptor.id).join(', '),
+              );
+            }
+
+            if (descriptors.length === 0 && availableTools.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" has NO usable tools after resolution. The harness will run as a ' +
+                  'tool-less turn; any tool it appears to call is its own, not ours.',
+              );
+            }
+
             availableTools = descriptors.map((descriptor) => descriptor.id);
             selectedBeforeLegacyRoute = await selectTaskTools(
               descriptors,
