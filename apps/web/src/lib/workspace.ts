@@ -1,4 +1,11 @@
-import type { AgentGraph, RunView, StepStatus, ScheduleDecision } from '@htn/shared';
+import type {
+  AgentGraph,
+  RunView,
+  StepStatus,
+  ScheduleDecision,
+  ToolLifecycleEvent,
+  ToolLifecyclePhase,
+} from '@htn/shared';
 
 export type Scenario = 'support' | 'trip';
 
@@ -20,7 +27,150 @@ export type TraceNode = {
   unplanned: boolean;
   /** A route the user changed from the inspector. Preview only; see `canInterveneLive`. */
   revised?: boolean;
+  /**
+   * What the node is. Absent means an ordinary step. A tool node is either `tool-called`
+   * (the broker reported an exact action for it) or `tool-exposed` (AgentOS/Jev offered it
+   * to the agent and nothing has been reported as called). The two must never be conflated:
+   * being exposed is not evidence that anything ran.
+   */
+  role?: 'tool-called' | 'tool-exposed';
+  tool?: TraceTool;
 };
+
+export type TraceTool = {
+  id: string;
+  /** 'composio' | 'browserbase' | 'localbrowser' | 'mcp' ... Undefined when the catalog is unknown. */
+  providerId?: string;
+  family?: string;
+  effect?: string;
+  /** Latest lifecycle phase of a called tool. Absent for an exposed-only tool. */
+  phase?: ToolLifecyclePhase;
+  /** How many exact actions the agent proposed for this tool on this step. */
+  attempts: number;
+  /** Deterministic final policy: auto | verify | ask_user | deny. */
+  policy?: string;
+  reasonCodes: string[];
+  destination?: string;
+  dataLabels: string[];
+  /** Truncated JSON of the exact arguments. Already visible in the approval panel. */
+  argsPreview?: string;
+  outputSummary?: string;
+  errorMessage?: string;
+  approvalId?: string;
+};
+
+/** The slice of a catalog entry the trace needs. Optional everywhere: an old API omits it. */
+export type ToolMeta = { providerId?: string; family?: string; effect?: string };
+
+const PROVIDER_LABELS: Record<string, string> = {
+  composio: 'Composio',
+  browserbase: 'Browserbase',
+  localbrowser: 'Local browser',
+  mcp: 'MCP',
+  hermes: 'Hermes',
+};
+export const providerLabel = (id?: string) =>
+  id ? (PROVIDER_LABELS[id] ?? id) : 'Provider unknown';
+
+/**
+ * A glyph for the app a tool belongs to. Deliberately local and static: no image is fetched
+ * from anywhere, so it renders offline, in mock mode, and adds no browser egress.
+ *
+ * Keyed on the tool's family first (a Composio family is its toolkit slug, e.g. `gmail`),
+ * then on the id's domain (`mail.send` -> `mail`). An unknown app gets its provider's
+ * glyph rather than a wrong guess.
+ */
+const APP_GLYPHS: Record<string, string> = {
+  mail: '✉️',
+  gmail: '✉️',
+  outlook: '✉️',
+  calendar: '📅',
+  googlecalendar: '📅',
+  sheets: '📊',
+  googlesheets: '📊',
+  excel: '📊',
+  docs: '📄',
+  googledocs: '📄',
+  drive: '📁',
+  googledrive: '📁',
+  notion: '📝',
+  github: '🐙',
+  gitlab: '🦊',
+  slack: '💬',
+  discord: '💬',
+  teams: '💬',
+  linear: '🧭',
+  jira: '🧭',
+  trello: '🗂️',
+  asana: '🗂️',
+  hubspot: '🤝',
+  salesforce: '🤝',
+  crm: '🤝',
+  stripe: '💳',
+  twitter: '🐦',
+  linkedin: '💼',
+  forms: '📋',
+  web: '🔎',
+  browser: '🌐',
+  agentos: '🧩',
+};
+const PROVIDER_GLYPHS: Record<string, string> = {
+  composio: '🔌',
+  browserbase: '🌐',
+  localbrowser: '🖥️',
+  mcp: '🧩',
+};
+export function toolGlyph(tool: { id: string; family?: string; providerId?: string }): string {
+  const domain = tool.id.split('.')[0]?.toLowerCase() ?? '';
+  return (
+    APP_GLYPHS[(tool.family ?? '').toLowerCase()] ??
+    APP_GLYPHS[domain] ??
+    PROVIDER_GLYPHS[tool.providerId ?? ''] ??
+    '🔧'
+  );
+}
+
+/**
+ * What the provider is doing for this tool right now, in the words the user would use.
+ * "Connecting" is claimed only while the broker has reported it is executing: earlier
+ * phases are policy work, and `awaiting_approval` is the human's turn, not Composio's.
+ */
+export function toolActivity(node: Pick<TraceNode, 'role' | 'tool'>): string | undefined {
+  const tool = node.tool;
+  if (!tool) return undefined;
+  const from = providerLabel(tool.providerId);
+  if (node.role === 'tool-exposed') return `Available via ${from}`;
+  switch (tool.phase) {
+    case 'proposed':
+    case 'policy_decided':
+      return 'Checking policy';
+    case 'awaiting_approval':
+      return 'Needs your approval';
+    case 'approved':
+    case 'executing':
+      return `Connecting to ${from}…`;
+    case 'succeeded':
+      return `Ran via ${from}`;
+    case 'blocked':
+      return 'Blocked by policy';
+    case 'failed':
+      return `Failed via ${from}`;
+    default:
+      return undefined;
+  }
+}
+
+const TOOL_STATUS: Record<ToolLifecyclePhase, StepStatus> = {
+  proposed: 'running',
+  policy_decided: 'running',
+  awaiting_approval: 'blocked',
+  approved: 'running',
+  executing: 'running',
+  succeeded: 'succeeded',
+  blocked: 'failed',
+  failed: 'failed',
+};
+const TOOL_TERMINAL = new Set<ToolLifecyclePhase>(['succeeded', 'blocked', 'failed']);
 
 export type Trace = {
   nodes: TraceNode[];
@@ -151,7 +301,170 @@ const sumKnown = (values: (number | undefined)[]) => {
   return known.length ? known.reduce((sum, value) => sum + value, 0) : undefined;
 };
 
-export function buildTrace(view: RunView, graph?: AgentGraph | null, now = Date.now()): Trace {
+const jsonPreview = (value: unknown, limit = 600) => {
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+  if (text === undefined) return undefined;
+  return text.length > limit ? text.slice(0, limit - 1) + '…' : text;
+};
+
+const pairKey = (stepId: string, toolId: string) => stepId + '\u0000' + toolId;
+
+/**
+ * One node per exact tool action the broker reported, plus one per tool that was exposed to
+ * a step and never called.
+ *
+ * WHY THIS EXISTS: an `agent` run has a single outer step. Everything the agent did with a
+ * tool arrives only as `tool.lifecycle` events, and what it was allowed to use arrives as
+ * Jev, model and session selections. Read from steps alone, the graph would show one node
+ * and hide every Composio call.
+ *
+ * Exposure is unioned across three sources because each is written at a different moment:
+ * Jev's `select_tools` decision, the tools on each model request, and the session's latest
+ * grant. Called wins over exposed: a tool with a reported action is drawn once per action
+ * and not again as a ghost.
+ */
+function buildToolNodes(
+  view: RunView,
+  catalog: ReadonlyMap<string, ToolMeta> | undefined,
+  now: number,
+  anchorFor: (stepId: string | undefined) => string | undefined,
+): { nodes: TraceNode[]; edges: Trace['edges'] } {
+  // Older callers and tests build a RunView without these collections.
+  const lifecycle = view.toolLifecycle ?? [];
+  const sessions = view.agentSessions ?? [];
+  const nodes: TraceNode[] = [];
+  const edges: Trace['edges'] = [];
+  const meta = (id: string): ToolMeta => catalog?.get(id) ?? {};
+  const routeText = (id: string) => {
+    const info = meta(id);
+    return [providerLabel(info.providerId), info.effect].filter(Boolean).join(' · ');
+  };
+
+  const byAction = new Map<string, ToolLifecycleEvent[]>();
+  for (const event of lifecycle) {
+    byAction.set(event.action.id, [...(byAction.get(event.action.id) ?? []), event]);
+  }
+  const attempts = new Map<string, number>();
+  for (const events of byAction.values()) {
+    const { stepId, toolId } = events[0]!.action;
+    attempts.set(pairKey(stepId, toolId), (attempts.get(pairKey(stepId, toolId)) ?? 0) + 1);
+  }
+
+  for (const [actionId, events] of byAction) {
+    const latest = events[events.length - 1]!;
+    const { action } = latest;
+    const newest = [...events].reverse();
+    const auth = newest.find((event) => event.authorization)?.authorization;
+    const summary = newest.find((event) => event.outputSummary)?.outputSummary;
+    const failure = newest.find((event) => event.error)?.error;
+    const approvalId = newest.find((event) => event.approvalId)?.approvalId;
+    const info = meta(action.toolId);
+    const start = Date.parse(events[0]!.at);
+    const end = Date.parse(latest.at);
+    const id = 'tool:' + actionId;
+    const parent = anchorFor(action.stepId);
+    nodes.push({
+      id,
+      label: action.toolId,
+      kind: 'tool_call',
+      role: 'tool-called',
+      status: TOOL_STATUS[latest.phase],
+      planned: false,
+      unplanned: false,
+      route: routeText(action.toolId),
+      detail:
+        failure?.message ??
+        summary ??
+        (latest.phase === 'awaiting_approval'
+          ? 'Waiting for your approval of this exact action.'
+          : latest.phase === 'succeeded'
+            ? 'The tool reported success.'
+            : 'Authorized as ' +
+              (auth?.finalPolicy ?? 'pending') +
+              '. Not yet reported as complete.'),
+      position: { x: 0, y: 0 },
+      durationMs: Number.isFinite(start)
+        ? Math.max(0, (TOOL_TERMINAL.has(latest.phase) ? end : now) - start)
+        : undefined,
+      tool: {
+        id: action.toolId,
+        providerId: info.providerId,
+        family: info.family,
+        effect: info.effect,
+        phase: latest.phase,
+        attempts: attempts.get(pairKey(action.stepId, action.toolId)) ?? 1,
+        policy: auth?.finalPolicy,
+        reasonCodes: auth?.reasonCodes ?? [],
+        destination: action.destination,
+        dataLabels: action.dataLabels,
+        argsPreview: jsonPreview(action.arguments),
+        outputSummary: summary,
+        errorMessage: failure?.message,
+        approvalId,
+      },
+    });
+    if (parent) edges.push({ id: parent + '->' + id, source: parent, target: id, planned: false });
+  }
+
+  // Exposed: offered to the step and never reported as called.
+  const exposed = new Map<string, { stepId: string; toolId: string }>();
+  const expose = (stepId: string | undefined, toolIds: string[] | undefined) => {
+    if (!stepId) return;
+    for (const toolId of toolIds ?? []) exposed.set(pairKey(stepId, toolId), { stepId, toolId });
+  };
+  for (const session of sessions) expose(session.stepId, session.selectedToolIds);
+  for (const call of view.modelCalls ?? []) {
+    expose(
+      call.stepId ?? sessions.find((session) => session.id === call.sessionStateId)?.stepId,
+      call.selectedToolIds,
+    );
+  }
+  for (const decision of view.controlDecisions ?? []) {
+    if (decision.operation === 'select_tools') expose(decision.stepId, decision.selectedIds);
+  }
+  for (const [key, { stepId, toolId }] of exposed) {
+    if (attempts.has(key)) continue;
+    const info = meta(toolId);
+    const id = 'tool-exposed:' + stepId + ':' + toolId;
+    const parent = anchorFor(stepId);
+    nodes.push({
+      id,
+      label: toolId,
+      kind: 'tool_exposed',
+      role: 'tool-exposed',
+      status: 'pending',
+      // Dashed and measurement-free, like any structure that has not run.
+      planned: true,
+      unplanned: false,
+      route: routeText(toolId),
+      detail: 'Offered to the agent for this step. No call has been reported.',
+      position: { x: 0, y: 0 },
+      tool: {
+        id: toolId,
+        providerId: info.providerId,
+        family: info.family,
+        effect: info.effect,
+        attempts: 0,
+        reasonCodes: [],
+        dataLabels: [],
+      },
+    });
+    if (parent) edges.push({ id: parent + '->' + id, source: parent, target: id, planned: true });
+  }
+  return { nodes, edges };
+}
+
+export function buildTrace(
+  view: RunView,
+  graph?: AgentGraph | null,
+  now = Date.now(),
+  catalog?: ReadonlyMap<string, ToolMeta>,
+): Trace {
   // Plan order first, then anything the runtime created that was never in the plan.
   // `ctx.fanOut()` makes child steps at execution time; those nodes are real work and must
   // appear, but they must also be visibly distinguished from planned structure.
@@ -193,9 +506,21 @@ export function buildTrace(view: RunView, graph?: AgentGraph | null, now = Date.
       Boolean(edge.source && sourceIds.has(edge.source)),
     )
     .map((edge) => ({ ...edge, planned: false }));
-  const edges = [...plannedEdges, ...runtimeEdges];
+  // Tool nodes hang off the step that owned them. In a graph run that is the plan node the
+  // step executed, so a tool never floats detached from the node the author drew.
+  const anchorFor = (stepId: string | undefined) => {
+    if (!stepId) return undefined;
+    const step = view.steps.find((item) => item.id === stepId);
+    if (graph && step?.nodeId && plannedIds.has(step.nodeId)) return step.nodeId;
+    return sourceIds.has(stepId) ? stepId : undefined;
+  };
+  const toolNodes = buildToolNodes(view, catalog, now, anchorFor);
+  const edges = [...plannedEdges, ...runtimeEdges, ...toolNodes.edges];
 
-  const positions = layoutTrace(sources, edges);
+  const positions = layoutTrace(
+    [...sources, ...toolNodes.nodes.map((node) => ({ id: node.id }))],
+    edges,
+  );
   const nodes = sources.map((node): TraceNode => {
     const steps = view.steps.filter((step) =>
       graph && plannedIds.has(node.id) ? step.nodeId === node.id : step.id === node.id,
@@ -248,6 +573,13 @@ export function buildTrace(view: RunView, graph?: AgentGraph | null, now = Date.
       decision,
     };
   });
+
+  nodes.push(
+    ...toolNodes.nodes.map((node) => ({
+      ...node,
+      position: positions.get(node.id) ?? node.position,
+    })),
+  );
 
   const destinations = view.egress.filter(
     (event) => !event.destination.startsWith('hermes-internal://'),
@@ -316,14 +648,115 @@ type PreviewDefinition = {
   end: number;
   route: string;
   detail: string;
-  tokens: number;
-  cost: number;
+  /** Absent for a tool node: a tool call reports no tokens of its own. */
+  tokens?: number;
+  cost?: number;
   /** Set when the step is created by the runtime at this time rather than planned up front. */
   spawnedAt?: number;
+  /** When a planned node first appears, for structure that is decided rather than spawned. */
+  appearsAt?: number;
+  /**
+   * A tool node. `called: false` is exposed-only. `gated` means it waits on the approval
+   * gate and is decided by it, so the preview cannot show it running before approval.
+   */
+  tool?: {
+    id: string;
+    family: string;
+    providerId: string;
+    effect: string;
+    called: boolean;
+    gated?: boolean;
+  };
   parent: string | null;
 };
 
-function previewDefinitions(trip: boolean): PreviewDefinition[] {
+const NEVER = Number.POSITIVE_INFINITY;
+
+/**
+ * Illustrative Composio tools for the preview. Named in AgentOS's own vocabulary, exactly as
+ * the reviewed registry names them, but nothing here calls anything.
+ */
+function previewTools(trip: boolean): PreviewDefinition[] {
+  const detail = (text: string) => `Illustrative. ${text} No tool is called in this preview.`;
+  const tools: PreviewDefinition[] = [
+    {
+      id: 'tool-sheets',
+      label: 'sheets.read',
+      kind: 'tool_exposed',
+      start: NEVER,
+      end: NEVER,
+      appearsAt: 1800,
+      route: 'Composio · read',
+      detail: detail('Offered to the agent for this step, then not needed.'),
+      tool: {
+        id: 'sheets.read',
+        family: 'googlesheets',
+        providerId: 'composio',
+        effect: 'read',
+        called: false,
+      },
+      parent: 'route',
+    },
+    {
+      id: 'tool-calendar',
+      label: 'calendar.create',
+      kind: 'tool_exposed',
+      start: NEVER,
+      end: NEVER,
+      appearsAt: 1800,
+      route: 'Composio · write',
+      detail: detail('Offered to the agent for this step, then not needed.'),
+      tool: {
+        id: 'calendar.create',
+        family: 'googlecalendar',
+        providerId: 'composio',
+        effect: 'write',
+        called: false,
+      },
+      parent: 'route',
+    },
+    {
+      id: 'tool-draft',
+      label: 'docs.draft',
+      kind: 'tool_call',
+      start: 13000,
+      end: 15200,
+      route: 'Composio · write',
+      detail: detail('Saves the draft to a document through a connected account.'),
+      tool: {
+        id: 'docs.draft',
+        family: 'googledocs',
+        providerId: 'composio',
+        effect: 'write',
+        called: true,
+      },
+      parent: 'synthesis',
+    },
+  ];
+  if (!trip) {
+    tools.push({
+      id: 'tool-send',
+      label: 'mail.send',
+      kind: 'tool_call',
+      start: PREVIEW_LIMIT,
+      end: PREVIEW_LIMIT,
+      route: 'Composio · write',
+      detail: detail('Sends the outreach email. It runs only after you approve the exact message.'),
+      tool: {
+        id: 'mail.send',
+        family: 'mail',
+        providerId: 'composio',
+        effect: 'write',
+        called: true,
+        gated: true,
+      },
+      parent: 'finish',
+    });
+  }
+  return tools;
+}
+
+function previewSteps(trip: boolean): PreviewDefinition[] {
   return [
     {
       id: 'route',
@@ -423,6 +856,12 @@ function previewDefinitions(trip: boolean): PreviewDefinition[] {
   ];
 }
 
+/** Steps, then tools, with the closing step last so it stays the final node. */
+function previewDefinitions(trip: boolean): PreviewDefinition[] {
+  const steps = previewSteps(trip);
+  return [...steps.slice(0, -1), ...previewTools(trip), ...steps.slice(-1)];
+}
+
 const PREVIEW_EDGES = [
   ['route', 'context'],
   ['route', 'research'],
@@ -433,6 +872,10 @@ const PREVIEW_EDGES = [
   ['compare', 'synthesis'],
   ['fanout', 'synthesis'],
   ['synthesis', 'finish'],
+  ['route', 'tool-sheets'],
+  ['route', 'tool-calendar'],
+  ['synthesis', 'tool-draft'],
+  ['finish', 'tool-send'],
 ];
 
 export function previewTrace(
@@ -444,9 +887,7 @@ export function previewTrace(
   const trip = scenario === 'trip';
   const definitions = previewDefinitions(trip);
   // A runtime-created node does not exist on the canvas before the runtime creates it.
-  const present = definitions.filter(
-    (item) => item.spawnedAt === undefined || elapsed >= item.spawnedAt,
-  );
+  const present = definitions.filter((item) => elapsed >= (item.spawnedAt ?? item.appearsAt ?? 0));
   const presentIds = new Set(present.map((item) => item.id));
   const edges = PREVIEW_EDGES.filter(
     ([source, target]) => presentIds.has(source!) && presentIds.has(target!),
@@ -467,10 +908,19 @@ export function previewTrace(
     if (item.id === 'finish' && !trip && elapsed >= PREVIEW_LIMIT)
       status =
         approval === 'approved' ? 'succeeded' : approval === 'rejected' ? 'skipped' : 'blocked';
-    const started = elapsed >= item.start;
-    const completed = elapsed >= item.end;
+    // A gated tool is decided by the approval gate, never by the clock.
+    if (item.tool?.gated)
+      status =
+        approval === 'approved' ? 'succeeded' : approval === 'rejected' ? 'skipped' : 'pending';
+    const started = item.tool?.gated
+      ? approval === 'approved'
+      : item.tool && !item.tool.called
+        ? false
+        : elapsed >= item.start;
+    const completed = item.tool?.gated ? approval === 'approved' : elapsed >= item.end;
     const override = overrides[item.id];
-    const chosen = ROUTE_OPTIONS.find((option) => option.id === override);
+    // A tool call is not a routed model step, so there is no route to change.
+    const chosen = item.tool ? undefined : ROUTE_OPTIONS.find((option) => option.id === override);
     return {
       id: item.id,
       label: item.label,
@@ -487,7 +937,31 @@ export function previewTrace(
       // Nothing is reported for a step that has not started. `—`, never `0`.
       tokens: completed ? item.tokens : undefined,
       costCents: completed ? item.cost : undefined,
-      durationMs: started ? Math.max(0, Math.min(elapsed, item.end) - item.start) : undefined,
+      durationMs:
+        started && !item.tool?.gated
+          ? Math.max(0, Math.min(elapsed, item.end) - item.start)
+          : undefined,
+      ...(item.tool
+        ? {
+            role: item.tool.called ? ('tool-called' as const) : ('tool-exposed' as const),
+            tool: {
+              id: item.tool.id,
+              providerId: item.tool.providerId,
+              family: item.tool.family,
+              effect: item.tool.effect,
+              attempts: item.tool.called ? 1 : 0,
+              phase: !item.tool.called
+                ? undefined
+                : status === 'running'
+                  ? ('executing' as const)
+                  : status === 'succeeded'
+                    ? ('succeeded' as const)
+                    : undefined,
+              reasonCodes: [],
+              dataLabels: [],
+            },
+          }
+        : {}),
     };
   });
 

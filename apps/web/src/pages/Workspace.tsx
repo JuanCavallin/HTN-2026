@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { emptyRunView, isTerminal, type AgentGraph, type Conversation } from '@htn/shared';
 import { api } from '../lib/api';
@@ -22,6 +15,7 @@ import {
 } from '../lib/workspace';
 import { useRunStream } from '../hooks/useRunStream';
 import { useRunGraph } from '../hooks/useGraph';
+import { useTools } from '../hooks/useTools';
 import { useHarness } from '../components/layout/AppShell';
 import { DecisionCanvas } from '../components/graph/DecisionCanvas';
 import { MetricsStrip, RunInspector, TaskComposer } from '../components/chat/WorkspacePanels';
@@ -602,7 +596,10 @@ export function LiveRunWorkspace() {
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState('');
   const graph = snapshot ?? seed?.graph;
-  const trace = useMemo(() => buildTrace(view, graph, now), [view, graph, now]);
+  // Names each tool's provider (Composio, browser, MCP) so the graph can say where it ran.
+  const { tools } = useTools();
+  const catalog = useMemo(() => new Map(tools.map((tool) => [tool.name, tool])), [tools]);
+  const trace = useMemo(() => buildTrace(view, graph, now, catalog), [view, graph, now, catalog]);
   const terminal = !!view.run && isTerminal(view.run.status);
 
   useEffect(() => {

@@ -60,6 +60,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * One reviewed tool. `name` is the AgentOS id (`mail.send`), never a vendor slug. The
+ * provider fields are additive and optional so an older API still parses; without them a
+ * tool simply renders without a provider badge.
+ */
+export interface ToolCatalogEntry {
+  name: string;
+  description: string;
+  availability?: 'available' | 'unavailable' | 'requires_connection';
+  /** Who executes it: 'composio', 'browserbase', 'localbrowser', 'mcp', ... */
+  providerId?: string;
+  family?: string;
+  effect?: 'read' | 'write' | 'destructive' | 'unknown';
+  reversibility?: string;
+}
+
 export const api = {
   health: () => request<{ ok: boolean; uptimeSeconds: number }>('/health'),
 
@@ -72,8 +88,7 @@ export const api = {
     request<{ playbooks: { kind: string; title: string; directLaunch: boolean }[] }>('/playbooks'),
 
   /** The node tool-picker's catalog. Served by whatever backs `toolbox`. */
-  tools: () =>
-    request<{ tools: { name: string; description: string }[]; cached: boolean }>('/tools'),
+  tools: () => request<{ tools: ToolCatalogEntry[]; cached: boolean }>('/tools'),
 
   /**
    * Server-computed run metrics. For a LIVE run prefer calling rollup() from
