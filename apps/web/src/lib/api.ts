@@ -7,12 +7,11 @@ import type {
   AgentGraph,
   Approval,
   ApprovalDecision,
-  Conversation,
-  ConversationMessage,
+  CreateMcpConnectionInput,
   EgressEvent,
-  GraphDelegation,
   GraphEdge,
   GraphNode,
+  McpConnection,
   PiiSpan,
   Run,
   RunAnalytics,
@@ -152,33 +151,6 @@ export const api = {
       body: JSON.stringify({ version }),
     }),
 
-  /* --------------------------------------------------------- Conversations */
-
-  /** `graphId` seeds the conversation so its first message EDITS that graph. */
-  createConversation: (graphId?: string) =>
-    request<{ conversation: Conversation }>('/conversations', {
-      method: 'POST',
-      body: JSON.stringify({ graphId }),
-    }),
-
-  conversation: (id: string) =>
-    request<{ conversation: Conversation; graph: AgentGraph | null }>('/conversations/' + id),
-
-  /**
-   * ONE endpoint for both building and editing. The first turn creates a graph;
-   * a later turn modifies the same document and bumps its version.
-   */
-  sendMessage: (id: string, text: string) =>
-    request<{
-      conversation: Conversation;
-      message: ConversationMessage;
-      graph: AgentGraph;
-      delegation: GraphDelegation;
-    }>('/conversations/' + id + '/messages', {
-      method: 'POST',
-      body: JSON.stringify({ text }),
-    }),
-
   /** Launch a run of a graph. The run snapshots the graph as it is right now. */
   runGraph: (graphId: string, variables: Record<string, unknown> = {}) =>
     request<{ run: Run }>('/runs', {
@@ -196,8 +168,22 @@ export const api = {
     return request<{ runs: Run[] }>('/runs' + (qs ? '?' + qs : ''));
   },
 
-  createRun: (kind: string, input: unknown) =>
-    request<{ run: Run }>('/runs', { method: 'POST', body: JSON.stringify({ kind, input }) }),
+  createRun: (kind: string, input: unknown, title?: string) =>
+    request<{ run: Run }>('/runs', {
+      method: 'POST',
+      body: JSON.stringify({ kind, input, title }),
+    }),
+
+  /**
+   * The main composer's launch path: one supervised `agent` run from a plain goal.
+   * Labels and sanitisation are left to the backend's redaction pass on purpose --
+   * see docs/frontend-handoff.md, "Starting the real agent flow".
+   */
+  startAgentTask: (goal: string) =>
+    request<{ run: Run }>('/runs', {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'agent', title: goal.slice(0, 200), input: { goal } }),
+    }),
 
   getRun: (id: string) => request<RunDetail>('/runs/' + id),
 
@@ -212,13 +198,65 @@ export const api = {
 
   resumeRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/resume', { method: 'POST' }),
 
-  /** "Save as a new task": fork the graph THIS run executed into a new document. */
-  saveRunAsGraph: (id: string) =>
-    request<{ graph: AgentGraph }>('/runs/' + id + '/save-as-graph', { method: 'POST' }),
-
   decide: (approvalId: string, decision: ApprovalDecision) =>
     request<{ approval: Approval }>('/approvals/' + approvalId + '/decide', {
       method: 'POST',
       body: JSON.stringify(decision),
     }),
+
+  /* ------------------------------------------------------------ Connections */
+
+  listMcpConnections: () => request<{ connections: McpConnection[] }>('/mcp-connections'),
+
+  addMcpConnection: (input: CreateMcpConnectionInput) =>
+    request<{ connection: McpConnection }>('/mcp-connections', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  refreshMcpConnection: (id: string) =>
+    request<{ connection: McpConnection }>('/mcp-connections/' + id + '/refresh', {
+      method: 'POST',
+    }),
+
+  setMcpConnectionEnabled: (id: string, enabled: boolean) =>
+    request<{ connection: McpConnection }>('/mcp-connections/' + id, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** 204 No Content on success; `request` assumes a JSON body, so this bypasses it. */
+  removeMcpConnection: async (id: string): Promise<void> => {
+    const res = await fetch('/api/mcp-connections/' + id, { method: 'DELETE' });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as {
+        error?: { code?: string; message?: string };
+      } | null;
+      throw new ApiError(
+        res.status,
+        body?.error?.code ?? 'UNKNOWN',
+        body?.error?.message ?? res.statusText,
+      );
+    }
+  },
+
+  /** Provider-native Composio tools, with their connected-account state. */
+  composioTools: () =>
+    request<{
+      tools: { name: string; toolkit?: string; version?: string; connected: boolean }[];
+    }>('/providers/composio/tools'),
+
+  composioConnect: (authConfigId?: string) =>
+    request<{ url: string }>('/providers/composio/connect', {
+      method: 'POST',
+      body: JSON.stringify({ authConfigId }),
+    }),
+
+  composioRefresh: () =>
+    request<{
+      registered: string[];
+      skipped: string[];
+      requiresConnection: string[];
+      warning?: string;
+    }>('/providers/composio/refresh', { method: 'POST' }),
 };

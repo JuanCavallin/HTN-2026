@@ -51,8 +51,7 @@ export type ThemeId = (typeof THEMES)[number]['id'];
 export const DEFAULT_THEME: ThemeId = 'sage';
 const STORAGE_KEY = 'zephyr.theme';
 
-const isTheme = (value: unknown): value is ThemeId =>
-  THEMES.some((theme) => theme.id === value);
+const isTheme = (value: unknown): value is ThemeId => THEMES.some((theme) => theme.id === value);
 
 /** Per-viewer convenience only. A blocked or cleared store simply means the default. */
 export function readStoredTheme(): ThemeId {

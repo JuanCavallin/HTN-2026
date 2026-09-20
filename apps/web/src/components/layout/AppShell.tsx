@@ -96,9 +96,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </button>
               <Link to="/" className="header-brand" aria-label="Zephyr home">
                 <Mark small />
-                <span>
-                  Zephyr
-                </span>
+                <span>Zephyr</span>
               </Link>
               <span className="breadcrumb-divider">/</span>
               <strong>

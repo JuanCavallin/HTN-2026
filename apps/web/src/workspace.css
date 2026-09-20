@@ -274,7 +274,6 @@
   --danger-soft: #f8e6e4;
 }
 
-
 :root {
   --font-ui: 'Segoe UI', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --radius: 12px;
@@ -2825,4 +2824,199 @@ progress::-moz-progress-bar {
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Connections */
+.connections-page .surface-section {
+  margin-bottom: 8px;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+.status-chip--good {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.status-chip--warn {
+  background: var(--amber-soft);
+  color: var(--amber-text);
+}
+.status-chip--bad {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+.status-chip--neutral {
+  background: var(--hover);
+  color: var(--quiet);
+}
+.connections-table-head,
+.connections-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) 90px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+.connections-table-head {
+  padding: 0 16px 12px;
+  font-size: 10px;
+  color: var(--quiet);
+  border-bottom: 1px solid var(--line);
+}
+.connections-table-row {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.connections-table-row strong {
+  text-transform: capitalize;
+}
+.connections-caps {
+  color: var(--secondary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.connections-table-row small {
+  display: block;
+  color: var(--secondary);
+  font-size: 10px;
+  margin-top: 4px;
+}
+.tool-sources-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 18px;
+}
+.tool-source-card {
+  border: 1px solid var(--line-3);
+  border-radius: 12px;
+  padding: 18px;
+  background: var(--raised-panel);
+}
+.tool-source-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.tool-source-heading h3 {
+  font-size: 14px;
+  font-weight: 500;
+}
+.tool-source-detail {
+  font-size: 11px;
+  color: var(--accent-text-dim);
+  line-height: 1.7;
+  margin: 8px 0 14px;
+}
+.tool-source-list {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.tool-source-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+.tool-source-actions {
+  display: flex;
+  gap: 8px;
+}
+.mcp-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.mcp-row {
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+  background: var(--panel-2);
+}
+.mcp-row-main small {
+  display: block;
+  color: var(--secondary);
+  font-size: 10px;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+.mcp-row-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--secondary);
+}
+.mcp-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.add-connection-form {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+  margin-top: 6px;
+}
+.field {
+  display: grid;
+  gap: 5px;
+}
+.field label {
+  font-size: 10px;
+  color: var(--quiet);
+}
+.field input {
+  border: 1px solid var(--line-3);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  background: var(--panel-sunken);
+  color: var(--text);
+}
+.field input:focus-visible {
+  border-color: var(--mark-strong);
+}
+.tool-inventory-group {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.tool-inventory-group h3 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  text-transform: capitalize;
+  margin-bottom: 8px;
+}
+.tool-inventory-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.tool-inventory-group li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--accent-text-dim);
 }
