@@ -146,8 +146,12 @@ export function buildSynthesisUserPrompt(args: {
 
   if (args.currentGraph) {
     parts.push(
-      'Here is the current graph. Modify it to satisfy the request below, keeping',
-      'node ids stable wherever a node survives, so its position is preserved.',
+      'Here is the current graph. Change ONLY what the request below actually',
+      'requires. Reproduce every other node and edge exactly as given -- same id,',
+      'same label, same config, same position -- and keep the ids of any node you',
+      'DO change the same as well, so its position is preserved. Do not rename,',
+      'reorder, restructure, or "clean up" anything the request did not ask about,',
+      'even if you can see a way to improve it.',
       '',
       JSON.stringify(
         {

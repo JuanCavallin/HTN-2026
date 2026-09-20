@@ -33,6 +33,7 @@ export function ChatPanel({
   graphId,
   onGraph,
   onConversation,
+  onBusyChange,
   className = '',
 }: {
   conversation: Conversation | null;
@@ -42,6 +43,15 @@ export function ChatPanel({
   onGraph: (graph: AgentGraph) => void;
   /** Also used with `null` by the "New chat" reset below. */
   onConversation: (conversation: Conversation | null) => void;
+  /**
+   * Fired around the synthesis call. Synthesis reads the graph's version
+   * once, up front, then writes back several seconds later once the model
+   * replies -- a canvas edit landing in that window would either 409 (if
+   * detected) or, worse, get silently overwritten by a rewrite computed
+   * before that edit existed. The caller uses this to lock canvas mutation
+   * for the duration rather than let that window exist at all.
+   */
+  onBusyChange?: (busy: boolean) => void;
   className?: string;
 }) {
   const [text, setText] = useState('');
@@ -70,6 +80,7 @@ export function ChatPanel({
   const send = async (message: string) => {
     if (!message.trim() || busy) return;
     setBusy(true);
+    onBusyChange?.(true);
     setError(null);
     try {
       // A conversation is created lazily, so the page does not litter the store
@@ -87,6 +98,7 @@ export function ChatPanel({
       setError((err as Error).message);
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   };
 
