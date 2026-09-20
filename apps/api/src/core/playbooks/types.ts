@@ -13,7 +13,8 @@ import type { ZodType } from 'zod';
 import type {
   Capability,
   CapabilityMap,
-  HarnessToolCall,
+  CompletionDecision,
+  DataLabel,
   IntelligenceLevel,
   Json,
   ModelTier,
@@ -22,6 +23,7 @@ import type {
   ProviderCallContext,
   ProviderId,
   ScheduleDecision,
+  SessionCheckpoint,
   Step,
 } from '@htn/shared';
 import type { FanOutOutcome } from '../swarm.js';
@@ -68,85 +70,27 @@ export interface AgentTaskSpec {
   goal: string;
   /** Extra context passed through untouched — redact it first if it might be sensitive. */
   context?: unknown;
+  /** Redacted objective eligible for a remote completion judgment. */
+  sanitizedGoal?: string;
+  /** Labels for the canonical task state. Defaults to public. */
+  dataLabels?: DataLabel[];
   /**
    * Full candidate tool list BEFORE Jev filters it. Not tied to any one
    * provider's tool-name format — the harness-specific `live.ts` is
    * responsible for translating these into whatever that runtime expects.
-   * Do NOT include tools classified irreversible; see hermes/live.ts's safety
-   * rule for why.
+   * Irreversible tools may be proposed, but every exact action is still gated
+   * by AgentOS and requires approval before the executor is called.
    */
   availableTools: string[];
   /** The graph node this task belongs to. See Step.nodeId. */
   nodeId?: string;
   parentStepId?: string | null;
-  /** How often to poll while the task runs. Default 1500ms — see orchestrator.ts. */
+  /** How often to poll while the task runs. Default 400ms. */
   pollIntervalMs?: number;
-  /**
-   * ABSOLUTE safety ceiling: give up after this many polls no matter what,
-   * so a genuinely hung task cannot hold a run open forever. Default 400
-   * (~10 minutes at the default interval).
-   *
-   * In practice `inactivityTimeoutMs` below is what actually ends a stuck
-   * task — it fires much sooner, because a real hang produces no new
-   * activity long before ten minutes of wall clock pass. This ceiling is the
-   * backstop for a runtime that keeps reporting fresh activity indefinitely.
-   */
+  /** Give up and cancel after this many polls, so a stuck task can't hang the run. Default 20. */
   maxPolls?: number;
-  /**
-   * Give up if the runtime reports NO activity (no chunk, no tool call —
-   * see `lastActivityAt`) for this long, even though polling itself hasn't
-   * hit `maxPolls` yet. Default 120_000 (2 minutes).
-   *
-   * This is the fix for "a real task that's just slow gets killed at the same
-   * moment as one that's truly stuck" — a harness that keeps reporting
-   * progress is left alone regardless of total elapsed time, while one that
-   * goes silent is caught well before the absolute ceiling. Only enforced
-   * when the runtime actually reports `lastActivityAt`; a runtime that
-   * cannot (see AgentRuntimeAdapter.pollTask) falls back to `maxPolls` alone.
-   */
-  inactivityTimeoutMs?: number;
-  /**
-   * WALL-CLOCK budget for the whole task, checked every poll regardless of
-   * what the runtime reports. Default 240_000 (4 minutes).
-   *
-   * This exists because `inactivityTimeoutMs` above turned out to be
-   * structurally unreachable for the runtime we actually have. Hermes streams
-   * `agent_thought_chunk` updates continuously while it reasons, and the live
-   * adapter counts every update as activity -- measured against a real
-   * research goal, the idle clock never exceeded 17s across a 196s task. A
-   * harness that is looping uselessly looks exactly as "active" as one that
-   * is converging, so an idle timer cannot tell them apart and only the
-   * `maxPolls` ceiling (600s at the defaults) ever fired. That is far too long
-   * to wait to find out a node is not going to finish, especially with
-   * several agent_task nodes running concurrently.
-   *
-   * Keep all three: `inactivityTimeoutMs` still catches a runtime that goes
-   * genuinely silent (faster than this budget), `maxPolls` is still the
-   * absolute backstop, and this is the one that bounds a live-but-unproductive
-   * task. Raise it per node for work that is legitimately long-running.
-   */
-  maxDurationMs?: number;
-  /**
-   * Stop the task once this many tool calls IN A ROW have come back FAILED.
-   * Default 3. Set 0 to disable.
-   *
-   * The budgets above all answer "how long do we wait?". This one answers a
-   * different and usually more useful question: "is it even able to do this?"
-   * A harness whose tools are broken stays perfectly busy -- it retries,
-   * rephrases, tries a neighbouring tool -- so it trips no idle timer and
-   * looks healthy right up until the wall-clock budget kills it. Measured on
-   * this project: `browser_exec` failing on every call and `web_search`
-   * 403-ing on a keyless provider, while the agent churned for the full
-   * budget and reported only "timed out".
-   *
-   * CONSECUTIVE, not total, and that distinction is load-bearing: agents
-   * retry. A healthy browser task measured here failed 2 of 14 calls while
-   * successfully driving a page, recovering each time -- a total count would
-   * have killed it. A genuinely broken tool fails every call instead, so the
-   * streak builds immediately. Requires the harness to report per-call status
-   * (see HarnessToolCall.status); a harness that cannot never trips this.
-   */
-  maxFailedToolCalls?: number;
+  /** Maximum Hermes turns in the AgentOS outer loop. Defaults to 3. */
+  maxTurns?: number;
 }
 
 export interface AgentTaskResult {
@@ -154,7 +98,8 @@ export interface AgentTaskResult {
   /** The routing decision Jev made before this task started. */
   scheduleDecision: ScheduleDecision;
   /** Self-reported by the runtime; our only post-hoc visibility into its internal loop. */
-  toolCalls: HarnessToolCall[];
+  toolCalls: { tool: string; args?: unknown; at: string }[];
+  completionDecision: CompletionDecision;
 }
 
 export interface PlaybookContext {
@@ -210,6 +155,9 @@ export interface PlaybookContext {
    */
   runAgentTask(spec: AgentTaskSpec): Promise<AgentTaskResult>;
 
+  /** Evaluate an explicit checkpoint through the same verified completion gate. */
+  judgeCompletion(checkpoint: SessionCheckpoint, stepId?: string): Promise<CompletionDecision>;
+
   /**
    * Record a routing decision made OUTSIDE runAgentTask.
    *
@@ -220,6 +168,30 @@ export interface PlaybookContext {
    * availableTools-vs-exposedTools number would only ever come from the
    * expensive path.
    */
+  /**
+   * Announce a browser session the UI can offer a live view of.
+   *
+   * Same shape as `recordSchedule`: core declares what it needs, the
+   * orchestrator supplies store + bus. A `handoff` node opens a session and
+   * deliberately leaves it open, and the person being handed to has no way to
+   * reach it unless the id and viewer URL are put on the run stream.
+   *
+   * NOTHING SENSITIVE may go through here -- it crosses SSE and is persisted
+   * in the run's event log. A viewer URL and metadata, never page content.
+   */
+  announceBrowserSession(session: {
+    sessionId: string;
+    stepId?: string;
+    nodeId?: string;
+    providerId: ProviderId;
+    liveViewUrl?: string;
+    interactive: boolean;
+    startUrl?: string;
+  }): Promise<void>;
+
+  /** Symmetric: the viewer is dead from here (Browserbase 410s the debug URL). */
+  releaseBrowserSession(sessionId: string): Promise<void>;
+
   recordSchedule(input: {
     stepId: string;
     requestedCapability: Capability;

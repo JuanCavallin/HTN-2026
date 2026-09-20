@@ -7,6 +7,13 @@
 
 import type { BrowserSessionRecord } from './browser.js';
 import type { Approval, EgressEvent, Iso, PiiSpan, Run, Step } from './domain.js';
+import type {
+  AgentSessionState,
+  ControlDecisionRecord,
+  HarnessTurnEvent,
+  ModelLifecycleEvent,
+  ToolLifecycleEvent,
+} from './control.js';
 import type { ScheduleDecision } from './scheduling.js';
 
 export type RunEvent =
@@ -25,10 +32,15 @@ export type RunEvent =
   | { type: 'browser.session.opened'; session: BrowserSessionRecord }
   /**
    * The session was released. The UI must stop showing its live view as live:
-   * Browserbase's debug URL returns 410 Gone from this moment, so an iframe
+   * Browserbase's debug URL returns 410 Gone from this moment, so a viewer
    * left pointed at it renders an error rather than a page.
    */
   | { type: 'browser.session.closed'; runId: string; sessionId: string; at: Iso }
+  | { type: 'control.decided'; decision: ControlDecisionRecord }
+  | { type: 'model.lifecycle'; lifecycle: ModelLifecycleEvent }
+  | { type: 'harness.turn'; turn: HarnessTurnEvent }
+  | { type: 'tool.lifecycle'; lifecycle: ToolLifecycleEvent }
+  | { type: 'session.updated'; session: AgentSessionState }
   | { type: 'log'; runId: string; level: 'info' | 'warn' | 'error'; message: string; at: Iso };
 
 export type RunEventType = RunEvent['type'];
@@ -58,6 +70,10 @@ export interface RunView {
    * session it used — the panel needs that to show a decision replay.
    */
   browserSessions: (BrowserSessionRecord & { closedAt?: Iso })[];
+  controlDecisions: ControlDecisionRecord[];
+  modelCalls: ModelLifecycleEvent[];
+  harnessTurns: HarnessTurnEvent[];
+  agentSessions: AgentSessionState[];
   logs: { level: 'info' | 'warn' | 'error'; message: string; at: Iso }[];
   /** Highest `seq` applied. Used as the replay cursor on reconnect. */
   lastSeq: number;
@@ -71,6 +87,10 @@ export const emptyRunView: RunView = {
   piiSpans: [],
   scheduleDecisions: [],
   browserSessions: [],
+  controlDecisions: [],
+  modelCalls: [],
+  harnessTurns: [],
+  agentSessions: [],
   logs: [],
   lastSeq: 0,
 };

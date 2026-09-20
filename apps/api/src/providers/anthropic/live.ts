@@ -105,27 +105,10 @@ export function createLiveAnthropic(cfg: ProviderConfig): TextModelAdapter {
       const started = Date.now();
       try {
         const model = MODEL_BY_TIER[input.tier ?? 'standard'];
-
-        // `json: true` means the caller will JSON.parse the reply. The contract
-        // has carried this flag since the start but nothing honoured it, so a
-        // JSON request used to come back as prose.
-        //
-        // This is an instruction, not a guarantee -- the caller still validates
-        // and retries. Upgrading to output_config.format (structured outputs)
-        // would make it a guarantee, and is the next step here.
-        const system = input.json
-          ? [
-              input.system,
-              'Reply with a single valid JSON object and nothing else. No prose, no markdown fences.',
-            ]
-              .filter(Boolean)
-              .join('\n\n')
-          : input.system;
-
         const message = await client.messages.create({
           model,
           max_tokens: input.maxTokens ?? 1024,
-          system,
+          system: input.system,
           messages: [{ role: 'user', content: input.prompt }],
         });
 

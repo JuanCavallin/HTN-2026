@@ -85,19 +85,17 @@ export async function synthesiseGraph(args: {
     preview(args.request, 150),
   );
 
-  const catalogResult = await listToolCatalog({
-    runId: args.conversationId,
-    policyRule: 'tool-catalog-for-synthesis',
-  });
   // A synthesiser with no catalog would invent tool names, and every one of
-  // them would fail classification at run time. Better to say so now.
-  const tools = catalogResult.ok ? catalogResult.data : [];
+  // them would fail classification at run time. listToolCatalog degrades to
+  // the registry half rather than throwing, so an empty list here means the
+  // registry itself is empty -- worth seeing in the log.
+  const tools = await listToolCatalog(args.conversationId);
   debug(
     args.conversationId,
     'tool catalog:',
     tools.length,
     'tool(s)',
-    catalogResult.ok ? '' : '(catalog read failed, using empty list)',
+    tools.length === 0 ? '(empty -- synthesis will avoid naming tools)' : '',
   );
 
   const system = buildSynthesisSystemPrompt(tools);

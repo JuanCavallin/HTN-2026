@@ -13,13 +13,8 @@ import { demoInputSchema, type DemoInput } from '@htn/shared';
 import { successes } from '../swarm.js';
 import { definePlaybook } from './types.js';
 
-/**
- * A fake case file. The SIN is a well-known test value and passes the Luhn
- * check. Exported so baseline.playbook.ts can hand the naive single-call
- * comparison the EXACT same task text this playbook and graph_demo use --
- * an apples-to-apples comparison needs the same input, not a similar one.
- */
-export function caseFile(target: string, includeSensitive: boolean): string {
+/** A fake case file. The SIN is a well-known test value and passes the Luhn check. */
+function caseFile(target: string, includeSensitive: boolean): string {
   const sensitive = includeSensitive
     ? 'Applicant SIN 046 454 286, contact avery.chen@example.edu, phone 519-555-0142.'
     : 'Applicant contact withheld.';
@@ -149,29 +144,22 @@ export const demoPlaybook = definePlaybook<DemoInput>({
         );
         if (!session.ok) throw new Error('Could not open session: ' + session.error.message);
 
-        // try/finally, because a browser session burns concurrency and money
-        // while it is open. Without it, an extract() that throws leaks the
-        // session for the rest of the process's life — and with a live backend
-        // a swarm of N workers leaks N sessions at once. TypeScript has no
-        // `async with`, so this is the only construct that gets it right.
-        try {
-          const extracted = await browser.extract<{ note: string }>(
-            { sessionId: session.data.sessionId, instruction: 'Read ' + source },
-            ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
-          );
+        const extracted = await browser.extract<{ note: string }>(
+          { sessionId: session.data.sessionId, instruction: 'Read ' + source },
+          ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
+        );
 
-          return {
-            source,
-            finding: extracted.ok ? extracted.data.note : 'no data',
-            // Deterministic so the demo is identical every time it is rehearsed.
-            flagged: index % 2 === 0,
-          };
-        } finally {
-          await browser.closeSession(
-            session.data.sessionId,
-            ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
-          );
-        }
+        await browser.closeSession(
+          session.data.sessionId,
+          ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
+        );
+
+        return {
+          source,
+          finding: extracted.ok ? extracted.data.note : 'no data',
+          // Deterministic so the demo is identical every time it is rehearsed.
+          flagged: index % 2 === 0,
+        };
       },
     });
 

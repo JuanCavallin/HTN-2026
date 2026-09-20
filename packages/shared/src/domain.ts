@@ -65,14 +65,7 @@ export interface Run {
   status: RunStatus;
   /** Shape is validated per-kind by a zod schema in `schemas/playbooks`. */
   input: Json;
-  /**
-   * The graph this run is "for", hoisted out of the per-kind `input` blob so
-   * it is a queryable column rather than something only a `kind === 'graph'`
-   * check can find. Set for both `graph` runs and `baseline` runs launched
-   * against the same task, which is what lets "compare to the previous run"
-   * and "every attempt at this task" work across both. Undefined for a
-   * hand-written playbook like `demo` that has no graph behind it at all.
-   */
+  /** Graph associated with graph/baseline runs, when applicable. */
   graphId?: string;
   /** One-line human result, rendered on the run card. */
   summary?: string;
@@ -164,17 +157,11 @@ export interface ConversationMessage {
   role: 'user' | 'assistant';
   text: string;
   at: Iso;
-  /** The graph version this turn produced, when it produced one. */
+  /** Graph version produced by this turn, when it produced one. */
   graphVersion?: number;
 }
 
-/**
- * A chat that authors a graph.
- *
- * It holds the transcript and a pointer to the graph being built -- never the
- * graph itself, so there is exactly one copy and the canvas and the chat cannot
- * disagree about what the current document is.
- */
+/** A chat transcript that points at, but does not duplicate, its authored graph. */
 export interface Conversation {
   id: string;
   title: string;

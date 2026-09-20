@@ -7,7 +7,6 @@
  * the full demo. A missing key downgrades live -> mock. It never throws.
  */
 
-import { resolve as resolvePath } from 'node:path';
 import { z } from 'zod';
 import { PROVIDER_IDS, type ProviderId, type ProviderMode } from '@htn/shared';
 
@@ -30,6 +29,7 @@ const envSchema = z.object({
 
   MOCK_ALL: boolish,
   PERSIST_TO_DISK: boolish,
+  SQLITE_PATH: z.string().default('../../.data/agentos.sqlite'),
   MOCK_FAILURE_RATE: z.coerce.number().min(0).max(1).default(0),
   MOCK_MIN_LATENCY_MS: z.coerce.number().int().min(0).default(250),
   MOCK_MAX_LATENCY_MS: z.coerce.number().int().min(0).default(900),
@@ -37,21 +37,16 @@ const envSchema = z.object({
   HERMES_MODE: modeEnum.default('mock'),
   // Hermes is driven as a local subprocess over ACP (`uv run hermes-acp`), not
   // an HTTP API — there is no bearer key. What live mode actually needs is the
-  // absolute path to a `hermes-agent` checkout with the `acp` extra installed.
+  // absolute path to a `hermes-agent` checkout with the `acp` and `mcp` extras installed.
   HERMES_CWD: z.string().optional(),
-  /**
-   * The directory each ACP SESSION works in — NOT where hermes-acp is spawned.
-   *
-   * These were the same path, and that was a real problem: the session cwd is
-   * what Hermes's `terminal` tool operates in, so pointing it at HERMES_CWD
-   * turned the Hermes source checkout into the agent's scratch space. Observed
-   * live, a task with no case data to work from spent its first 30 seconds
-   * running `ls -la`, `git status` and `find` across that checkout looking for
-   * context that was never there. Defaults to `.data/hermes-workspace`.
-   */
-  HERMES_WORKSPACE: z.string().optional(),
+  HERMES_PROFILE_DIR: z.string().optional(),
   HERMES_API_KEY: z.string().optional(),
   HERMES_BASE_URL: z.string().optional(),
+
+  MODEL_GATEWAY_BASE_URL: optionalUrl,
+  MODEL_GATEWAY_API_KEY: z.string().default('agentos-local'),
+  MCP_GATEWAY_URL: optionalUrl,
+  MCP_GATEWAY_API_KEY: z.string().default('agentos-mcp-local'),
 
   AI_GATEWAY_API_KEY: z.string().optional(),
   AI_GATEWAY_BASE_URL: optionalUrl,
@@ -63,47 +58,34 @@ const envSchema = z.object({
   BROWSERBASE_MODE: modeEnum.default('mock'),
   BROWSERBASE_API_KEY: z.string().optional(),
   BROWSERBASE_PROJECT_ID: z.string().optional(),
-
-  // Local browser — the privacy path. It has NO credential, so live mode gates
-  // on a Chrome channel instead (same shape as HERMES_CWD): `playwright-core`
-  // ships no browser binaries, so without an installed channel to drive there
-  // is nothing to launch and the honest answer is to stay in mock.
   LOCALBROWSER_MODE: modeEnum.default('mock'),
   LOCALBROWSER_CHANNEL: z.string().optional(),
-
-  // Caps shared by BOTH browser backends. Sessions cost money while open, and
-  // Browserbase's measured project concurrency limit is 25.
   BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
   BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-  /**
-   * Budget for one Jev browser decision, via the AI Gateway. A browser step is
-   * interactive, so this is deliberately short — on timeout the deterministic
-   * fallback takes the step rather than stalling. See docs/jev.md.
-   */
   BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
-  /** Cap on element-table rows. The table IS the request state — keep it small. */
   BROWSER_MAX_ELEMENTS: z.coerce.number().int().positive().default(60),
-
-  /**
-   * Budget for ONE element action (click / fill / select), separate from
-   * BROWSER_TIMEOUT_MS which covers navigation.
-   *
-   * The element has already been proven attached, visible, enabled and
-   * unoccluded a moment earlier, so a long actionability wait buys nothing —
-   * it only decides how long a wedged click hangs the step. 30s was the wrong
-   * number for an interactive loop.
-   */
   BROWSER_ACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(4_000),
-  /**
-   * How long to let the page settle after an action before the next snapshot.
-   * `browser-use/jev-ultrafast` uses ~200ms for combobox suggestions and ~50ms
-   * elsewhere; those are the numbers these default to.
-   */
   BROWSER_SETTLE_MS: z.coerce.number().int().min(0).default(50),
   BROWSER_SETTLE_SELECT_MS: z.coerce.number().int().min(0).default(200),
 
   COMPOSIO_MODE: modeEnum.default('mock'),
   COMPOSIO_API_KEY: z.string().optional(),
+  COMPOSIO_BASE_URL: optionalUrl,
+  COMPOSIO_USER_ID: z.string().default('agentos-demo-user'),
+  COMPOSIO_AUTH_CONFIG_ID: z.string().optional(),
+  COMPOSIO_TOOL_SLUGS: z.string().default('GMAIL_SEND_EMAIL'),
+  COMPOSIO_TOOLKITS: z.string().default(''),
+  COMPOSIO_DISCOVERY_LIMIT: z.coerce.number().int().min(1).max(100).default(24),
+
+  OPENROUTER_MODE: modeEnum.default('mock'),
+  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_BASE_URL: optionalUrl,
+  OPENROUTER_CHEAP_MODEL: z.string().default('openai/gpt-5.6-luna'),
+  OPENROUTER_FRONTIER_MODEL: z.string().default('openai/gpt-5.6-sol'),
+
+  OLLAMA_MODE: modeEnum.default('mock'),
+  OLLAMA_BASE_URL: optionalUrl,
+  OLLAMA_MODEL: z.string().default('qwen3:8b'),
 
   ANTHROPIC_MODE: modeEnum.default('mock'),
   ANTHROPIC_API_KEY: z.string().optional(),
@@ -131,10 +113,26 @@ export interface ProviderConfig {
   projectId?: string;
   /** Absolute path to a local checkout the provider drives as a subprocess (Hermes only). */
   cwd?: string;
-  /** Where a Hermes SESSION works, kept separate from `cwd`. See HERMES_WORKSPACE. */
-  workspace?: string;
-  /** Installed browser channel to drive, e.g. 'chrome' (localbrowser only). */
+  /** Installed Playwright browser channel (local browser only). */
   channel?: string;
+  /** Isolated provider profile directory (Hermes only). */
+  profileDir?: string;
+  /** AgentOS-owned MCP endpoint injected into the isolated Hermes profile. */
+  mcpUrl?: string;
+  /** Local bearer credential passed to Hermes by environment reference. */
+  mcpApiKey?: string;
+  /** Stable application user used to isolate third-party OAuth connections. */
+  userId?: string;
+  /** Composio auth config selected by the application, never by the model. */
+  authConfigId?: string;
+  /** Provider-native tool slugs explicitly reviewed by AgentOS. */
+  toolSlugs?: string[];
+  /** Optional provider toolkit filter used for task-time catalog discovery. */
+  toolkits?: string[];
+  /** Maximum catalog candidates fetched before local policy and Jev filtering. */
+  discoveryLimit?: number;
+  /** Explicit model allowlist exposed to Jev. */
+  models?: { cheap: string; frontier: string };
   /** Name of the env var that would enable live mode. Shown in health detail. */
   keyVar: string;
 }
@@ -164,20 +162,28 @@ function resolveHermes(): ProviderConfig {
   return {
     mode,
     cwd: env.HERMES_CWD,
-    // '../../.data' relative to apps/api, matching store/sqlite.ts's DB_PATH
-    // so everything this app writes lands in the one gitignored .data/ at the
-    // repo root rather than a second one under apps/api.
-    workspace: env.HERMES_WORKSPACE ?? resolvePath(process.cwd(), '../../.data/hermes-workspace'),
-    baseUrl: env.HERMES_BASE_URL,
+    profileDir: env.HERMES_PROFILE_DIR,
+    baseUrl: env.HERMES_BASE_URL ?? env.MODEL_GATEWAY_BASE_URL ?? `http://127.0.0.1:${env.PORT}/v1`,
+    apiKey: env.MODEL_GATEWAY_API_KEY,
+    mcpUrl: env.MCP_GATEWAY_URL ?? `http://127.0.0.1:${env.PORT}/mcp`,
+    mcpApiKey: env.MCP_GATEWAY_API_KEY,
     keyVar: 'HERMES_CWD',
   };
 }
 
-/**
- * The local browser gates on a CHANNEL, not a key — same precedent as Hermes.
- * There is no credential to leak here, which is exactly why this backend is the
- * one allowed to carry local-only data.
- */
+/** Local HTTP providers need no secret, so live mode is gated only by MOCK_ALL. */
+function resolveLocal(
+  requested: ProviderMode,
+  keyVar: string,
+  extra: Partial<ProviderConfig>,
+): ProviderConfig {
+  return {
+    mode: env.MOCK_ALL ? 'mock' : requested,
+    keyVar,
+    ...extra,
+  };
+}
+
 function resolveLocalBrowser(): ProviderConfig {
   let mode: ProviderMode = env.LOCALBROWSER_MODE;
   if (env.MOCK_ALL) mode = 'mock';
@@ -197,7 +203,30 @@ const providers: Record<ProviderId, ProviderConfig> = {
     projectId: env.BROWSERBASE_PROJECT_ID,
   }),
   localbrowser: resolveLocalBrowser(),
-  composio: resolve(env.COMPOSIO_MODE, env.COMPOSIO_API_KEY, 'COMPOSIO_API_KEY'),
+  composio: resolve(env.COMPOSIO_MODE, env.COMPOSIO_API_KEY, 'COMPOSIO_API_KEY', {
+    baseUrl: env.COMPOSIO_BASE_URL ?? 'https://backend.composio.dev',
+    userId: env.COMPOSIO_USER_ID,
+    authConfigId: env.COMPOSIO_AUTH_CONFIG_ID,
+    toolSlugs: env.COMPOSIO_TOOL_SLUGS.split(',')
+      .map((slug) => slug.trim())
+      .filter(Boolean),
+    toolkits: env.COMPOSIO_TOOLKITS.split(',')
+      .map((toolkit) => toolkit.trim().toLowerCase())
+      .filter(Boolean),
+    discoveryLimit: env.COMPOSIO_DISCOVERY_LIMIT,
+  }),
+  openrouter: resolve(env.OPENROUTER_MODE, env.OPENROUTER_API_KEY, 'OPENROUTER_API_KEY', {
+    baseUrl: env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1',
+    models: {
+      cheap: env.OPENROUTER_CHEAP_MODEL,
+      frontier: env.OPENROUTER_FRONTIER_MODEL,
+    },
+  }),
+  ollama: resolveLocal(env.OLLAMA_MODE, 'OLLAMA_BASE_URL', {
+    baseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
+    models: { cheap: env.OLLAMA_MODEL, frontier: env.OLLAMA_MODEL },
+  }),
+  mcp: resolveLocal('live', 'MCP_CONNECTIONS', {}),
   anthropic: resolve(env.ANTHROPIC_MODE, env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY'),
   gptzero: resolve(env.GPTZERO_MODE, env.GPTZERO_API_KEY, 'GPTZERO_API_KEY'),
 };
@@ -208,6 +237,15 @@ export const config = Object.freeze({
   port: env.PORT,
   webOrigin: env.WEB_ORIGIN,
   persistToDisk: env.PERSIST_TO_DISK,
+  sqlitePath: env.SQLITE_PATH,
+  modelGateway: {
+    baseUrl: env.MODEL_GATEWAY_BASE_URL ?? `http://127.0.0.1:${env.PORT}/v1`,
+    apiKey: env.MODEL_GATEWAY_API_KEY,
+  },
+  mcpGateway: {
+    url: env.MCP_GATEWAY_URL ?? `http://127.0.0.1:${env.PORT}/mcp`,
+    apiKey: env.MCP_GATEWAY_API_KEY,
+  },
   mock: {
     all: env.MOCK_ALL,
     failureRate: env.MOCK_FAILURE_RATE,
@@ -223,9 +261,6 @@ export const config = Object.freeze({
     settleMs: env.BROWSER_SETTLE_MS,
     settleSelectMs: env.BROWSER_SETTLE_SELECT_MS,
   },
-  // NOTE: there is no separate Jev credential. The browser decider reads
-  // `providers.jev` — the same AI Gateway slot Person 2's adapter uses — so
-  // there is one Jev route and one place to configure it.
   providers,
 });
 
@@ -233,4 +268,13 @@ export function logConfigSummary(): void {
   const summary = PROVIDER_IDS.map((id) => id + '=' + providers[id].mode).join('  ');
   console.log('[config] port=' + config.port + '  mockAll=' + config.mock.all);
   console.log('[config] providers: ' + summary);
+  if (env.OPENROUTER_MODE === 'live' && providers.openrouter.mode !== 'live') {
+    console.warn('[setup] OPENROUTER_MODE=live requires OPENROUTER_API_KEY; using mock mode.');
+  }
+  if (env.COMPOSIO_MODE === 'live' && providers.composio.mode !== 'live') {
+    console.warn('[setup] COMPOSIO_MODE=live requires COMPOSIO_API_KEY; using mock mode.');
+  }
+  if (providers.composio.mode === 'live' && !providers.composio.authConfigId) {
+    console.warn('[setup] COMPOSIO_AUTH_CONFIG_ID is needed to create a new OAuth connection.');
+  }
 }

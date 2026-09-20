@@ -1,135 +1,152 @@
-/**
- * The browser family's descriptors — seam 4 (3B registers into 3A's registry).
- *
- * ============================================================================
- * THE BROWSERBASE PRIVACY RULE IS ENCODED HERE, IN THE DESCRIPTOR, and that is
- * the whole point of this file.
- *
- * Browserbase is a remote data recipient. Anything typed into a page there has
- * left the machine — inputs, screenshots and cookies alike. So every
- * Browserbase descriptor omits `local_only` from `allowedContextScopes` and
- * `secret` from `allowedDataLabels`.
- *
- * Encoding it in the descriptor rather than in a runtime check matters: the
- * registry filters on availability and labels BEFORE selection, so a local-only
- * step never sees a Browserbase tool as a candidate at all. A runtime check is
- * something a future caller can forget to run; a descriptor that was never
- * eligible is not.
- * ============================================================================
- */
-
-import type { ToolDescriptor } from '@htn/shared';
-import { BROWSER_FAMILY } from '@htn/shared';
+import type { DataLabel, Json, ToolDescriptor } from '@htn/shared';
 import { BROWSER_EXECUTOR_REF } from './browser.js';
+import type { ToolRegistration } from './registry.js';
 
-const VERSION = '1.0.0';
+type BrowserProviderId = 'localbrowser' | 'browserbase';
+type BrowserOperation =
+  'open' | 'search' | 'extract' | 'inspect' | 'click' | 'type' | 'submit' | 'close';
 
 interface OperationSpec {
-  operation: string;
+  operation: BrowserOperation;
   description: string;
-  riskClass: ToolDescriptor['riskClass'];
+  effect: ToolDescriptor['baselineEffect'];
+  reversibility: ToolDescriptor['reversibility'];
+  schema: Json;
 }
+
+const objectSchema = (properties: Record<string, Json>, required: string[] = []): Json => ({
+  type: 'object',
+  properties,
+  required,
+  additionalProperties: false,
+});
+
+const sessionProperty = { type: 'string', minLength: 1 } as const;
+const urlProperty = { type: 'string', minLength: 1 } as const;
+const textProperty = { type: 'string', minLength: 1 } as const;
 
 const OPERATIONS: readonly OperationSpec[] = [
   {
     operation: 'open',
     description: 'Open a browser session, optionally at a starting URL.',
-    riskClass: 'auto',
+    effect: 'read',
+    reversibility: 'reversible',
+    schema: objectSchema({ url: urlProperty }),
   },
   {
     operation: 'search',
-    description: 'Run a search and return the result text.',
-    riskClass: 'auto',
+    description: 'Search the public web and return a concise result.',
+    effect: 'read',
+    reversibility: 'reversible',
+    schema: objectSchema({ query: textProperty, url: urlProperty }, ['query']),
   },
-  { operation: 'extract', description: 'Extract text from the current page.', riskClass: 'auto' },
+  {
+    operation: 'extract',
+    description: 'Extract requested information from a browser page.',
+    effect: 'read',
+    reversibility: 'reversible',
+    schema: objectSchema(
+      { sessionId: sessionProperty, url: urlProperty, instruction: textProperty },
+      ['instruction'],
+    ),
+  },
   {
     operation: 'inspect',
-    description: 'Return the indexed table of interactive elements on the page.',
-    riskClass: 'auto',
+    description: 'Inspect the indexed interactive controls on a browser page.',
+    effect: 'read',
+    reversibility: 'reversible',
+    schema: objectSchema({ sessionId: sessionProperty, url: urlProperty }),
   },
   {
     operation: 'click',
-    description: 'Click the element that best matches the goal.',
-    riskClass: 'verify',
+    description: 'Click the page control that best matches a specific goal.',
+    effect: 'write',
+    reversibility: 'recoverable',
+    schema: objectSchema({ sessionId: sessionProperty, url: urlProperty, goal: textProperty }, [
+      'goal',
+    ]),
   },
   {
     operation: 'type',
-    description: 'Type a value into the field that best matches the goal.',
-    riskClass: 'verify',
+    description: 'Type an exact value into the page field that best matches a goal.',
+    effect: 'write',
+    reversibility: 'recoverable',
+    schema: objectSchema(
+      {
+        sessionId: sessionProperty,
+        url: urlProperty,
+        goal: textProperty,
+        text: textProperty,
+      },
+      ['goal', 'text'],
+    ),
   },
   {
-    // Irreversible by construction — a submitted form cannot be unsubmitted.
-    // core/risk.ts classifies `submit_form` the same way; this is not a
-    // second opinion, it is the same rule written where selection can see it.
     operation: 'submit',
-    description: 'Submit a form. Irreversible: always requires human approval.',
-    riskClass: 'ask_human',
+    description: 'Click a submit control; this irreversible action always requires approval.',
+    effect: 'write',
+    reversibility: 'irreversible',
+    schema: objectSchema({ sessionId: sessionProperty, url: urlProperty, goal: textProperty }, [
+      'goal',
+    ]),
   },
-  { operation: 'close', description: 'Release the browser session.', riskClass: 'auto' },
+  {
+    operation: 'close',
+    description: 'Close and release a browser session.',
+    effect: 'read',
+    reversibility: 'reversible',
+    schema: objectSchema({ sessionId: sessionProperty }, ['sessionId']),
+  },
 ];
 
-function build(
-  providerId: 'localbrowser' | 'browserbase',
-  allowedDataLabels: ToolDescriptor['allowedDataLabels'],
-  allowedContextScopes: ToolDescriptor['allowedContextScopes'],
-  availability: ToolDescriptor['availability'],
-): ToolDescriptor[] {
-  return OPERATIONS.map((spec) => ({
-    id: providerId + '.' + spec.operation,
-    providerId,
-    family: BROWSER_FAMILY,
-    description: spec.description,
-    schemaRef: 'schema:' + providerId + '.' + spec.operation + '@1',
-    transport: 'native',
-    riskClass: spec.riskClass,
-    requiredScopes: [],
-    allowedDataLabels,
-    allowedContextScopes,
-    availability,
-    executorRef: BROWSER_EXECUTOR_REF,
-    version: VERSION,
-    simulated: false,
-    ...(providerId === 'browserbase' ? { credentialRef: 'BROWSERBASE_API_KEY' } : {}),
-  }));
-}
-
 export interface BrowserDescriptorOptions {
-  /** False when LOCALBROWSER_CHANNEL is unset and the backend is mocked. */
-  localAvailable?: boolean;
-  /** False when Browserbase credentials are missing. */
-  browserbaseAvailable?: boolean;
+  localAvailable: boolean;
+  browserbaseAvailable: boolean;
 }
 
-export function browserDescriptors(options: BrowserDescriptorOptions = {}): ToolDescriptor[] {
+export function browserToolRegistrations(options: BrowserDescriptorOptions): ToolRegistration[] {
   return [
-    // LOCAL: the privacy path. The only browser destination that may carry
-    // local-only context or secret data, because nothing it touches leaves.
-    ...build(
-      'localbrowser',
-      ['public', 'private', 'secret'],
-      ['public', 'private', 'local_only'],
-      options.localAvailable === false ? 'unavailable' : 'available',
-    ),
-
-    // REMOTE: no `secret`, no `local_only`. See this file's header.
-    ...build(
-      'browserbase',
-      ['public', 'private'],
-      ['public', 'private'],
-      options.browserbaseAvailable === false ? 'unauthenticated' : 'available',
-    ),
+    ...build('localbrowser', ['public', 'private', 'secret', 'local_only'], options.localAvailable),
+    ...build('browserbase', ['public', 'private'], options.browserbaseAvailable),
   ];
 }
 
-/**
- * The invariant this module exists to guarantee, written as a check so it can
- * be asserted rather than reviewed. Used by the browser check script.
- */
-export function browserbaseDescriptorsAreSafe(descriptors: readonly ToolDescriptor[]): boolean {
-  return descriptors
-    .filter((d) => d.providerId === 'browserbase')
+function build(
+  providerId: BrowserProviderId,
+  allowedDataLabels: DataLabel[],
+  available: boolean,
+): ToolRegistration[] {
+  return OPERATIONS.map((spec) => {
+    const id = providerId + '.' + spec.operation;
+    return {
+      descriptor: {
+        id,
+        version: '1',
+        providerId,
+        family: 'browser',
+        description: spec.description,
+        inputSchemaRef: 'agentos://schemas/' + id + '/1',
+        transport: providerId === 'localbrowser' ? 'local' : 'http',
+        baselineEffect: spec.effect,
+        reversibility: spec.reversibility,
+        requiredScopes: [],
+        allowedDataLabels,
+        availability: available ? 'available' : 'unavailable',
+        executorRef: BROWSER_EXECUTOR_REF,
+        ...(providerId === 'browserbase' ? { credentialRef: 'BROWSERBASE_API_KEY' } : {}),
+      },
+      wireName: providerId + '_' + spec.operation,
+      inputSchema: spec.schema,
+    };
+  });
+}
+
+export function browserbaseDescriptorsAreSafe(registrations: readonly ToolRegistration[]): boolean {
+  return registrations
+    .filter((registration) => registration.descriptor.providerId === 'browserbase')
     .every(
-      (d) =>
-        !d.allowedContextScopes.includes('local_only') && !d.allowedDataLabels.includes('secret'),
+      (registration) =>
+        !registration.descriptor.allowedDataLabels.includes('secret') &&
+        !registration.descriptor.allowedDataLabels.includes('local_only'),
     );
 }

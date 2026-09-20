@@ -90,30 +90,6 @@ export async function deleteGraph(id: string): Promise<boolean> {
 }
 
 /**
- * "Save as a new task": fork a graph SNAPSHOT (typically a run's, via
- * saveRunAsGraph in runs.service.ts) into a brand-new, independent graph --
- * fresh id, version 1. Sourced from a snapshot rather than a live graph id on
- * purpose: the snapshot is what a specific run actually executed, which may
- * already differ from wherever the live document has since drifted to.
- * Further edits to either document never affect the other.
- */
-export async function forkGraph(source: AgentGraph, name?: string): Promise<AgentGraph> {
-  const at = nowIso();
-  return store.saveGraph(
-    parseOrThrow({
-      id: newId('graph'),
-      name: name ?? 'Fork of ' + source.name,
-      description: source.description,
-      nodes: source.nodes,
-      edges: source.edges,
-      version: 1,
-      createdAt: at,
-      updatedAt: at,
-    }),
-  );
-}
-
-/**
  * THE mutation path. Load, apply, re-validate the whole document, bump the
  * version, save.
  *

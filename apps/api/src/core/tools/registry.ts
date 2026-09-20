@@ -1,164 +1,186 @@
-/**
- * The tool registry and `select_tool_metadata` — `3A-1` and `3A-4`.
- *
- * ============================================================================
- * THE CATALOG IS DELIBERATELY EMPTY, and this file is built to work that way.
- * Which tools exist is decided at the hackathon by which sponsor APIs are worth
- * integrating; picking them now means throwing the work away or being locked
- * out of a track. So the deliverable is not the tools — it is that adding
- * provider number one through fifty is ONE MANIFEST plus ONE EXECUTOR BINDING.
- *
- * Consequence, stated plainly: the "50+ schemas reduce to 3-8" acceptance
- * criterion cannot be met until tools exist. The reduction MACHINERY is here
- * and is exercised by the browser family, which is real.
- *
- * TWO SEPARATIONS THIS FILE ENFORCES:
- *
- *   1. ROUTING METADATA vs FULL SCHEMAS. Candidates come back as
- *      `ToolMetadata` — no `schemaRef`, no `credentialRef`, no `executorRef`.
- *      Full schemas are returned only for the final selected set and only to
- *      the local caller. Jev never sees a schema or a credential.
- *   2. ELIGIBILITY vs SELECTION. An unauthenticated or unavailable provider is
- *      filtered out BEFORE Jev is asked, so it cannot be selected at all.
- *      Failure never widens the exposed set — `select_tool_metadata` on an
- *      empty or broken catalog returns nothing, and returning nothing is a
- *      correct answer, not an error.
- * ============================================================================
- */
+import { isDeepStrictEqual } from 'node:util';
+import Ajv, { type AnySchema } from 'ajv';
+import type { Json, ToolDescriptor } from '@htn/shared';
 
-import type { ContextScope, DataLabel, ToolDescriptor, ToolMetadata } from '@htn/shared';
-import { toToolMetadata } from '@htn/shared';
-
-export interface SelectToolMetadataQuery {
-  /** The families Jev chose. Empty or omitted means every family. */
-  families?: readonly string[];
-  /** Specific ids, for the second stage when Jev has picked the final set. */
-  toolIds?: readonly string[];
-  /** Drop tools that cannot receive this step's data. */
-  dataLabels?: readonly DataLabel[];
-  /** Drop tools that cannot serve this step's context scope. */
-  contextScope?: ContextScope;
-  /** Cap the candidate list. The point of the exercise is a small number. */
-  limit?: number;
+/** Full schemas remain server-side; Jev receives only ToolDescriptor metadata. */
+export interface RegisteredTool {
+  descriptor: ToolDescriptor;
+  /** Stable MCP-facing name; never accepted from a model without this trusted mapping. */
+  wireName: string;
+  inputSchema: Json;
+  /** OAuth/provider scopes confirmed by the adapter; never inferred from a model call. */
+  grantedScopes: string[];
 }
 
-export interface RegistryCounts {
-  total: number;
-  available: number;
-  simulated: number;
-  byFamily: Record<string, number>;
+export interface ToolRegistration {
+  descriptor: ToolDescriptor;
+  /** Conservative OpenAI/MCP-compatible name. Defaults from the stable AgentOS ID. */
+  wireName?: string;
+  inputSchema: Json;
+  grantedScopes?: string[];
 }
 
 export interface ToolRegistry {
-  register(descriptor: ToolDescriptor): void;
-  registerAll(descriptors: readonly ToolDescriptor[]): void;
-  /** Full descriptor, LOCAL ONLY. Never serialise this to a model. */
-  get(toolId: string): ToolDescriptor | undefined;
-  has(toolId: string): boolean;
-  families(): string[];
-  /** Routing metadata for candidates. This is the shape that may leave. */
-  selectToolMetadata(query?: SelectToolMetadataQuery): ToolMetadata[];
-  /** Full schemas for the FINAL set Jev picked. Local callers only. */
-  schemasFor(toolIds: readonly string[]): ToolDescriptor[];
-  counts(): RegistryCounts;
-  clear(): void;
+  get(toolId: string): Promise<RegisteredTool | null>;
+  getByWireName(wireName: string): Promise<RegisteredTool | null>;
+  list(): Promise<RegisteredTool[]>;
+  resolve(toolIds: string[]): Promise<ToolDescriptor[]>;
 }
 
-/** `Provider.Operation` -> `provider.operation`. One id format, always. */
-export function normaliseToolId(id: string): string {
-  return id
-    .trim()
-    .toLowerCase()
-    .replace(/[\s/]+/g, '.')
-    .replace(/\.{2,}/g, '.');
-}
+/**
+ * Trusted, provider-neutral tool metadata. Provider adapters translate vendor
+ * names into AgentOS IDs before registering; credentials never enter here.
+ */
+export class InMemoryToolRegistry implements ToolRegistry {
+  private readonly tools = new Map<string, RegisteredTool>();
+  private readonly toolIdsByWireName = new Map<string, string>();
 
-export function createToolRegistry(): ToolRegistry {
-  /** Short routing metadata. Read on every selection. */
-  const descriptors = new Map<string, ToolDescriptor>();
-
-  /**
-   * Full schemas, cached SEPARATELY from the descriptors above. They are large,
-   * they are local-only, and keeping them apart is what makes it hard to
-   * accidentally serialise one into a model request.
-   */
-  const schemas = new Map<string, unknown>();
-
-  function eligible(d: ToolDescriptor, query: SelectToolMetadataQuery): boolean {
-    // Availability first: an unauthenticated provider never reaches selection.
-    if (d.availability !== 'available') return false;
-
-    if (query.families?.length && !query.families.includes(d.family)) return false;
-    if (query.toolIds?.length && !query.toolIds.includes(d.id)) return false;
-
-    // A tool must accept EVERY label the step carries. One unaccepted label
-    // disqualifies it — that is the fail-closed direction.
-    if (query.dataLabels?.length) {
-      const ok = query.dataLabels.every((label) => d.allowedDataLabels.includes(label));
-      if (!ok) return false;
+  register(registration: ToolRegistration): void {
+    validateRegistration(registration);
+    validateJsonSchema(registration);
+    const wireName = registration.wireName ?? defaultWireName(registration.descriptor.id);
+    validateWireName(wireName, registration.descriptor.id);
+    const existingWireOwner = this.toolIdsByWireName.get(wireName);
+    if (existingWireOwner && existingWireOwner !== registration.descriptor.id) {
+      throw new Error(
+        'Tool wire name is already registered: ' + wireName + ' (' + existingWireOwner + ')',
+      );
     }
-
-    if (query.contextScope && !d.allowedContextScopes.includes(query.contextScope)) {
-      return false;
+    const existing = this.tools.get(registration.descriptor.id);
+    if (existing?.descriptor.version === registration.descriptor.version) {
+      assertVersionIsImmutable(existing, { ...registration, wireName });
     }
-
-    return true;
+    const grantedScopes = [...new Set(registration.grantedScopes ?? [])];
+    if (existing && existing.wireName !== wireName) {
+      this.toolIdsByWireName.delete(existing.wireName);
+    }
+    this.tools.set(
+      registration.descriptor.id,
+      Object.freeze(cloneRegistration({ ...registration, wireName, grantedScopes })),
+    );
+    this.toolIdsByWireName.set(wireName, registration.descriptor.id);
   }
 
+  registerMany(registrations: ToolRegistration[]): void {
+    for (const registration of registrations) this.register(registration);
+  }
+
+  unregister(toolId: string): boolean {
+    const existing = this.tools.get(toolId);
+    if (!existing) return false;
+    this.toolIdsByWireName.delete(existing.wireName);
+    return this.tools.delete(toolId);
+  }
+
+  async get(toolId: string): Promise<RegisteredTool | null> {
+    const tool = this.tools.get(toolId);
+    return tool ? cloneRegistration(tool) : null;
+  }
+
+  async getByWireName(wireName: string): Promise<RegisteredTool | null> {
+    const toolId = this.toolIdsByWireName.get(wireName);
+    return toolId ? this.get(toolId) : null;
+  }
+
+  async list(): Promise<RegisteredTool[]> {
+    return [...this.tools.values()]
+      .sort((a, b) => a.descriptor.id.localeCompare(b.descriptor.id))
+      .map((registered) => withEffectiveAvailability(cloneRegistration(registered)));
+  }
+
+  async resolve(toolIds: string[]): Promise<ToolDescriptor[]> {
+    const seen = new Set<string>();
+    return toolIds.flatMap((id) => {
+      if (seen.has(id)) return [];
+      seen.add(id);
+      const registered = this.tools.get(id);
+      return registered
+        ? [{ ...withEffectiveAvailability(cloneRegistration(registered)).descriptor }]
+        : [];
+    });
+  }
+}
+
+function validateJsonSchema(registration: ToolRegistration): void {
+  try {
+    new Ajv({ allErrors: true, strict: true }).compile(
+      structuredClone(registration.inputSchema) as AnySchema,
+    );
+  } catch (error) {
+    throw new Error(
+      'Invalid JSON Schema for ' +
+        registration.descriptor.id +
+        ': ' +
+        (error instanceof Error ? error.message : 'unknown schema error'),
+    );
+  }
+}
+
+function assertVersionIsImmutable(
+  existing: RegisteredTool,
+  registration: ToolRegistration & { wireName: string },
+): void {
+  const { availability: _existingAvailability, ...existingDescriptor } = existing.descriptor;
+  const { availability: _nextAvailability, ...nextDescriptor } = registration.descriptor;
+  if (
+    existing.wireName !== registration.wireName ||
+    !isDeepStrictEqual(existingDescriptor, nextDescriptor) ||
+    !isDeepStrictEqual(existing.inputSchema, registration.inputSchema)
+  ) {
+    throw new Error(
+      'Tool descriptor/schema changed without a version bump: ' + registration.descriptor.id,
+    );
+  }
+}
+
+function withEffectiveAvailability(registration: RegisteredTool): RegisteredTool {
+  const missingScope = registration.descriptor.requiredScopes.some(
+    (scope) => !registration.grantedScopes.includes(scope),
+  );
+  if (registration.descriptor.availability !== 'available' || !missingScope) {
+    return registration;
+  }
   return {
-    register(descriptor) {
-      const id = normaliseToolId(descriptor.id);
-      descriptors.set(id, { ...descriptor, id });
-    },
+    ...registration,
+    descriptor: { ...registration.descriptor, availability: 'requires_connection' },
+  };
+}
 
-    registerAll(list) {
-      for (const d of list) this.register(d);
-    },
+function validateRegistration(registration: ToolRegistration): void {
+  const { descriptor, inputSchema } = registration;
+  if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(descriptor.id)) {
+    throw new Error('Tool IDs must be stable lowercase names: ' + descriptor.id);
+  }
+  if (!descriptor.version.trim()) throw new Error('Tool descriptor version is required.');
+  if (!descriptor.executorRef.trim()) throw new Error('Tool executorRef is required.');
+  if (!inputSchema || typeof inputSchema !== 'object' || Array.isArray(inputSchema)) {
+    throw new Error('Tool inputSchema must be a JSON object: ' + descriptor.id);
+  }
+}
 
-    get(toolId) {
-      return descriptors.get(normaliseToolId(toolId));
-    },
+function validateWireName(wireName: string, toolId: string): void {
+  // Hermes prefixes this with `mcp__agentos__`; 48 keeps the final OpenAI function
+  // name below the common 64-character provider limit.
+  if (!/^[A-Za-z0-9_-]{1,48}$/.test(wireName)) {
+    throw new Error('Tool wireName must be 1-48 compatible characters: ' + toolId);
+  }
+}
 
-    has(toolId) {
-      return descriptors.has(normaliseToolId(toolId));
-    },
+function defaultWireName(toolId: string): string {
+  const normalized = toolId.replace(/[^A-Za-z0-9_-]/g, '_');
+  if (normalized.length <= 48) return normalized;
+  throw new Error('Long tool IDs require an explicit wireName: ' + toolId);
+}
 
-    families() {
-      return [...new Set([...descriptors.values()].map((d) => d.family))].sort();
+function cloneRegistration(registration: RegisteredTool): RegisteredTool {
+  return {
+    descriptor: {
+      ...registration.descriptor,
+      requiredScopes: [...registration.descriptor.requiredScopes],
+      allowedDataLabels: [...registration.descriptor.allowedDataLabels],
     },
-
-    selectToolMetadata(query = {}) {
-      // An empty catalog returns []. It does NOT throw — a step with no tools
-      // is a normal state while the sponsor list is undecided.
-      const matches = [...descriptors.values()].filter((d) => eligible(d, query));
-      matches.sort((a, b) => a.id.localeCompare(b.id));
-      const capped = query.limit === undefined ? matches : matches.slice(0, query.limit);
-      return capped.map(toToolMetadata);
-    },
-
-    schemasFor(toolIds) {
-      return toolIds
-        .map((id) => descriptors.get(normaliseToolId(id)))
-        .filter((d): d is ToolDescriptor => d !== undefined);
-    },
-
-    counts() {
-      const all = [...descriptors.values()];
-      const byFamily: Record<string, number> = {};
-      for (const d of all) byFamily[d.family] = (byFamily[d.family] ?? 0) + 1;
-      return {
-        total: all.length,
-        available: all.filter((d) => d.availability === 'available').length,
-        // Person 4 needs this to label the count truthfully: "18 tools (12
-        // simulated)" is honest, "18 tools" is not.
-        simulated: all.filter((d) => d.simulated).length,
-        byFamily,
-      };
-    },
-
-    clear() {
-      descriptors.clear();
-      schemas.clear();
-    },
+    wireName: registration.wireName,
+    inputSchema: structuredClone(registration.inputSchema),
+    grantedScopes: [...registration.grantedScopes],
   };
 }

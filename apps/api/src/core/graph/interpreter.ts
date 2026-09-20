@@ -28,10 +28,9 @@
  */
 
 import type { AgentGraph, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
-import type { PlaybookContext, PlaybookOutcome, RedactionOutput } from '../playbooks/types.js';
+import type { PlaybookContext, PlaybookOutcome } from '../playbooks/types.js';
 import { resolveRefs, type RefScope } from './refs.js';
-import { routeFor } from './toolRoutes.js';
-import { toolDescription, toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
+import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
 
 /* -------------------------------------------------------------------------- */
 /* Node outcomes                                                              */
@@ -55,17 +54,14 @@ type NodeOutcome = Ran | Skipped;
 /**
  * Browser sessions a node opened and deliberately did NOT close.
  *
- * WHY THIS EXISTS: services/toolRoutes.ts keeps the low-level browser family
- * out of graph runs entirely, for a good reason it states plainly -- an opened
- * session is billed and concurrency-capped, and "a graph has no run-scoped
- * cleanup", so a failure or a cancel would leak one.
+ * A `handoff` has to leave its session open past its own step -- the whole
+ * point is that a person signs in and LATER nodes inherit the authenticated
+ * browser. So the lifetime moves up to the run, which is the next scope that
+ * actually ends. Drained in runGraph before the failure check, so it runs on
+ * success, on a failed node, and on cancellation alike.
  *
- * This IS that run-scoped cleanup. A `handoff` has to leave its session open
- * past its own step (the whole point is that later nodes inherit the
- * authenticated browser), so the lifetime moves up to the run, which is the
- * next scope that actually ends. Drained in a `finally` in runGraph, so it
- * runs on success, on a failed node, and on cancellation alike -- the same
- * guarantee core/tools/browser.ts gives per action, one level up.
+ * Without this an opened session leaks, and a Browserbase session is billed
+ * and concurrency-capped.
  */
 interface SessionLease {
   hold(sessionId: string): void;
@@ -166,7 +162,7 @@ export async function runGraph(
   // terminal status, so those steps would never be seen.
   const settled = await Promise.allSettled(graph.nodes.map((n) => resolve(n.id)));
 
-  // Every held session, released. Before the failure check below, so a graph
+  // Every held session, released. BEFORE the failure check below, so a graph
   // that throws still gives its sessions back.
   await releaseHeldSessions(ctx, held);
 
@@ -184,42 +180,6 @@ export async function runGraph(
   }
 
   return summarise(graph, outcomes, variables);
-}
-
-/**
- * Give back every session the run is still holding.
- *
- * Best effort and never throws: a session that cannot be released is a billing
- * annoyance, while letting this reject would turn a SUCCESSFUL run into a
- * failed one at the very last moment. The same reasoning core/tools/browser.ts
- * applies to its own `finally`.
- *
- * Closing goes through the tool route like any other call, so the release is
- * gated, ledgered and visible on the canvas rather than being a side channel.
- */
-async function releaseHeldSessions(ctx: PlaybookContext, held: Set<string>): Promise<void> {
-  if (held.size === 0) return;
-  const tool = ctx.providerFor('browser') + '.close';
-
-  await Promise.all(
-    [...held].map(async (sessionId) => {
-      try {
-        const route = await routeFor(tool);
-        await route.call(ctx, {
-          stepId: 'run-teardown',
-          tool,
-          args: { sessionId },
-          description: 'Release browser session ' + sessionId,
-          policyRule: 'run-teardown-session-release',
-        });
-      } catch (err) {
-        await ctx
-          .log('warn', 'Could not release browser session ' + sessionId + ': ' + String(err))
-          .catch(() => undefined);
-      }
-    }),
-  );
-  held.clear();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -286,36 +246,22 @@ async function runRedact(
   const cfg = resolveRefs(node.config, scope);
   const text = typeof cfg.text === 'string' ? cfg.text : '';
 
-  // The step callback's return value is what actually gets PERSISTED as
-  // Step.output (see ctx.step's contract) -- so it has to be the curated,
-  // safe-to-store shape directly, the same pattern runFetch uses. Returning
-  // ctx.redact()'s raw RedactionOutput here and building a separate curated
-  // `output` object below (as this used to do) meant that second object was
-  // silently never applied to anything: `spans` never reached the Step, so
-  // an assertion path like "nodes.redact.spans" could never resolve. `full`
-  // captures the raw result too, for `value` below -- downstream {{refs}}
-  // like {{redact.redacted}} need it, and it must never itself be persisted.
-  let full: RedactionOutput;
-  const output = await ctx.step(
+  const redaction = await ctx.step(
     { label: node.label, kind: 'redact', nodeId: node.id },
-    async () => {
-      full = await ctx.redact(text, cfg.field);
-      return { spans: full.redactions.length, hadSensitive: full.hadSensitive };
-    },
+    async () => ctx.redact(text, cfg.field),
   );
-  const redaction = full!;
 
   return {
-    // `redacted` is placeholders-only and therefore safe, but kept out of the
-    // step output anyway: outputs are persisted, and there is no reason to
-    // store a second copy of the document.
+    // `redacted` is placeholders-only and therefore safe, but keep it out of the
+    // step output anyway: outputs are persisted, and there is no reason to store
+    // a second copy of the document.
     value: {
       redacted: redaction.redacted,
       redactions: redaction.redactions,
       hadSensitive: redaction.hadSensitive,
       spans: redaction.redactions.length,
     },
-    output,
+    output: { spans: redaction.redactions.length, hadSensitive: redaction.hadSensitive },
   };
 }
 
@@ -397,84 +343,41 @@ async function callToolGated(
     forceApproval?: boolean;
   },
 ): Promise<unknown> {
-  const route = await routeFor(args.tool);
   const risk = toolRisk(args.tool, args.actionKind);
 
-  // A route that runs its own `authorize_action` gates the CONCRETE action
-  // itself, so gating here too would ask a human twice. Two things still gate
-  // in this file regardless: a route with no gate of its own, and an explicit
-  // `submit` node -- "always stop for a human" must not depend on which route
-  // happens to own the tool.
-  const gateHere = !route.gatesItself || args.forceApproval;
-
-  if (gateHere) {
-    if (risk.unknown) {
-      await ctx.log(
-        'warn',
-        'Tool "' +
-          args.tool +
-          '" is not classified, so it is being treated as irreversible and sent for approval. ' +
-          'See docs/tool-registry-handoff.md.',
-      );
-    }
-
-    await ctx.requireApproval(args.stepId, {
-      kind: risk.kind,
-      description: args.description,
-      amountCents: args.amountCents,
-      // An unclassified tool fails CLOSED. So does an explicit submit node.
-      reversibility: risk.unknown || args.forceApproval ? 'irreversible' : undefined,
-      payload: { tool: args.tool, args: args.toolArgs } as Json,
-    });
+  if (risk.unknown) {
+    await ctx.log(
+      'warn',
+      'Tool "' +
+        args.tool +
+        '" is not classified, so it is being treated as irreversible and sent for approval. ' +
+        'See docs/tool-registry-handoff.md.',
+    );
   }
 
-  return route.call(ctx, {
-    stepId: args.stepId,
-    tool: args.tool,
-    args: args.toolArgs,
+  await ctx.requireApproval(args.stepId, {
+    kind: risk.kind,
     description: args.description,
-    policyRule:
-      risk.kind === UNKNOWN_TOOL_ACTION_KIND
-        ? 'human-approved-unclassified-tool'
-        : 'graph-node-tool-call',
+    amountCents: args.amountCents,
+    // An unclassified tool fails CLOSED. So does an explicit submit node.
+    reversibility: risk.unknown || args.forceApproval ? 'irreversible' : undefined,
+    payload: { tool: args.tool, args: args.toolArgs } as Json,
   });
-}
 
-/**
- * The browser-decision fields of a tool result, and ONLY those, for streaming.
- *
- * A tool result as a whole must never reach `Step.output` -- it is arbitrary,
- * it can be a page, and output is streamed AND persisted (see this file's
- * header). But a browser action's result carries the one thing the canvas most
- * needs and currently throws away: WHICH element was chosen, how sure the
- * decider was, and whether that answer cost a model call or was replayed from
- * cache for free.
- *
- * So this is an explicit allowlist of small, non-content fields, never a
- * spread. `target` is a control's accessible label, which core/tools/browser.ts
- * already treats as safe to return (the `inspect` operation returns a whole
- * table of them); it is not page text.
- *
- * Returns undefined for any result that is not a browser action, so a normal
- * tool node's output is unchanged.
- */
-function browserDecisionOf(result: unknown): Json | undefined {
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return undefined;
-  const r = result as Record<string, unknown>;
-  if (typeof r.operation !== 'string' || typeof r.decisionSource !== 'string') return undefined;
+  const toolbox = ctx.provider('toolbox');
+  const res = await toolbox.callTool(
+    { name: args.tool, args: args.toolArgs },
+    ctx.callContext({
+      stepId: args.stepId,
+      policyRule:
+        risk.kind === UNKNOWN_TOOL_ACTION_KIND
+          ? 'human-approved-unclassified-tool'
+          : 'graph-node-tool-call',
+    }),
+  );
 
-  return {
-    operation: r.operation,
-    index: typeof r.index === 'number' ? r.index : null,
-    target: typeof r.target === 'string' ? r.target : null,
-    url: typeof r.url === 'string' ? r.url : null,
-    navigated: r.navigated === true,
-    // TRUTHFUL LABELING, as core/tools/browser.ts puts it: the UI must not show
-    // a string match as a model decision, or a cache replay as a live call.
-    decisionSource: r.decisionSource,
-    confidence: typeof r.confidence === 'number' ? r.confidence : null,
-    rationale: typeof r.rationale === 'string' ? r.rationale : null,
-  };
+  if (!res.ok) throw new Error('Tool ' + args.tool + ' failed: ' + res.error.message);
+  return res.data;
 }
 
 async function runTool(
@@ -483,30 +386,20 @@ async function runTool(
   scope: RefScope,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
-  const route = await routeFor(cfg.tool);
 
-  // The full result is kept in a CLOSURE VARIABLE and never returned from the
-  // step, exactly as demo.playbook.ts keeps `raw` out of its outputs. What the
-  // step returns is what gets streamed and stored, so the only safe way to have
-  // both is to let the value escape sideways.
-  let full: unknown;
-
-  const output = await ctx.step(
-    { label: node.label, kind: 'tool', nodeId: node.id, providerId: route.providerFor(ctx) },
-    async (step) => {
-      full = await callToolGated(ctx, {
+  const result = await ctx.step(
+    { label: node.label, kind: 'tool', nodeId: node.id, providerId: ctx.providerFor('toolbox') },
+    async (step) =>
+      callToolGated(ctx, {
         stepId: step.id,
         tool: cfg.tool,
         toolArgs: cfg.args,
         actionKind: cfg.actionKind,
         description: 'Call ' + cfg.tool,
-      });
-      const decision = browserDecisionOf(full);
-      return { tool: cfg.tool, ...(decision ? { decision } : {}) };
-    },
+      }),
   );
 
-  return { value: { tool: cfg.tool, result: full }, output: output as Json };
+  return { value: { tool: cfg.tool, result }, output: { tool: cfg.tool } };
 }
 
 /**
@@ -514,85 +407,6 @@ async function runTool(
  * set and we call it directly — no agent harness, so no multi-turn model loop.
  * One cheap decide plus one tool call.
  */
-/**
- * A dispatch node's arguments for the tool the decision layer just chose.
- *
- * `argsFrom: 'static'` is the default and costs nothing: the author already
- * wrote the args per candidate. `'model'` is for the case the author could NOT
- * write them -- the right query or URL depends on what upstream nodes found --
- * and costs one CHEAP completion, which is still far less than handing the job
- * to a harness. The schema has promised this since it was written; until now
- * nothing read the field, so `'model'` silently dispatched `{}` and any tool
- * needing an argument failed.
- *
- * FAIL SOFT, toward the author's own args: an unusable reply (not JSON, not an
- * object) falls back to whatever `static` holds rather than throwing. The gate
- * has not run yet at this point -- this is argument composition, not a
- * permission decision, exactly as core/tools/composeText.ts is for typing.
- */
-async function dispatchArgs(
-  ctx: PlaybookContext,
-  stepId: string,
-  spec: {
-    tool: string;
-    goal: string;
-    evidence?: string;
-    argsFrom: 'static' | 'model';
-    static: Record<string, Json>;
-  },
-): Promise<Record<string, Json>> {
-  if (spec.argsFrom !== 'model') return spec.static;
-
-  const description = toolDescription(spec.tool);
-  const res = await ctx.provider('text.model').complete(
-    {
-      system:
-        'You produce ARGUMENTS for one tool call, as JSON. Reply with a single JSON ' +
-        'object and nothing else: the arguments themselves, no wrapper, no prose. ' +
-        'Use only what the tool takes; omit anything you are unsure of.',
-      prompt: [
-        'TOOL: ' + spec.tool + (description ? ' — ' + description : ''),
-        'GOAL: ' + spec.goal,
-        ...(spec.evidence ? ['', 'CONTEXT:', spec.evidence] : []),
-        ...(Object.keys(spec.static).length > 0
-          ? [
-              '',
-              'STARTING POINT (override only what the goal requires):',
-              JSON.stringify(spec.static),
-            ]
-          : []),
-      ].join('\n'),
-      tier: 'cheap',
-      maxTokens: 512,
-      json: true,
-    },
-    ctx.callContext({ stepId, policyRule: 'graph-node-tool-args' }),
-  );
-
-  if (!res.ok) {
-    await ctx.log('warn', 'Could not infer arguments for ' + spec.tool + "; using the node's own.");
-    return spec.static;
-  }
-
-  try {
-    const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(res.data.text);
-    const body = fenced ? (fenced[1] as string) : res.data.text;
-    const start = body.indexOf('{');
-    const end = body.lastIndexOf('}');
-    const parsed: unknown =
-      start === -1 || end < start ? null : JSON.parse(body.slice(start, end + 1));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return spec.static;
-    // The author's args are the floor: an inference may add or refine, never drop.
-    return { ...spec.static, ...(parsed as Record<string, Json>) };
-  } catch {
-    await ctx.log(
-      'warn',
-      'Inferred arguments for ' + spec.tool + " were not JSON; using the node's own.",
-    );
-    return spec.static;
-  }
-}
-
 async function runDispatch(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'dispatch' }>,
@@ -645,13 +459,7 @@ async function runDispatch(
         rule: 'dispatch-selected-single-tool',
       });
 
-      const toolArgs = await dispatchArgs(ctx, step.id, {
-        tool,
-        goal: cfg.goal,
-        evidence: cfg.evidence,
-        argsFrom: cfg.argsFrom,
-        static: (cfg.args[tool] ?? {}) as Record<string, Json>,
-      });
+      const toolArgs = (cfg.args[tool] ?? {}) as Record<string, Json>;
 
       const result = await callToolGated(ctx, {
         stepId: step.id,
@@ -723,9 +531,6 @@ async function runAgentTaskNode(
     availableTools: cfg.availableTools,
     pollIntervalMs: cfg.pollIntervalMs,
     maxPolls: cfg.maxPolls,
-    inactivityTimeoutMs: cfg.inactivityTimeoutMs,
-    maxDurationMs: cfg.maxDurationMs,
-    maxFailedToolCalls: cfg.maxFailedToolCalls,
   });
 
   return {
@@ -845,13 +650,42 @@ async function runApproval(
 const HANDOFF_TIMEOUT_MS = 600_000;
 
 /**
+ * Give back every session the run is still holding.
+ *
+ * Best effort and never throws: a session that cannot be released is a billing
+ * annoyance, while letting this reject would turn a SUCCESSFUL run into a
+ * failed one at the very last moment.
+ *
+ * Goes through the browser CAPABILITY, so the release is ledgered by
+ * withEgress like any other provider call rather than being a side channel.
+ */
+async function releaseHeldSessions(ctx: PlaybookContext, held: Set<string>): Promise<void> {
+  if (held.size === 0) return;
+
+  await Promise.all(
+    [...held].map(async (sessionId) => {
+      try {
+        await ctx
+          .provider('browser')
+          .closeSession(sessionId, ctx.callContext({ policyRule: 'run-teardown-session-release' }));
+        await ctx.releaseBrowserSession(sessionId);
+      } catch (err) {
+        await ctx
+          .log('warn', 'Could not release browser session ' + sessionId + ': ' + String(err))
+          .catch(() => undefined);
+      }
+    }),
+  );
+  held.clear();
+}
+
+/**
  * Fail the node if nobody acts in time.
  *
  * `Promise.race` and NOT an abort of the underlying approval: the approval
  * genuinely stays pending server-side, and saying otherwise in the UI would be
- * a lie. What the timeout bounds is how long the RUN waits, which is the thing
- * that actually needs bounding. The timer is always cleared, so a resolved
- * handoff cannot leave a live handle holding the process open.
+ * a lie. What this bounds is how long the RUN waits, which is the thing that
+ * actually needs bounding. The timer is always cleared.
  */
 async function withHandoffTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -883,26 +717,22 @@ async function withHandoffTimeout<T>(work: Promise<T>, ms: number, label: string
  * THE HUMAN DOES IT — see handoffNodeSchema for why this is not an `approval`.
  *
  * Mechanically this is `runApproval` with a browser session attached, and that
- * is deliberate: the blocking primitive (`ctx.requireApproval` ->
- * `waitForApproval` -> POST /api/approvals/:id/decide) is already correct,
- * already cancellable via the run's AbortSignal, and already surfaces in the
- * UI. Inventing a second way to block a run would mean a second way to get
- * cancellation wrong.
+ * is deliberate: the blocking primitive (requireApproval -> waitForApproval ->
+ * POST /approvals/:id/decide) is already correct, already cancellable via the
+ * run's AbortSignal, and already surfaces in the UI. A second way to block a
+ * run would be a second way to get cancellation wrong.
  *
- * What is NOT shared with `approval`:
+ * WHY THE SESSION IS OPENED THROUGH THE CAPABILITY AND NOT THE TOOL BROKER:
+ * the broker authorizes a tool call against an agent session's exposure grant
+ * (see core/tools/broker.ts, assertSelected). A graph node has no such grant --
+ * it is not a harness turn. The call still goes through the `browser`
+ * capability, so withEgress ledgers it and the privacy story is unchanged; and
+ * this node blocks for a human by construction, which is a stricter gate than
+ * the `read_page` classification an open would otherwise get.
  *
- *   - the session is opened through `callToolGated`, exactly as a `tool` node
- *     would, so opening a browser is still authorized and still lands in the
- *     egress ledger. A handoff does not get a private back door to the network.
- *   - the session STAYS OPEN on the way out when this node opened it, because
- *     the whole point is that downstream nodes inherit the authenticated
- *     session. That makes this the one node that deliberately leaks a session
- *     past its own step, so it returns the id as `value` for a downstream
- *     {{ref}} and the run's own teardown is what finally releases it.
- *
- * NO CREDENTIAL PASSES THROUGH THIS FUNCTION. There is nothing here that reads
- * a secret, and `output` carries only the instruction, the session id and how
- * the wait ended. Keep it that way.
+ * NO CREDENTIAL PASSES THROUGH HERE. There is nothing in this function that
+ * reads a secret, and `output` carries only the instruction, the session id and
+ * how the wait ended. Keep it that way.
  */
 async function runHandoff(
   ctx: PlaybookContext,
@@ -913,45 +743,47 @@ async function runHandoff(
   const cfg = resolveRefs(node.config, scope);
 
   // An inherited session belongs to whoever opened it. Only a session THIS
-  // node opens is one this node may hand downstream.
+  // node opens is one this node may hand downstream or hold for the run.
   const inherited = typeof cfg.sessionId === 'string' && cfg.sessionId.length > 0;
 
   const result = await ctx.step(
-    { label: node.label, kind: 'handoff', nodeId: node.id },
+    { label: node.label, kind: 'handoff', nodeId: node.id, providerId: ctx.providerFor('browser') },
     async (step) => {
-      let sessionId = inherited ? cfg.sessionId : undefined;
+      let sessionId = inherited ? (cfg.sessionId as string) : undefined;
 
       if (!inherited) {
-        // The browser descriptors are registered per PROVIDER ('browserbase.open',
-        // 'localbrowser.open'), so naming one means naming a backend. Asking the
-        // capability binding is the only way to do that without hardcoding a
-        // vendor here -- and it does not violate providerFor's "labelling only"
-        // rule in the way that rule exists to prevent: the BEHAVIOUR is
-        // identical either way, and the executor re-resolves the real backend
-        // from the authorization result regardless of which id we passed.
-        const tool = ctx.providerFor('browser') + '.open';
-
-        // Through the gate like any other tool call. `open` is the one browser
-        // operation that deliberately does NOT close what it opened (see
-        // core/tools/browser.ts), which is exactly the lifetime we want.
-        const opened = (await callToolGated(ctx, {
-          stepId: step.id,
-          tool,
-          toolArgs: cfg.url ? { url: cfg.url } : {},
-          actionKind: 'read_page',
-          description: 'Open a browser for a human handoff' + (cfg.url ? ' at ' + cfg.url : ''),
-        })) as { sessionId?: string } | null;
-
-        sessionId = opened?.sessionId;
-        if (!sessionId) {
+        const opened = await ctx
+          .provider('browser')
+          .openSession(
+            { ...(cfg.url ? { startUrl: cfg.url } : {}) },
+            ctx.callContext({ stepId: step.id, policyRule: 'handoff-open-for-human' }),
+          );
+        if (!opened.ok) {
           throw new Error(
-            'Handoff "' + node.label + '" could not open a browser session to hand over.',
+            'Handoff "' +
+              node.label +
+              '" could not open a browser to hand over: ' +
+              opened.error.message,
           );
         }
+        sessionId = opened.data.sessionId;
 
         // Held for the REST OF THE RUN, not this step: downstream nodes inherit
-        // the authenticated session. runGraph's finally is what gives it back.
+        // the authenticated session. runGraph's drain is what gives it back.
         lease.hold(sessionId);
+
+        // The person cannot reach the browser unless the viewer URL is put on
+        // the run stream. Undefined liveViewUrl is NORMAL (local and mocked
+        // browsers have no viewer) and the UI says so rather than dead-linking.
+        await ctx.announceBrowserSession({
+          sessionId,
+          stepId: step.id,
+          nodeId: node.id,
+          providerId: ctx.providerFor('browser'),
+          ...(opened.data.liveViewUrl ? { liveViewUrl: opened.data.liveViewUrl } : {}),
+          interactive: opened.data.interactive === true,
+          ...(cfg.url ? { startUrl: cfg.url } : {}),
+        });
       }
 
       // BLOCKS. Rejection throws ApprovalRejectedError and fails the node,
@@ -964,10 +796,8 @@ async function runHandoff(
         // an explicit author decision, exactly like an `approval` node.
         reversibility: 'irreversible',
         // The PAYLOAD is what reaches the UI: the orchestrator stores
-        // `action.payload ?? action` on the approval, so anything only on the
-        // ProposedAction wrapper (its own `kind`) is dropped. The discriminator
-        // has to be in here, or the approval panel cannot tell a handoff --
-        // "you do this part" -- from an ordinary "may the agent do this?".
+        // `action.payload ?? action`, so the discriminator has to live in here
+        // or the approval panel cannot tell a handoff from an ordinary gate.
         payload: {
           kind: 'human_handoff',
           instruction: cfg.instruction,
@@ -978,8 +808,7 @@ async function runHandoff(
       });
 
       // THE TIMEOUT FAILS THE RUN. It never falls through to letting the agent
-      // do it -- see handoffNodeSchema. The default is long on purpose: it is
-      // sized for "the person walked away", not "the person is still reading".
+      // do it -- see handoffNodeSchema.
       await withHandoffTimeout(waiting, cfg.timeoutMs ?? HANDOFF_TIMEOUT_MS, node.label);
 
       return { sessionId, handedOff: true, resumeWhen: cfg.resumeWhen };

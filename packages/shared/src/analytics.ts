@@ -91,16 +91,11 @@ export interface NodeMetrics {
   /** Self-reported by the agent runtime after the fact. */
   toolCallsActual?: number;
   modelTier?: ModelTier;
-  /** Distinct tool names Jev exposed to the harness for this node (union across every ScheduleDecision on it). */
+  /** Distinct tool names Jev exposed for this node. */
   exposedToolNames?: string[];
-  /** Distinct tool names the harness self-reported actually calling (post-hoc audit; see AgentTaskResult.toolCalls). */
+  /** Distinct tool names the harness reported calling. */
   calledToolNames?: string[];
-  /**
-   * `calledToolNames` minus `exposedToolNames` -- tools the harness touched
-   * that were never suggested. Tool restriction on the harness is BEST-EFFORT,
-   * not enforced (see hermes/live.ts), so this is an expected, sometimes-real
-   * signal to surface, not evidence of a bug.
-   */
+  /** Called tools that were not in the exposed set. */
   toolDivergence?: string[];
 }
 
@@ -237,11 +232,6 @@ function toolCallCount(steps: Step[]): number | undefined {
   return total;
 }
 
-/**
- * Distinct tool names the runtime self-reported calling, from every step's
- * `output.toolCalls` (see AgentTaskResult.toolCalls -- the same field
- * `toolCallCount` above counts, this collects the names instead).
- */
 function toolCallNames(steps: Step[]): string[] {
   const names = new Set<string>();
   for (const step of steps) {
@@ -250,10 +240,9 @@ function toolCallNames(steps: Step[]): string[] {
     const calls = (output as Record<string, unknown>).toolCalls;
     if (!Array.isArray(calls)) continue;
     for (const call of calls) {
-      if (call && typeof call === 'object' && !Array.isArray(call)) {
-        const tool = (call as Record<string, unknown>).tool;
-        if (typeof tool === 'string') names.add(tool);
-      }
+      if (!call || typeof call !== 'object' || Array.isArray(call)) continue;
+      const tool = (call as Record<string, unknown>).tool;
+      if (typeof tool === 'string') names.add(tool);
     }
   }
   return [...names];
@@ -372,15 +361,13 @@ export function rollup(input: RollupInput, now: number = Date.now()): RunAnalyti
 }
 
 /* -------------------------------------------------------------------------- */
-/* Assertions                                                                  */
+/* Assertions                                                                 */
 /* -------------------------------------------------------------------------- */
 
 export interface AssertionResult {
   id: string;
   description: string;
   expected: string;
-  /** null when the path didn't resolve to anything -- a missing node, an
-   *  unrun step, or a field the step's output never set. */
   actual: string | null;
   passed: boolean;
 }
@@ -394,20 +381,7 @@ function walkPath(value: unknown, segments: string[]): unknown {
   return current;
 }
 
-/**
- * Checks a graph's `assertions` against the STEPS a run actually produced --
- * the same persisted `Step.output` the timeline and the egress ledger already
- * read, not a second copy of interpreter internals. `path` is
- * "nodes.<nodeId>.<field...>" (see schemas/graph.ts's graphAssertionSchema);
- * the node is found by `Step.nodeId`, the rest of the path walks into that
- * step's `output`.
- *
- * A swarm's parent and every worker share one `nodeId` -- if an assertion
- * targets one, the FIRST step for that node id is used (the parent, since it
- * is always appended before its children), which is fine for the deterministic
- * per-node fields (a judge's `choice`, a redact node's `spans`) this is meant
- * to check.
- */
+/** Evaluate graph assertions against persisted step outputs. */
 export function evaluateAssertions(assertions: GraphAssertion[], steps: Step[]): AssertionResult[] {
   const byNode = new Map<string, Step>();
   for (const step of steps) {
@@ -415,12 +389,10 @@ export function evaluateAssertions(assertions: GraphAssertion[], steps: Step[]):
   }
 
   return assertions.map((assertion) => {
-    const segments = assertion.path.split('.');
-    const [root, nodeId, ...rest] = segments;
+    const [root, nodeId, ...rest] = assertion.path.split('.');
     const step = root === 'nodes' && nodeId !== undefined ? byNode.get(nodeId) : undefined;
     const resolved = step ? walkPath(step.output, rest) : undefined;
     const actual = resolved === undefined ? null : String(resolved);
-
     return {
       id: assertion.id,
       description: assertion.description,

@@ -7,14 +7,16 @@
  */
 
 import type { BrowserOperation, BrowserPerformResult, ElementTable } from './browser.js';
-import type { Reversibility } from './policy.js';
 
 export type ProviderId =
   | 'hermes' // agent runtime (Nous Research)
   | 'jev' // fast / cheap decision layer
   | 'browserbase' // cloud browser automation
-  | 'localbrowser' // LOCAL browser automation — the privacy path
+  | 'localbrowser' // local browser automation for private/local-only work
   | 'composio' // SaaS tools + OAuth brokering
+  | 'openrouter' // multi-model cloud inference gateway
+  | 'ollama' // local/private model runtime
+  | 'mcp' // user-configured upstream MCP connections
   | 'anthropic' // frontier text model
   | 'gptzero'; // OUT OF SCOPE — slot only
 
@@ -24,6 +26,9 @@ export const PROVIDER_IDS = [
   'browserbase',
   'localbrowser',
   'composio',
+  'openrouter',
+  'ollama',
+  'mcp',
   'anthropic',
   'gptzero',
 ] as const satisfies readonly ProviderId[];
@@ -47,19 +52,7 @@ export type IntelligenceLevel = 'low' | 'high';
 export type Capability =
   | 'agent.runtime'
   | 'decision'
-  /** Remote browser. A cloud destination — anything typed here has left the machine. */
   | 'browser'
-  /**
-   * LOCAL browser. Deliberately a SEPARATE capability from 'browser', not a mode
-   * flag on one adapter, for two reasons:
-   *
-   *   1. The registry binds exactly one provider per capability, so without a
-   *      second capability there is nowhere for policy to choose a destination.
-   *   2. Folding both backends into one adapter would collapse two egress-ledger
-   *      rows into one, destroying the "local-only data never reached
-   *      Browserbase" proof the demo rests on. Two capabilities, two providers,
-   *      two destinations, two rows.
-   */
   | 'browser.local'
   | 'toolbox'
   | 'text.model'
@@ -128,26 +121,6 @@ export interface ProviderAdapter {
 /* Capability interfaces — our vocabulary, deliberately narrow.               */
 /* -------------------------------------------------------------------------- */
 
-/**
- * One tool call a harness reports having made inside its own loop.
- *
- * `status` and `result` are what make this actionable rather than merely
- * informative. Without them a caller can see THAT a tool ran but not whether
- * it worked, so a harness stuck retrying a broken tool is indistinguishable
- * from one making progress -- which is precisely how a task burns its whole
- * budget and then reports only "timed out". A runtime that cannot report
- * either field omits it, same convention as the rest of this interface.
- */
-export interface HarnessToolCall {
-  tool: string;
-  /** ACP-style status: 'pending' | 'in_progress' | 'completed' | 'failed'. */
-  status?: string;
-  /** Short preview of what the tool returned, truncated by the adapter. */
-  result?: string;
-  args?: unknown;
-  at: string;
-}
-
 export interface AgentRuntimeAdapter extends ProviderAdapter {
   startTask(
     input: { goal: string; context?: unknown; tools?: string[] },
@@ -169,18 +142,15 @@ export interface AgentRuntimeAdapter extends ProviderAdapter {
        * the fact. If the real runtime cannot report this, the field stays
        * empty and that blind spot should be called out, not hidden.
        */
-      toolCalls?: HarnessToolCall[];
-      /**
-       * ISO timestamp of the last sign of life the runtime reported (a chunk,
-       * a tool call, anything). Lets the caller tell "still working, just
-       * slow" apart from "gone silent" without knowing anything about the
-       * runtime's internals. Optional and self-reported, same convention as
-       * `toolCalls` — a runtime that cannot report it just omits the field,
-       * and the caller falls back to poll-count-only patience.
-       */
-      lastActivityAt?: string;
+      toolCalls?: { tool: string; args?: unknown; at: string }[];
     }>
   >;
+  /** Continue the same harness session after AgentOS decides more work is required. */
+  continueTask(
+    taskId: string,
+    input: { instruction: string; context?: unknown },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<null>>;
   cancelTask(taskId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
 }
 
@@ -190,6 +160,53 @@ export interface DecisionAdapter extends ProviderAdapter {
     input: { question: string; options: string[]; evidence?: string },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<{ choice: string; confidence: number; rationale?: string }>>;
+
+  /** Choose exactly one policy-eligible model route supplied by AgentOS. */
+  selectModel(
+    input: {
+      state: import('./control.js').DecisionState;
+      candidates: import('./control.js').ModelRoute[];
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ModelSelectionDecision>>;
+
+  /** Select zero or more useful tool families from the supplied family IDs. */
+  selectToolFamilies(
+    input: {
+      state: import('./control.js').DecisionState;
+      candidateFamilies: string[];
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ToolFamilySelectionDecision>>;
+
+  /** Select zero or more tools from policy-eligible descriptor metadata. */
+  selectTools(
+    input: {
+      state: import('./control.js').DecisionState;
+      candidates: import('./control.js').ToolDescriptor[];
+      maxTools?: number;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ToolSelectionDecision>>;
+
+  /** Recommend semantic action policy; deterministic AgentOS policy remains final. */
+  recommendActionPolicy(
+    input: {
+      action: import('./control.js').ToolAction;
+      descriptor: import('./control.js').ToolDescriptor;
+      state: import('./control.js').DecisionState;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').ActionPolicyRecommendation>>;
+
+  /** Judge a sanitized checkpoint as done, continue, or blocked. */
+  judgeCompletion(
+    input: {
+      checkpoint: import('./control.js').SessionCheckpoint;
+      sanitizedState: import('./control.js').DecisionState;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<import('./control.js').CompletionJudgment>>;
 
   /**
    * Route a subtask BEFORE it starts: pick a model tier and filter the
@@ -243,100 +260,51 @@ export interface BrowserAdapter extends ProviderAdapter {
   ): Promise<ProviderResult<T>>;
   closeSession(sessionId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
 
-  /* ---- The Jev-driven path (3B-4/3B-5). Optional, so an adapter that only ----
-     does natural-language act/extract stays valid. -------------------------- */
-
-  /**
-   * Capture the page as an indexed table of interactive elements. The live
-   * handles stay INSIDE the adapter, keyed by index — they are deliberately
-   * absent from `ElementTable`, so no selector or handle can escape the server.
-   */
+  /** Optional element-table path used by the Jev browser controller. */
   snapshot?(
     input: { sessionId: string; maxElements?: number },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<ElementTable>>;
-
-  /**
-   * Apply one operation to one index from a snapshot.
-   *
-   * `snapshotId` is checked against the adapter's current snapshot BEFORE
-   * acting: a decision made against a page that has since changed is refused,
-   * not applied. Occlusion and interactability are checked the same way. Those
-   * refusals come back as `ok: false` with a `TargetRejection` reason.
-   */
   perform?(
     input: {
       sessionId: string;
       snapshotId: string;
       operation: BrowserOperation;
-      /** Required for CLICK / TYPE_TEXT / SELECT; absent for SCROLL / WAIT. */
       index?: number;
-      /** For TYPE_TEXT and SELECT. Jev never produces this — a generative model does. */
       text?: string;
     },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<BrowserPerformResult>>;
 }
 
-/**
- * One tool in the catalog.
- *
- * ============================================================================
- * `actionKind` IS A SAFETY FIELD, not a label.
- *
- * `core/risk.ts` decides whether a human gets asked, and it decides from the
- * action's KIND. A hand-written playbook passes that kind literally. A graph
- * cannot: a `dispatch` node does not know which tool it will call until a model
- * has picked one. So the kind has to travel WITH the tool, and this is where it
- * travels.
- *
- * Getting it wrong in the permissive direction is the worst bug available in
- * this codebase — it would let a model-selected `mail.send` run unattended and
- * turn `dispatch` into a way around the approval gate.
- *
- * TWO RULES:
- *
- *  1. `actionKind` MUST be a value `core/risk.ts` already recognises. A kind it
- *     does not know falls through to `reversible` and RUNS UNATTENDED. If you
- *     need a new kind, add it to IRREVERSIBLE_KINDS / RECOVERABLE_KINDS in the
- *     same change.
- *  2. Tool names are OUR vocabulary, never a vendor's: `domain.action`,
- *     lowercase, dot separated. Translate at the adapter boundary. That is what
- *     lets a tool move between providers without touching a graph.
- * ============================================================================
- */
-export interface ToolCatalogEntry {
-  /** `domain.action`, our vocabulary — e.g. `mail.send`, not Composio's name. */
+export interface ToolboxToolDefinition {
+  /** Provider-native immutable tool identifier (for example GMAIL_SEND_EMAIL). */
   name: string;
   description: string;
-  /**
-   * What calling this DOES, in `core/risk.ts`'s vocabulary.
-   *
-   * Optional only so the field can land additively; an entry without one is
-   * treated as UNCLASSIFIED and fails closed (stops for a human), never as safe.
-   */
-  actionKind?: string;
-  /** Overrides the kind -> reversibility inference when the tool knows better. */
-  reversibility?: Reversibility;
-  /** Grouping for the editor's tool picker: `mail`, `sheets`, `browser`, … */
-  group?: string;
-  /**
-   * A FIXTURE: an invented tool with no provider behind it.
-   *
-   * Fixtures exist so tool SELECTION and REDUCTION can be demonstrated before
-   * the sponsor catalog is chosen. They must be labelled truthfully in the UI
-   * and they must REFUSE TO EXECUTE — per the design spec, running one is an
-   * error, not a no-op. A fixture that quietly returns `ok` is worse than no
-   * fixture at all, because the trace then shows work that never happened.
-   */
-  simulated?: boolean;
+  version?: string;
+  toolkit?: string;
+  inputSchema?: import('./domain.js').Json;
+  requiredScopes?: string[];
+  connectedAccountId?: string;
 }
 
 export interface ToolboxAdapter extends ProviderAdapter {
-  listTools(ctx: ProviderCallContext): Promise<ProviderResult<ToolCatalogEntry[]>>;
+  /** Resolve explicitly configured provider-native tools. */
+  listTools(ctx: ProviderCallContext): Promise<ProviderResult<ToolboxToolDefinition[]>>;
+  /** Search the provider catalog for a task before the harness starts. */
+  searchTools(
+    input: { query: string; toolkits?: string[]; limit?: number },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<ToolboxToolDefinition[]>>;
   connectUrl(app: string, ctx: ProviderCallContext): Promise<ProviderResult<{ url: string }>>;
   callTool(
-    input: { name: string; args: Record<string, unknown> },
+    input: {
+      name: string;
+      args: Record<string, unknown>;
+      version?: string;
+      userId?: string;
+      connectedAccountId?: string;
+    },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<unknown>>;
 }
@@ -368,7 +336,6 @@ export interface CapabilityMap {
   'agent.runtime': AgentRuntimeAdapter;
   decision: DecisionAdapter;
   browser: BrowserAdapter;
-  /** Same interface, different destination. That IS the point — see Capability. */
   'browser.local': BrowserAdapter;
   toolbox: ToolboxAdapter;
   'text.model': TextModelAdapter;

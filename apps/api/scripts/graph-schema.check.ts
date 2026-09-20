@@ -16,12 +16,10 @@
 
 import {
   agentGraphSchema,
-  delegationOf,
   EXECUTOR_BY_NODE_TYPE,
   executorOf,
   findGraphCycle,
   GRAPH_NODE_TYPES,
-  hasRuntimeDelegation,
   NODE_TYPE_ICON,
   styleOf,
 } from '@htn/shared';
@@ -137,50 +135,7 @@ console.log('\n3. The executor axis stays in sync with the node types');
   check('the agent harness is the expensive one', styleOf('agent_task').cost === 'high');
 }
 
-console.log('\n4. Delegation: the runtime must still have work to do');
-{
-  // A graph of nothing but pinned tool calls runs fine and quietly makes the
-  // decision layer and the agent harness ornamental. That is exactly what the
-  // synthesiser is guarded against, so the guard itself needs a test.
-  const allPinned = { nodes: [toolNode('a'), toolNode('b')] } as never;
-  const pinned = delegationOf(allPinned);
-  check('an all-pinned graph reports fullyPinned', pinned.fullyPinned);
-  check('and is rejected by the guard', !hasRuntimeDelegation(allPinned));
-  check('its runtime share is zero', pinned.runtimeShare === 0);
-
-  const withDispatch = {
-    nodes: [
-      toolNode('a'),
-      {
-        id: 'd',
-        type: 'dispatch',
-        label: 'Pick',
-        position: { x: 0, y: 0 },
-        config: { goal: 'g', candidateTools: ['sheets.append', 'mail.send'] },
-      },
-    ],
-  } as never;
-  const mixed = delegationOf(withDispatch);
-  check('one dispatch is enough to pass the guard', hasRuntimeDelegation(withDispatch));
-  check('candidate tools are counted for the decision layer', mixed.candidateTools === 2);
-  check('runtime share is half when one of two calls is deferred', mixed.runtimeShare === 0.5);
-
-  const withAgent = {
-    nodes: [
-      {
-        id: 'a',
-        type: 'agent_task',
-        label: 'Delegate',
-        position: { x: 0, y: 0 },
-        config: { goal: 'g', availableTools: ['web.search', 'docs.read'] },
-      },
-    ],
-  } as never;
-  check('an agent_task alone also passes', hasRuntimeDelegation(withAgent));
-  check('its tools count as candidates', delegationOf(withAgent).candidateTools === 2);
-}
-
-console.log('\n5. The three refinements the interpreter depends on');
+console.log('\n4. The three refinements the interpreter depends on');
 {
   const dup = agentGraphSchema.safeParse(graph([toolNode('a'), toolNode('a')], []));
   check(
@@ -209,7 +164,7 @@ console.log('\n5. The three refinements the interpreter depends on');
   check('a self-loop counts as a cycle', !selfLoop.success);
 }
 
-console.log('\n6. findGraphCycle is usable on its own');
+console.log('\n5. findGraphCycle is usable on its own');
 {
   const cycle = findGraphCycle(
     [{ id: 'a' }, { id: 'b' }],
@@ -234,7 +189,7 @@ console.log('\n6. findGraphCycle is usable on its own');
   check('a diamond (shared descendant) is NOT a cycle', diamond === null, String(diamond));
 }
 
-console.log('\n7. Config is validated per node type');
+console.log('\n6. Config is validated per node type');
 {
   const badTool = agentGraphSchema.safeParse(
     graph([{ ...toolNode('a'), config: { args: {} } }], []),

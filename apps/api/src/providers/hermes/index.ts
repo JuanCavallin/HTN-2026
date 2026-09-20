@@ -15,11 +15,6 @@ interface MockTask {
   tools: string[];
 }
 
-/** The mock is always "just active" — see the pollTask note below. */
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
 function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
   const base = mockBase('hermes', CAPABILITIES, cfg.mode);
   /** Fake task state so pollTask returns 'running' once before 'done'. */
@@ -55,22 +50,7 @@ function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
           const n = (task?.polls ?? 0) + 1;
           if (task) task.polls = n;
 
-          // lastActivityAt is always "now": the mock never actually goes
-          // idle, so it should never trip the orchestrator's new
-          // inactivity check. Reporting a stale timestamp here would be a
-          // mock-only false positive that live Hermes would never produce.
-          if (n < 2) {
-            // Mirrors the live adapter: tool calls are reported while running,
-            // not withheld until the task finishes. The mock reports none yet
-            // because it fabricates them at completion, but the field is
-            // present so both adapters have the same shape mid-flight.
-            return {
-              status: 'running' as const,
-              log: ['working...'],
-              toolCalls: [],
-              lastActivityAt: nowIso(),
-            };
-          }
+          if (n < 2) return { status: 'running' as const, log: ['working...'] };
 
           // Fabricate an audit trail using whatever tools this task was
           // actually given — this is standing in for Hermes self-reporting
@@ -85,11 +65,17 @@ function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
             result: { note: 'mock agent runtime completed task ' + taskId },
             log: ['working...', 'done'],
             toolCalls,
-            lastActivityAt: nowIso(),
           };
         },
         { tokensIn: 0, tokensOut: 180 },
       );
+    },
+    async continueTask(taskId, _input, ctx) {
+      return mockCall('hermes', 'continueTask', cfg.mode, ctx, () => {
+        const task = tasks.get(taskId);
+        if (task) task.polls = 0;
+        return null;
+      });
     },
     async cancelTask(taskId, ctx) {
       return mockCall('hermes', 'cancelTask', cfg.mode, ctx, () => {
