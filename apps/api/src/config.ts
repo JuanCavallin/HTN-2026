@@ -45,6 +45,25 @@ const envSchema = z.object({
   BROWSERBASE_API_KEY: z.string().optional(),
   BROWSERBASE_PROJECT_ID: z.string().optional(),
 
+  // Local browser — the privacy path. It has NO credential, so live mode gates
+  // on a Chrome channel instead (same shape as HERMES_CWD): `playwright-core`
+  // ships no browser binaries, so without an installed channel to drive there
+  // is nothing to launch and the honest answer is to stay in mock.
+  LOCALBROWSER_MODE: modeEnum.default('mock'),
+  LOCALBROWSER_CHANNEL: z.string().optional(),
+
+  // Caps shared by BOTH browser backends. Sessions cost money while open, and
+  // Browserbase's measured project concurrency limit is 25.
+  BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
+  BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  /** Per-attempt budget for one Jev browser decision. See docs/jev.md. */
+  BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
+  /** Cap on element-table rows. The table IS the request state — keep it small. */
+  BROWSER_MAX_ELEMENTS: z.coerce.number().int().positive().default(60),
+
+  TYPESAFE_API_KEY: z.string().optional(),
+  TYPESAFE_DEFAULT_MODEL: z.string().default('jev-latest'),
+
   COMPOSIO_MODE: modeEnum.default('mock'),
   COMPOSIO_API_KEY: z.string().optional(),
 
@@ -74,6 +93,8 @@ export interface ProviderConfig {
   projectId?: string;
   /** Absolute path to a local checkout the provider drives as a subprocess (Hermes only). */
   cwd?: string;
+  /** Installed browser channel to drive, e.g. 'chrome' (localbrowser only). */
+  channel?: string;
   /** Name of the env var that would enable live mode. Shown in health detail. */
   keyVar: string;
 }
@@ -103,12 +124,25 @@ function resolveHermes(): ProviderConfig {
   return { mode, cwd: env.HERMES_CWD, baseUrl: env.HERMES_BASE_URL, keyVar: 'HERMES_CWD' };
 }
 
+/**
+ * The local browser gates on a CHANNEL, not a key — same precedent as Hermes.
+ * There is no credential to leak here, which is exactly why this backend is the
+ * one allowed to carry local-only data.
+ */
+function resolveLocalBrowser(): ProviderConfig {
+  let mode: ProviderMode = env.LOCALBROWSER_MODE;
+  if (env.MOCK_ALL) mode = 'mock';
+  else if (mode === 'live' && !env.LOCALBROWSER_CHANNEL) mode = 'mock';
+  return { mode, channel: env.LOCALBROWSER_CHANNEL, keyVar: 'LOCALBROWSER_CHANNEL' };
+}
+
 const providers: Record<ProviderId, ProviderConfig> = {
   hermes: resolveHermes(),
   jev: resolve(env.JEV_MODE, env.JEV_API_KEY, 'JEV_API_KEY', { baseUrl: env.JEV_BASE_URL }),
   browserbase: resolve(env.BROWSERBASE_MODE, env.BROWSERBASE_API_KEY, 'BROWSERBASE_API_KEY', {
     projectId: env.BROWSERBASE_PROJECT_ID,
   }),
+  localbrowser: resolveLocalBrowser(),
   composio: resolve(env.COMPOSIO_MODE, env.COMPOSIO_API_KEY, 'COMPOSIO_API_KEY'),
   anthropic: resolve(env.ANTHROPIC_MODE, env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY'),
   gptzero: resolve(env.GPTZERO_MODE, env.GPTZERO_API_KEY, 'GPTZERO_API_KEY'),
@@ -125,6 +159,21 @@ export const config = Object.freeze({
     failureRate: env.MOCK_FAILURE_RATE,
     minLatencyMs: env.MOCK_MIN_LATENCY_MS,
     maxLatencyMs: Math.max(env.MOCK_MIN_LATENCY_MS, env.MOCK_MAX_LATENCY_MS),
+  },
+  browser: {
+    maxSessions: env.BROWSER_MAX_SESSIONS,
+    timeoutMs: env.BROWSER_TIMEOUT_MS,
+    decisionTimeoutMs: env.BROWSER_DECISION_TIMEOUT_MS,
+    maxElements: env.BROWSER_MAX_ELEMENTS,
+  },
+  /**
+   * Jev's real home (TypeSafe AI System One). Separate from `providers.jev`,
+   * which is Person 2's `decision` capability slot — this is the credential the
+   * 3B browser decider reads. Empty today; the deterministic fallback covers it.
+   */
+  typesafe: {
+    apiKey: env.TYPESAFE_API_KEY,
+    defaultModel: env.TYPESAFE_DEFAULT_MODEL,
   },
   providers,
 });

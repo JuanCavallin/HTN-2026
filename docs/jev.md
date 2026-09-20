@@ -5,10 +5,26 @@ not behave like one. The most common mistake is asking it to generate something.
 
 > **Status of this document.** Everything here was verified against TypeSafe's published
 > docs and the `browser-use/jev-ultrafast` source. **No live Jev call has been made from
-> this repo** — we have no `TYPESAFE_API_KEY` yet. Treat request/response shapes as
+> this repo** — we still have no `TYPESAFE_API_KEY`. Treat request/response shapes as
 > documented-but-untested, and fix this file the first time reality disagrees with it.
-> time reality disagrees with it.
-
+>
+> **Re-confirmed against the published SDK reference (2026-09-19)**, so these are safe to
+> code against:
+>
+> - `client.systemOne(request, options?)` — `options` is `RequestOptions`.
+> - `RequestOptions.timeout` is **per attempt, in ms, with NO total retry budget**; the
+>   client default is **10000ms**. Left alone, one browser decision can hang ~25s across
+>   retries and backoff. `providers/jev/browserDecider.ts` overrides it to
+>   `BROWSER_DECISION_TIMEOUT_MS` (2000ms) with `retry: { maxRetries: 1 }`.
+> - `RequestOptions` also carries `signal`, `retry` and `headers`.
+> - `TypeSafeClientConfig.defaultModel` falls back to `TYPESAFE_DEFAULT_MODEL`, then
+>   `jev-latest`. `dangerouslyAllowBrowser` defaults to false — **never set it.**
+> - A result is `{ answers, model, usage }`; `usage` has `input_tokens` / `output_tokens`,
+>   which should be reported into `ProviderMeta` so Jev does not look free in the ledger.
+> - `systemOne` **throws** on empty questions, on a `score` with fewer than two criteria,
+>   on a non-2xx after retries, on timeout after retries, and on abort. A `choice` with
+>   one option is not a question — build the criteria first and skip the head if it has
+>   fewer than two entries.
 
 ---
 
@@ -16,21 +32,21 @@ not behave like one. The most common mistake is asking it to generate something.
 
 **Jev returns typed, calibrated answers. It cannot generate free text.**
 
-It is TypeSafe AI's *System One* decision model. You give it state and a set of typed
+It is TypeSafe AI's _System One_ decision model. You give it state and a set of typed
 questions; it returns a choice, a score, or a probability — each with confidence and a
 full probability distribution. There is no `content` string. There is no tool calling.
 There is no loop.
 
 So:
 
-| You want | Jev? |
-| --- | --- |
-| "Which of these 12 buttons is the login button?" | **yes** — this is exactly what it's for |
-| "Is this ticket about billing?" | **yes** |
-| "How urgent is this, 0–2?" | **yes** |
-| "Write a CSS selector for the login button" | **no** — it cannot generate |
-| "Plan the next five steps of this task" | **no** — use a generative model |
-| "Fill in this form field with the user's email" | **no** — Jev picks the *field*; a small LLM supplies the *text* |
+| You want                                         | Jev?                                                            |
+| ------------------------------------------------ | --------------------------------------------------------------- |
+| "Which of these 12 buttons is the login button?" | **yes** — this is exactly what it's for                         |
+| "Is this ticket about billing?"                  | **yes**                                                         |
+| "How urgent is this, 0–2?"                       | **yes**                                                         |
+| "Write a CSS selector for the login button"      | **no** — it cannot generate                                     |
+| "Plan the next five steps of this task"          | **no** — use a generative model                                 |
+| "Fill in this form field with the user's email"  | **no** — Jev picks the _field_; a small LLM supplies the _text_ |
 
 If you catch yourself designing a prompt, stop. Jev takes `criteria`, not prompts.
 
@@ -45,13 +61,13 @@ npm install @typesafe-ai/sdk          # requires Node 20+
 # TYPESAFE_API_KEY goes in the root .env
 ```
 
-| | |
-| --- | --- |
-| Package | `@typesafe-ai/sdk` (npm; 0.6.0 at time of writing) |
-| Client | `new TypeSafeClient()` → `client.systemOne({ state, questions })` |
-| Auth | `TYPESAFE_API_KEY` environment variable |
-| Model id | `jev-latest` |
-| Raw endpoint | `POST https://api.typesafe.ai/v1/systemone` |
+|              |                                                                   |
+| ------------ | ----------------------------------------------------------------- |
+| Package      | `@typesafe-ai/sdk` (npm; 0.6.0 at time of writing)                |
+| Client       | `new TypeSafeClient()` → `client.systemOne({ state, questions })` |
+| Auth         | `TYPESAFE_API_KEY` environment variable                           |
+| Model id     | `jev-latest`                                                      |
+| Raw endpoint | `POST https://api.typesafe.ai/v1/systemone`                       |
 
 A Python SDK (`typesafe-sdk` on PyPI, with `AsyncTypeSafeClient`) exists too, if an MCP
 server or side tool ever needs it. The SDK is a thin wrapper over that endpoint;
@@ -110,8 +126,8 @@ the one this repo follows.
 
 ### 1. Turn the page into an indexed element table
 
-Never hand Jev raw DOM or a screenshot. Build a numbered table of *interactive elements
-only*:
+Never hand Jev raw DOM or a screenshot. Build a numbered table of _interactive elements
+only_:
 
 ```text
 [1] button    Change ticket type · Round trip
@@ -146,11 +162,11 @@ page → element table → operation                 │
                    small LLM → text → browser
 ```
 
-Target questions are **speculative**: you ask for a click target *and* a type target,
+Target questions are **speculative**: you ask for a click target _and_ a type target,
 then discard whichever doesn't match the chosen operation. Two decisions, one round trip.
 
 **This trade is deliberate and it is not free.** The published benchmark measured tasks
-31–43% faster but inference cost 38–51% *higher*, because you pay for discarded target
+31–43% faster but inference cost 38–51% _higher_, because you pay for discarded target
 heads. Tune the number of speculative heads if cost matters more than latency for a given
 run. (That benchmark was four runs with no outcome verification, self-disclaimed by its
 authors — treat the direction as real and the magnitudes as noise.)
@@ -162,9 +178,9 @@ authors — treat the direction as real and the magnitudes as noise.)
 
 Note `DONE` / `BLOCKED` — the same vocabulary as this project's completion judge.
 
-`TYPE_TEXT` is the one that needs help: Jev picks *which field*, and a small generative
-model supplies *what to type*. Its own label says so — *"A small LLM will supply the value
-from the goal."*
+`TYPE_TEXT` is the one that needs help: Jev picks _which field_, and a small generative
+model supplies _what to type_. Its own label says so — _"A small LLM will supply the value
+from the goal."_
 
 ### 4. Validate before you execute
 
@@ -192,7 +208,7 @@ Two places where Jev's actual behaviour lines up with
 [agentos-design.md](./agentos-design.md):
 
 **1. Confidence gating is implementable, not aspirational.** The spec says AgentOS accepts
-`done` only when *"Jev clears the configured confidence threshold."* Jev returns real
+`done` only when _"Jev clears the configured confidence threshold."_ Jev returns real
 calibrated probabilities, so that threshold is a number you can actually compare against.
 
 Use it for risk too: if Jev is split 0.5/0.5 between two buttons on a `verify` action,
@@ -201,11 +217,11 @@ lower it. That's "deterministic policy overrides Jev" made concrete.
 
 **2. Jev is structurally quarantined.** The recommended defence against prompt injection
 from web pages is the dual-LLM split: a privileged planner with tools, and a quarantined
-reader that sees untrusted content but has no tool access. Jev *is* the quarantined
+reader that sees untrusted content but has no tool access. Jev _is_ the quarantined
 reader by construction — a model that can only return an index into a list you built
 cannot be talked into issuing an action, no matter what the page says.
 
-This does **not** remove the need for the gate. Page content can still steer *which*
+This does **not** remove the need for the gate. Page content can still steer _which_
 element gets picked, so `authorize_action` still runs before every execution, and
 consequential operations still need approval.
 
@@ -229,8 +245,8 @@ deterministic fallback anyway, so the stub is not throwaway work.
 - **Acting on a stale snapshot.** Check freshness and occlusion first.
 - **Trusting confidence blindly.** Low confidence is a signal to escalate to a human, not
   to retry harder.
-- **Skipping the gate because "Jev is safe."** Jev being unable to *generate* an action
-  does not mean the action it *picked* is authorized.
+- **Skipping the gate because "Jev is safe."** Jev being unable to _generate_ an action
+  does not mean the action it _picked_ is authorized.
 
 ---
 

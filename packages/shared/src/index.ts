@@ -9,9 +9,11 @@
  */
 
 export * from './analytics.js';
+export * from './browser.js';
 export * from './domain.js';
 export * from './events.js';
 export * from './policy.js';
 export * from './providers.js';
 export * from './scheduling.js';
+export * from './tools.js';
 export * from './schemas/index.js';

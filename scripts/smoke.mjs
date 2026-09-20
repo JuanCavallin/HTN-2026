@@ -47,12 +47,28 @@ async function main() {
 
   const providers = await api('/api/providers');
   const list = providers.body?.providers ?? [];
-  check('six providers reported', list.length === 6, list.length + ' found');
+  // Seven since Person 3 added `localbrowser` — the LOCAL browser destination,
+  // a separate provider from `browserbase` on purpose so policy can choose
+  // between them and the two produce distinct egress-ledger rows.
+  check('seven providers reported', list.length === 7, list.length + ' found');
   check(
-    'no provider is in live mode without a key',
-    list.every((p) => p.mode !== 'live'),
-    list.map((p) => p.id + '=' + p.mode).join(' '),
+    'localbrowser is registered',
+    list.some((p) => p.id === 'localbrowser'),
+    list.map((p) => p.id).join(' '),
   );
+  // This asserts the MOCK contract, so it only holds when nothing is configured
+  // live. A developer with real keys in .env is not failing the smoke test.
+  const liveProviders = list.filter((p) => p.mode === 'live');
+  if (liveProviders.length === 0) {
+    check('no provider is in live mode without a key', true,
+      list.map((p) => p.id + '=' + p.mode).join(' '));
+  } else {
+    console.log(
+      '  [INFO] live providers configured, mock-contract check skipped -> ' +
+        liveProviders.map((p) => p.id).join(', ') +
+        '   (run with MOCK_ALL=true to assert it)',
+    );
+  }
 
   console.log('\n2. Launch a run');
   const created = await api('/api/runs', {

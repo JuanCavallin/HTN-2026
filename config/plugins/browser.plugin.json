@@ -1,0 +1,89 @@
+{
+  "_comment": [
+    "The ONE manifest that exists, and it exists to prove the format against a real",
+    "provider rather than a guessed sponsor API. The browser family is 3B's, and it is",
+    "3A's first and only genuine consumer until the sponsor list lands.",
+    "",
+    "Note what is NOT here: no credential value, no full JSON schema, no endpoint with",
+    "auth in it. schemaRef and credentialRef are pointers. This manifest is checked in.",
+    "",
+    "NOTE ON DESTINATION: this manifest describes the LOCAL backend. Browserbase's",
+    "descriptors deliberately exclude local_only context and secret data, and they are",
+    "registered from code (browserDescriptors.ts) rather than here, so that rule is",
+    "encoded in the descriptor itself and cannot be edited away in a config file."
+  ],
+  "manifestVersion": 1,
+  "pluginId": "htn.browser.local",
+  "version": "1.0.0",
+  "providerId": "browser",
+  "family": "browser",
+  "displayName": "Browser (local Chrome)",
+  "transport": "native",
+  "executorRef": "executor:browser",
+  "tools": [
+    {
+      "operation": "open",
+      "description": "Open a browser session, optionally at a starting URL.",
+      "schemaRef": "schema:browser.open@1",
+      "riskClass": "auto",
+      "allowedDataLabels": ["public", "private", "secret"],
+      "allowedContextScopes": ["public", "private", "local_only"]
+    },
+    {
+      "operation": "search",
+      "description": "Run a search and return the result text.",
+      "schemaRef": "schema:browser.search@1",
+      "riskClass": "auto",
+      "allowedDataLabels": ["public"],
+      "allowedContextScopes": ["public"]
+    },
+    {
+      "operation": "extract",
+      "description": "Extract text from the current page.",
+      "schemaRef": "schema:browser.extract@1",
+      "riskClass": "auto",
+      "allowedDataLabels": ["public", "private", "secret"],
+      "allowedContextScopes": ["public", "private", "local_only"]
+    },
+    {
+      "operation": "inspect",
+      "description": "Return the indexed table of interactive elements on the page.",
+      "schemaRef": "schema:browser.inspect@1",
+      "riskClass": "auto",
+      "allowedDataLabels": ["public", "private", "secret"],
+      "allowedContextScopes": ["public", "private", "local_only"]
+    },
+    {
+      "operation": "click",
+      "description": "Click the element that best matches the goal.",
+      "schemaRef": "schema:browser.click@1",
+      "riskClass": "verify",
+      "allowedDataLabels": ["public", "private", "secret"],
+      "allowedContextScopes": ["public", "private", "local_only"]
+    },
+    {
+      "operation": "type",
+      "description": "Type a value into the field that best matches the goal.",
+      "schemaRef": "schema:browser.type@1",
+      "riskClass": "verify",
+      "allowedDataLabels": ["public", "private", "secret"],
+      "allowedContextScopes": ["public", "private", "local_only"]
+    },
+    {
+      "operation": "submit",
+      "description": "Submit a form. Irreversible: always requires human approval.",
+      "schemaRef": "schema:browser.submit@1",
+      "riskClass": "ask_human",
+      "allowedDataLabels": ["public", "private", "secret"],
+      "allowedContextScopes": ["public", "private", "local_only"]
+    },
+    {
+      "operation": "close",
+      "description": "Release the browser session.",
+      "schemaRef": "schema:browser.close@1",
+      "riskClass": "auto",
+      "allowedDataLabels": ["public", "private", "secret"],
+      "allowedContextScopes": ["public", "private", "local_only"]
+    }
+  ]
+}

@@ -6,10 +6,13 @@
  * swap providers, and what lets Hermes/Jev stay unimplemented without blocking anyone.
  */
 
+import type { BrowserOperation, BrowserPerformResult, ElementTable } from './browser.js';
+
 export type ProviderId =
   | 'hermes' // agent runtime (Nous Research)
   | 'jev' // fast / cheap decision layer
   | 'browserbase' // cloud browser automation
+  | 'localbrowser' // LOCAL browser automation — the privacy path
   | 'composio' // SaaS tools + OAuth brokering
   | 'anthropic' // frontier text model
   | 'gptzero'; // OUT OF SCOPE — slot only
@@ -18,6 +21,7 @@ export const PROVIDER_IDS = [
   'hermes',
   'jev',
   'browserbase',
+  'localbrowser',
   'composio',
   'anthropic',
   'gptzero',
@@ -38,7 +42,25 @@ export type ModelTier = 'cheap' | 'standard' | 'frontier';
  * vendor — so re-pointing 'decision' from jev to anthropic is a one-line change.
  */
 export type Capability =
-  'agent.runtime' | 'decision' | 'browser' | 'toolbox' | 'text.model' | 'content.analysis';
+  | 'agent.runtime'
+  | 'decision'
+  /** Remote browser. A cloud destination — anything typed here has left the machine. */
+  | 'browser'
+  /**
+   * LOCAL browser. Deliberately a SEPARATE capability from 'browser', not a mode
+   * flag on one adapter, for two reasons:
+   *
+   *   1. The registry binds exactly one provider per capability, so without a
+   *      second capability there is nowhere for policy to choose a destination.
+   *   2. Folding both backends into one adapter would collapse two egress-ledger
+   *      rows into one, destroying the "local-only data never reached
+   *      Browserbase" proof the demo rests on. Two capabilities, two providers,
+   *      two destinations, two rows.
+   */
+  | 'browser.local'
+  | 'toolbox'
+  | 'text.model'
+  | 'content.analysis';
 
 /** Passed to every provider call. Feeds the egress ledger. */
 export interface ProviderCallContext {
@@ -171,6 +193,40 @@ export interface BrowserAdapter extends ProviderAdapter {
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<T>>;
   closeSession(sessionId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
+
+  /* ---- The Jev-driven path (3B-4/3B-5). Optional, so an adapter that only ----
+     does natural-language act/extract stays valid. -------------------------- */
+
+  /**
+   * Capture the page as an indexed table of interactive elements. The live
+   * handles stay INSIDE the adapter, keyed by index — they are deliberately
+   * absent from `ElementTable`, so no selector or handle can escape the server.
+   */
+  snapshot?(
+    input: { sessionId: string; maxElements?: number },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<ElementTable>>;
+
+  /**
+   * Apply one operation to one index from a snapshot.
+   *
+   * `snapshotId` is checked against the adapter's current snapshot BEFORE
+   * acting: a decision made against a page that has since changed is refused,
+   * not applied. Occlusion and interactability are checked the same way. Those
+   * refusals come back as `ok: false` with a `TargetRejection` reason.
+   */
+  perform?(
+    input: {
+      sessionId: string;
+      snapshotId: string;
+      operation: BrowserOperation;
+      /** Required for CLICK / TYPE_TEXT / SELECT; absent for SCROLL / WAIT. */
+      index?: number;
+      /** For TYPE_TEXT and SELECT. Jev never produces this — a generative model does. */
+      text?: string;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<BrowserPerformResult>>;
 }
 
 export interface ToolboxAdapter extends ProviderAdapter {
@@ -211,6 +267,8 @@ export interface CapabilityMap {
   'agent.runtime': AgentRuntimeAdapter;
   decision: DecisionAdapter;
   browser: BrowserAdapter;
+  /** Same interface, different destination. That IS the point — see Capability. */
+  'browser.local': BrowserAdapter;
   toolbox: ToolboxAdapter;
   'text.model': TextModelAdapter;
   'content.analysis': ContentAnalysisAdapter;
