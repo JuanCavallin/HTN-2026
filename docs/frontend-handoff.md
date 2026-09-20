@@ -38,7 +38,8 @@ authorization, approvals, deterministic completion checks, and execution.
 
 ## Current backend status
 
-Snapshot: branch `shah` at commit `aa09037`.
+Backend snapshot: the AgentOS control-plane commits are `8da1788` and `aa09037`; the
+workspace UI from `main` was merged afterward.
 
 Working now:
 
@@ -57,10 +58,20 @@ Working now:
 - SQLite persistence and replayable event history;
 - lifecycle events for the full model, tool, harness, approval, and completion flow.
 
-The current React UI predates several of these backend additions. It can list and open
-runs, but it does **not** yet render all control, model, tool, harness, and session
-events. Treat the contracts below and `@htn/shared` as authoritative, not the current
-screen behavior.
+The current React workspace was designed around graph synthesis and predates several of
+these backend additions. It compiles and can render run activity, but its backend-mode
+composer still calls the old conversation/graph flow rather than launching the generic
+`agent` playbook. It also does **not** yet render all control, model, tool, harness, and
+session events. Treat the contracts below and `@htn/shared` as authoritative, not the
+current screen behavior.
+
+### Immediate integration mismatch
+
+`apps/web/src/pages/Workspace.tsx` currently starts backend work with
+`createConversation -> sendMessage -> runGraph`. Those conversation endpoints are not
+part of the current AgentOS backend. Replace that sequence with one `POST /api/runs`
+using `kind: "agent"`, then navigate to `/runs/:id`. The graph editor may remain a
+separate optional workflow-authoring surface.
 
 ## Frontend's responsibility
 

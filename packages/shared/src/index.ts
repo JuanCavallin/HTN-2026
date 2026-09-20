@@ -11,6 +11,7 @@
 export * from './analytics.js';
 export * from './browser.js';
 export * from './control.js';
+export * from './delegation.js';
 export * from './domain.js';
 export * from './events.js';
 export * from './executors.js';

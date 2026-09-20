@@ -11,7 +11,11 @@
  *             means naming them, not just colouring a box.
  *
  * During a run it also carries live status and, once the run has produced
- * metrics, a token count -- so the expensive node is visibly expensive.
+ * metrics, a token count -- so the expensive node is visibly expensive. An
+ * agent-class node additionally shows exposed-vs-called tool counts, flagging
+ * any tool the harness called that Jev never suggested -- restriction on the
+ * harness is best-effort, not enforced (see hermes/live.ts), so this is the
+ * one place that gap is actually visible rather than silently trusted.
  */
 
 import { Handle, Position, type NodeProps } from '@xyflow/react';
@@ -30,6 +34,9 @@ export interface NodeCardData extends Record<string, unknown> {
   metrics?: NodeMetrics;
   selected?: boolean;
   onOpen?: (nodeId: string) => void;
+  /** Canvas is in edit mode (GraphEditor, not a live/past run view). */
+  editable?: boolean;
+  onDelete?: (nodeId: string) => void;
 }
 
 /** The concrete callee, so the canvas names real things rather than categories. */
@@ -68,7 +75,7 @@ function tokens(metrics?: NodeMetrics): number {
 }
 
 export function NodeCard({ data }: NodeProps) {
-  const { node, status, metrics, selected, onOpen } = data as NodeCardData;
+  const { node, status, metrics, selected, onOpen, editable, onDelete } = data as NodeCardData;
   const style = styleOf(node.type);
   const classes = EXECUTOR_CLASSES[executorOf(node.type)];
 
@@ -106,6 +113,20 @@ export function NodeCard({ data }: NodeProps) {
         {status === 'blocked' && (
           <span className="ml-auto text-[10px] text-amber-300">waiting</span>
         )}
+        {editable && !status && (
+          <button
+            type="button"
+            title="Delete node"
+            aria-label="Delete node"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete?.(node.id);
+            }}
+            className="ml-auto rounded px-1 text-[11px] leading-none text-slate-500 hover:bg-rose-500/20 hover:text-rose-300"
+          >
+            ×
+          </button>
+        )}
       </div>
 
       <div className="truncate text-[13px] font-medium text-slate-100" title={node.label}>
@@ -125,6 +146,27 @@ export function NodeCard({ data }: NodeProps) {
           </span>
           {metrics.llmCalls > 0 && <span>{metrics.llmCalls} calls</span>}
           <span className="ml-auto">{(metrics.wallMs / 1000).toFixed(1)}s</span>
+        </div>
+      )}
+
+      {metrics?.calledToolNames && (
+        <div
+          className="mt-1 flex items-center gap-1.5 text-[10px] text-slate-500"
+          title={
+            'Exposed: ' +
+            (metrics.exposedToolNames?.join(', ') || 'none') +
+            '\nCalled: ' +
+            metrics.calledToolNames.join(', ')
+          }
+        >
+          <span>
+            {metrics.toolsExposed ?? 0} exposed · {metrics.calledToolNames.length} called
+          </span>
+          {metrics.toolDivergence && metrics.toolDivergence.length > 0 && (
+            <span className="ml-auto rounded-full bg-amber-500/15 px-1.5 py-px font-medium text-amber-300 ring-1 ring-inset ring-amber-500/30">
+              ⚠ {metrics.toolDivergence.length} not suggested
+            </span>
+          )}
         </div>
       )}
 

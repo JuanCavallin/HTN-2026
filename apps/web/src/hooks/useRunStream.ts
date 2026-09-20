@@ -10,6 +10,7 @@
 
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { emptyRunView, isTerminal, type RunEvent, type RunView } from '@htn/shared';
+import { api } from '../lib/api';
 
 function upsert<T extends { id: string }>(list: T[], item: T): T[] {
   const index = list.findIndex((x) => x.id === item.id);
@@ -19,8 +20,10 @@ function upsert<T extends { id: string }>(list: T[], item: T): T[] {
   return next;
 }
 
-export function runReducer(state: RunView, event: RunEvent): RunView {
+export function runReducer(state: RunView, event: RunEvent | { type: 'reset' }): RunView {
   switch (event.type) {
+    case 'reset':
+      return emptyRunView;
     case 'run.updated':
       return { ...state, run: event.run };
 
@@ -60,14 +63,45 @@ export function runReducer(state: RunView, event: RunEvent): RunView {
 
 export interface RunStreamState extends RunView {
   connected: boolean;
+  lastEventAt: number | null;
 }
 
-export function useRunStream(runId: string | undefined): RunStreamState {
+export function useRunStream(runId: string | undefined, reconnectKey = 0): RunStreamState {
   const [view, dispatch] = useReducer(runReducer, emptyRunView);
   const [connected, setConnected] = useState(false);
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
 
+  // A REST fallback for `view.run` specifically -- not steps/egress/approvals,
+  // which stay SSE-only below. The stream can only replay what's still in the
+  // runtime's in-memory event log (steps/egress/etc are NOT durable the way
+  // the run row itself is -- see store/sqlite.ts), so a run whose history
+  // didn't survive a server restart gets an open, healthy stream that replays
+  // nothing: without this, the page hangs on "Connecting..." forever with no
+  // error and no data. `run.updated` REPLACES state.run wholesale, so this is
+  // safe to race against the stream's own replay in either order -- whichever
+  // arrives second just reconfirms the same (or a fresher) run.
   useEffect(() => {
+    if (!runId) return;
+    let cancelled = false;
+    api
+      .getRun(runId)
+      .then(({ run }) => {
+        if (!cancelled) dispatch({ type: 'run.updated', run });
+      })
+      .catch(() => {
+        // A genuinely missing run: the page's own "connecting" state stays
+        // as-is, which is honest -- there is nothing to show either way.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  useEffect(() => {
+    dispatch({ type: 'reset' });
+    setConnected(false);
+    setLastEventAt(null);
     if (!runId) return;
 
     const source = new EventSource('/api/runs/' + runId + '/stream');
@@ -78,6 +112,7 @@ export function useRunStream(runId: string | undefined): RunStreamState {
     source.onmessage = (message) => {
       try {
         dispatch(JSON.parse(message.data) as RunEvent);
+        setLastEventAt(Date.now());
       } catch {
         // A malformed frame must not tear down the stream.
       }
@@ -88,7 +123,7 @@ export function useRunStream(runId: string | undefined): RunStreamState {
       sourceRef.current = null;
       setConnected(false);
     };
-  }, [runId]);
+  }, [runId, reconnectKey]);
 
   // Close the stream once the run can produce no more events. Leaving it open
   // would hold one of the browser's ~6 connections per origin for nothing.
@@ -100,5 +135,5 @@ export function useRunStream(runId: string | undefined): RunStreamState {
     }
   }, [view.run]);
 
-  return { ...view, connected };
+  return { ...view, connected, lastEventAt };
 }

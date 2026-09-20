@@ -39,6 +39,8 @@ export interface Run {
   status: RunStatus;
   /** Shape is validated per-kind by a zod schema in `schemas/playbooks`. */
   input: Json;
+  /** Graph associated with graph/baseline runs, when applicable. */
+  graphId?: string;
   /** One-line human result, rendered on the run card. */
   summary?: string;
   /** Per-kind payload. The UI picks a result renderer by `kind`. */
@@ -114,6 +116,29 @@ export interface Approval {
   decidedAt?: Iso;
   note?: string;
   createdAt: Iso;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Conversation                                                               */
+/* -------------------------------------------------------------------------- */
+
+export interface ConversationMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  at: Iso;
+  /** Graph version produced by this turn, when it produced one. */
+  graphVersion?: number;
+}
+
+/** A chat transcript that points at, but does not duplicate, its authored graph. */
+export interface Conversation {
+  id: string;
+  title: string;
+  graphId?: string;
+  messages: ConversationMessage[];
+  createdAt: Iso;
+  updatedAt: Iso;
 }
 
 /* -------------------------------------------------------------------------- */

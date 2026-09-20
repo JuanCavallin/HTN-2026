@@ -210,7 +210,10 @@ export const agentTaskNodeSchema = nodeVariant(
      */
     harness: z.enum(PROVIDER_IDS).optional(),
     pollIntervalMs: z.number().int().min(100).max(60_000).optional(),
-    maxPolls: z.number().int().min(1).max(200).optional(),
+    maxPolls: z.number().int().min(1).max(2000).optional(),
+    inactivityTimeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
+    maxDurationMs: z.number().int().min(1000).max(1_800_000).optional(),
+    maxFailedToolCalls: z.number().int().min(0).max(100).optional(),
   }),
 );
 
