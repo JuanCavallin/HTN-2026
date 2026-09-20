@@ -51,6 +51,7 @@ async function main() {
     'hermes',
     'jev',
     'browserbase',
+    'localbrowser',
     'composio',
     'openrouter',
     'ollama',

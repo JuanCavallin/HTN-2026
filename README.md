@@ -20,13 +20,14 @@ Then open http://localhost:5173 and click **Launch**.
 There is no `.env` step. With no API keys at all, every provider falls back to a mock and
 the full demo runs end to end. That is deliberate, not a placeholder.
 
-| Command                | What it does                          |
-| ---------------------- | ------------------------------------- |
-| `pnpm dev`             | api on :8787 and web on :5173         |
-| `pnpm typecheck`       | all three packages                    |
-| `pnpm smoke`           | end-to-end test against a running api |
-| `pnpm check:providers` | live Ollama + provider wiring check   |
-| `pnpm format`          | prettier                              |
+| Command                    | What it does                              |
+| -------------------------- | ----------------------------------------- |
+| `pnpm dev`                 | api on :8787 and web on :5173             |
+| `pnpm typecheck`           | all three packages                        |
+| `pnpm smoke`               | end-to-end test against a running api     |
+| `pnpm check:providers`     | live Ollama + provider wiring check       |
+| `pnpm check:browser-tools` | browser policy/executor integration check |
+| `pnpm format`              | prettier                                  |
 
 ## What it already does
 
@@ -79,11 +80,11 @@ Nothing else changes. Not the store, not the routes, not the streaming, not the 
 
 ## Going live with a provider
 
-Every provider has an internal adapter boundary. Hermes, Jev, Browserbase, OpenRouter,
-Ollama, and Composio have live paths; Anthropic remains the legacy bound text-model
-fallback. OpenRouter supplies configured cloud tiers, Ollama supplies the local/private
-route, and Composio tools are executable only after they appear in AgentOS's reviewed
-registry. Vendor types must not escape provider files.
+Every provider has an internal adapter boundary. Hermes, Jev, Browserbase, local Chrome,
+OpenRouter, Ollama, and Composio have live paths; Anthropic remains the legacy bound
+text-model fallback. Browser tools, Composio tools, and generic MCP tools all enter the
+same reviewed registry and exact-action broker before Hermes can call them. Vendor types
+must not escape provider files.
 
 Flip one `<PROVIDER>_MODE=live` at a time. Anything not working by hour 30 stays mocked;
 the app does not care.
@@ -119,9 +120,8 @@ model, strong private model, inexpensive cloud model, or frontier cloud model. B
 default to `auto`; `--privacy` and `--intelligence` remain available as explicit test
 overrides. Do not put actual secrets or personal data in a Gateway test prompt.
 
-Two things to confirm at the Browserbase booth in hour one: your **concurrent session
-limit** (the swarm design depends on it — cap `fanOut` concurrency to match) and whether
-session recordings are retrievable (free demo evidence).
+Browserbase sessions use the configured concurrency cap. Its live-view URL is captured
+while a session is open; completed-session replay is not assumed to be available.
 
 ## Demo-day switches
 

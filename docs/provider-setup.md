@@ -77,6 +77,34 @@ Content-Type: application/json
 The ignored `.env` already holds local credentials on the configured demo machine.
 Never commit them; rotate any credential pasted into chat or logs.
 
+## Browser tools
+
+The imported browser family now uses the same AgentOS registry, Jev reduction,
+exact-action broker, approval gate, MCP endpoint, and activity stream as Composio and
+generic MCP tools. There is no second browser-only authorization path.
+
+For Browserbase:
+
+```dotenv
+BROWSERBASE_MODE=live
+BROWSERBASE_API_KEY=...
+BROWSERBASE_PROJECT_ID=...
+```
+
+For private on-device browser execution, install Chrome and use:
+
+```dotenv
+LOCALBROWSER_MODE=live
+LOCALBROWSER_CHANNEL=chrome
+```
+
+AgentOS registers `browserbase.*` only when Browserbase is live and `localbrowser.*`
+only when the local provider is live. Browserbase candidates exclude `secret` and
+`local_only` state. The local executor additionally refuses to send sensitive state to
+a non-loopback website. Click/type operations use a bounded element table and Jev target
+selection; low-confidence targets fail closed. `*.submit` is irreversible and pauses for
+human approval before the browser executor runs.
+
 ## Generic MCP connections
 
 AgentOS can connect to any HTTP Streamable MCP server without exposing that server
@@ -117,5 +145,6 @@ pnpm check:mcp-gateway
 pnpm check:mcp-connections
 pnpm check:tool-broker
 pnpm check:composio-catalog
+pnpm check:browser-tools
 pnpm check:sqlite-store
 ```

@@ -24,6 +24,7 @@
     "check:sqlite-store": "pnpm --filter @htn/api check:sqlite-store",
     "check:tool-broker": "pnpm --filter @htn/api check:tool-broker",
     "check:composio-catalog": "pnpm --filter @htn/api check:composio-catalog",
+    "check:browser-tools": "pnpm --filter @htn/api check:browser-tools",
     "check:providers": "pnpm --filter @htn/api check:providers",
     "test:jev": "pnpm --filter @htn/api test:jev",
     "test:jev:routing": "pnpm --filter @htn/api test:jev:routing"

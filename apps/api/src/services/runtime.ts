@@ -20,6 +20,7 @@ import { ToolBroker } from '../core/tools/broker.js';
 import { InMemoryToolExecutorRegistry } from '../core/tools/executors.js';
 import { InMemoryToolRegistry } from '../core/tools/registry.js';
 import { registerCoreLocalTools } from '../core/tools/local.js';
+import { registerBrowserTools } from '../core/tools/index.js';
 import { SessionStateService } from '../core/sessions/service.js';
 import { nowIso } from '../lib/ids.js';
 import { createProviderRegistry } from '../providers/registry.js';
@@ -59,6 +60,9 @@ export const toolBroker = new ToolBroker(
   { approvalGate: toolApprovalGate },
 );
 registerCoreLocalTools(toolRegistry, toolExecutors, sessionStateService);
+export const browserTools = registerBrowserTools(toolRegistry, toolExecutors, {
+  provider: (capability) => providers.provider(capability),
+});
 export const composioToolCatalog = new ComposioToolCatalog(
   providers.provider('toolbox'),
   config.providers.composio,
@@ -106,7 +110,27 @@ export const orchestrator = new Orchestrator({
   sessionStateService,
   toolRegistry,
   toolDiscovery: composioToolCatalog,
-  localToolCandidates: () => mcpConnections.candidateToolIds(),
+  localToolCandidates: async () => {
+    const [mcpToolIds, registered] = await Promise.all([
+      mcpConnections.candidateToolIds(),
+      toolRegistry.list(),
+    ]);
+    const browserToolIds = registered
+      .filter(
+        (tool) =>
+          tool.descriptor.availability === 'available' &&
+          (tool.descriptor.providerId === 'localbrowser' ||
+            tool.descriptor.providerId === 'browserbase'),
+      )
+      .map((tool) => tool.descriptor.id);
+    return [...new Set([...mcpToolIds, ...browserToolIds])];
+  },
+  releaseRunResources: ({ runId, stepId }) =>
+    browserTools.closeRunSessions(runId, {
+      runId,
+      stepId,
+      policyRule: 'agent-task-resource-release',
+    }),
 });
 
 let providersInitialized = false;

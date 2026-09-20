@@ -67,8 +67,11 @@ AgentOS MCP gateway, Composio, OpenRouter, and the live email acceptance test.
 - Deliberate demo constraint: model requests are correlated to the only active Hermes
   session and fail closed if concurrent sessions are ambiguous. Add per-session gateway
   credentials before supporting concurrent users.
-- Remaining integrations: configure Composio and run the real approved-email acceptance
-  test; dashboard rendering and Browserbase remain team-owned.
+- Complete: Browserbase and local Chrome providers, bounded interactive-element tables,
+  Jev target selection with deterministic fallback, and reviewed browser descriptors are
+  wired through the existing AgentOS tool broker and downstream MCP gateway.
+- Remaining integrations: configure Browserbase/local Chrome as needed and run a live
+  browser acceptance task; dashboard rendering remains team-owned.
 
 ## Milestone 1 — Fully wired Jev decision layer [P0]
 

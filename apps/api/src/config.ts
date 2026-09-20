@@ -58,6 +58,15 @@ const envSchema = z.object({
   BROWSERBASE_MODE: modeEnum.default('mock'),
   BROWSERBASE_API_KEY: z.string().optional(),
   BROWSERBASE_PROJECT_ID: z.string().optional(),
+  LOCALBROWSER_MODE: modeEnum.default('mock'),
+  LOCALBROWSER_CHANNEL: z.string().optional(),
+  BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
+  BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
+  BROWSER_MAX_ELEMENTS: z.coerce.number().int().positive().default(60),
+  BROWSER_ACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(4_000),
+  BROWSER_SETTLE_MS: z.coerce.number().int().min(0).default(50),
+  BROWSER_SETTLE_SELECT_MS: z.coerce.number().int().min(0).default(200),
 
   COMPOSIO_MODE: modeEnum.default('mock'),
   COMPOSIO_API_KEY: z.string().optional(),
@@ -104,6 +113,8 @@ export interface ProviderConfig {
   projectId?: string;
   /** Absolute path to a local checkout the provider drives as a subprocess (Hermes only). */
   cwd?: string;
+  /** Installed Playwright browser channel (local browser only). */
+  channel?: string;
   /** Isolated provider profile directory (Hermes only). */
   profileDir?: string;
   /** AgentOS-owned MCP endpoint injected into the isolated Hermes profile. */
@@ -173,6 +184,13 @@ function resolveLocal(
   };
 }
 
+function resolveLocalBrowser(): ProviderConfig {
+  let mode: ProviderMode = env.LOCALBROWSER_MODE;
+  if (env.MOCK_ALL) mode = 'mock';
+  else if (mode === 'live' && !env.LOCALBROWSER_CHANNEL) mode = 'mock';
+  return { mode, channel: env.LOCALBROWSER_CHANNEL, keyVar: 'LOCALBROWSER_CHANNEL' };
+}
+
 const providers: Record<ProviderId, ProviderConfig> = {
   hermes: resolveHermes(),
   jev: resolve(
@@ -184,6 +202,7 @@ const providers: Record<ProviderId, ProviderConfig> = {
   browserbase: resolve(env.BROWSERBASE_MODE, env.BROWSERBASE_API_KEY, 'BROWSERBASE_API_KEY', {
     projectId: env.BROWSERBASE_PROJECT_ID,
   }),
+  localbrowser: resolveLocalBrowser(),
   composio: resolve(env.COMPOSIO_MODE, env.COMPOSIO_API_KEY, 'COMPOSIO_API_KEY', {
     baseUrl: env.COMPOSIO_BASE_URL ?? 'https://backend.composio.dev',
     userId: env.COMPOSIO_USER_ID,
@@ -232,6 +251,15 @@ export const config = Object.freeze({
     failureRate: env.MOCK_FAILURE_RATE,
     minLatencyMs: env.MOCK_MIN_LATENCY_MS,
     maxLatencyMs: Math.max(env.MOCK_MIN_LATENCY_MS, env.MOCK_MAX_LATENCY_MS),
+  },
+  browser: {
+    maxSessions: env.BROWSER_MAX_SESSIONS,
+    timeoutMs: env.BROWSER_TIMEOUT_MS,
+    decisionTimeoutMs: env.BROWSER_DECISION_TIMEOUT_MS,
+    maxElements: env.BROWSER_MAX_ELEMENTS,
+    actionTimeoutMs: env.BROWSER_ACTION_TIMEOUT_MS,
+    settleMs: env.BROWSER_SETTLE_MS,
+    settleSelectMs: env.BROWSER_SETTLE_SELECT_MS,
   },
   providers,
 });

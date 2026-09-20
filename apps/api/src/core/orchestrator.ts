@@ -69,6 +69,8 @@ export interface OrchestratorDeps {
   };
   /** Cached/local catalog sources, including user-configured MCP servers. */
   localToolCandidates?: () => Promise<string[]>;
+  /** Release resources such as browser sessions when an agent subtask ends. */
+  releaseRunResources?: (input: { runId: string; stepId: string }) => Promise<void>;
 }
 
 export class Orchestrator {
@@ -822,6 +824,16 @@ export class Orchestrator {
             endedAt: nowIso(),
           });
           throw err;
+        } finally {
+          try {
+            await this.deps.releaseRunResources?.({ runId, stepId: step.id });
+          } catch (error) {
+            await ctx.log(
+              'warn',
+              'Run resource cleanup failed: ' +
+                (error instanceof Error ? error.message : String(error)),
+            );
+          }
         }
       },
     };

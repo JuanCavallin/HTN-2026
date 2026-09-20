@@ -6,10 +6,13 @@
  * swap providers, and what lets Hermes/Jev stay unimplemented without blocking anyone.
  */
 
+import type { BrowserOperation, BrowserPerformResult, ElementTable } from './browser.js';
+
 export type ProviderId =
   | 'hermes' // agent runtime (Nous Research)
   | 'jev' // fast / cheap decision layer
   | 'browserbase' // cloud browser automation
+  | 'localbrowser' // local browser automation for private/local-only work
   | 'composio' // SaaS tools + OAuth brokering
   | 'openrouter' // multi-model cloud inference gateway
   | 'ollama' // local/private model runtime
@@ -21,6 +24,7 @@ export const PROVIDER_IDS = [
   'hermes',
   'jev',
   'browserbase',
+  'localbrowser',
   'composio',
   'openrouter',
   'ollama',
@@ -46,7 +50,13 @@ export type IntelligenceLevel = 'low' | 'high';
  * vendor — so re-pointing 'decision' from jev to anthropic is a one-line change.
  */
 export type Capability =
-  'agent.runtime' | 'decision' | 'browser' | 'toolbox' | 'text.model' | 'content.analysis';
+  | 'agent.runtime'
+  | 'decision'
+  | 'browser'
+  | 'browser.local'
+  | 'toolbox'
+  | 'text.model'
+  | 'content.analysis';
 
 /** Passed to every provider call. Feeds the egress ledger. */
 export interface ProviderCallContext {
@@ -236,6 +246,22 @@ export interface BrowserAdapter extends ProviderAdapter {
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<T>>;
   closeSession(sessionId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
+
+  /** Optional element-table path used by the Jev browser controller. */
+  snapshot?(
+    input: { sessionId: string; maxElements?: number },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<ElementTable>>;
+  perform?(
+    input: {
+      sessionId: string;
+      snapshotId: string;
+      operation: BrowserOperation;
+      index?: number;
+      text?: string;
+    },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<BrowserPerformResult>>;
 }
 
 export interface ToolboxToolDefinition {
@@ -297,6 +323,7 @@ export interface CapabilityMap {
   'agent.runtime': AgentRuntimeAdapter;
   decision: DecisionAdapter;
   browser: BrowserAdapter;
+  'browser.local': BrowserAdapter;
   toolbox: ToolboxAdapter;
   'text.model': TextModelAdapter;
   'content.analysis': ContentAnalysisAdapter;

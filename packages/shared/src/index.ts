@@ -9,6 +9,7 @@
  */
 
 export * from './analytics.js';
+export * from './browser.js';
 export * from './control.js';
 export * from './domain.js';
 export * from './events.js';
