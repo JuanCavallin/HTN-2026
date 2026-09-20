@@ -11,6 +11,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import type {
   AgentSessionState,
+  Conversation,
   AgentGraph,
   Approval,
   EgressEvent,
@@ -27,6 +28,7 @@ import { NotFoundError, type ListRunsFilter, type Store } from './types.js';
 
 interface Snapshot {
   graphs?: AgentGraph[];
+  conversations?: Conversation[];
   sessionStates?: AgentSessionState[];
   mcpConnections?: McpConnection[];
   runs: Run[];
@@ -53,6 +55,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   const scheduleDecisions = new Map<string, ScheduleDecision[]>();
   const events = new Map<string, StoredEvent[]>();
   const graphs = new Map<string, AgentGraph>();
+  const conversations = new Map<string, Conversation>();
   /** Monotonic step counter per run, so Step.seq is stable and gap-free. */
   const stepSeq = new Map<string, number>();
 
@@ -71,6 +74,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   async function save(): Promise<void> {
     const snapshot: Snapshot = {
       graphs: [...graphs.values()],
+      conversations: [...conversations.values()],
       sessionStates: [...sessionStates.values()],
       mcpConnections: [...mcpConnections.values()],
       runs: [...runs.values()],
@@ -100,6 +104,9 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
         stepSeq.set(s.runId, Math.max(stepSeq.get(s.runId) ?? 0, s.seq));
       }
       for (const a of snap.approvals) approvals.set(a.id, a);
+      // `?? []` because a snapshot written before conversations were restored
+      // to the store has no such key -- hydrating must not throw on it.
+      for (const c of snap.conversations ?? []) conversations.set(c.id, c);
       for (const state of snap.sessionStates ?? []) sessionStates.set(state.id, state);
       for (const connection of snap.mcpConnections ?? []) {
         mcpConnections.set(connection.id, connection);
@@ -292,6 +299,20 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
       const existed = graphs.delete(id);
       if (existed) scheduleSave();
       return existed;
+    },
+
+    /* ------------------------------------------------------- Conversations */
+
+    async saveConversation(conversation) {
+      conversations.set(conversation.id, conversation);
+      scheduleSave();
+      return conversation;
+    },
+    async getConversation(id) {
+      return conversations.get(id) ?? null;
+    },
+    async listConversations() {
+      return [...conversations.values()].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
 
     /* -------------------------------------------------------------- Events */

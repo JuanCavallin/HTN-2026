@@ -5,6 +5,7 @@
  * anything it doesn't recognise, so an older tab never breaks on a newer server.
  */
 
+import type { BrowserSessionRecord } from './browser.js';
 import type { Approval, EgressEvent, Iso, PiiSpan, Run, Step } from './domain.js';
 import type {
   AgentSessionState,
@@ -23,6 +24,18 @@ export type RunEvent =
   | { type: 'egress.logged'; egress: EgressEvent }
   | { type: 'pii.detected'; span: PiiSpan }
   | { type: 'schedule.decided'; decision: ScheduleDecision }
+  /**
+   * A browser session became watchable. Announced on the stream rather than
+   * carried on a step because the opening node is often not the node you want
+   * to watch — see BrowserSessionRecord for the full reasoning.
+   */
+  | { type: 'browser.session.opened'; session: BrowserSessionRecord }
+  /**
+   * The session was released. The UI must stop showing its live view as live:
+   * Browserbase's debug URL returns 410 Gone from this moment, so a viewer
+   * left pointed at it renders an error rather than a page.
+   */
+  | { type: 'browser.session.closed'; runId: string; sessionId: string; at: Iso }
   | { type: 'control.decided'; decision: ControlDecisionRecord }
   | { type: 'model.lifecycle'; lifecycle: ModelLifecycleEvent }
   | { type: 'harness.turn'; turn: HarnessTurnEvent }
@@ -51,6 +64,12 @@ export interface RunView {
   egress: EgressEvent[];
   piiSpans: PiiSpan[];
   scheduleDecisions: ScheduleDecision[];
+  /**
+   * Browser sessions this run opened, newest last. `closedAt` is set in place
+   * when the matching close event arrives, so a finished run still lists every
+   * session it used — the panel needs that to show a decision replay.
+   */
+  browserSessions: (BrowserSessionRecord & { closedAt?: Iso })[];
   controlDecisions: ControlDecisionRecord[];
   modelCalls: ModelLifecycleEvent[];
   harnessTurns: HarnessTurnEvent[];
@@ -72,6 +91,7 @@ export const emptyRunView: RunView = {
   egress: [],
   piiSpans: [],
   scheduleDecisions: [],
+  browserSessions: [],
   controlDecisions: [],
   modelCalls: [],
   harnessTurns: [],

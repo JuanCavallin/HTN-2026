@@ -64,18 +64,21 @@ import { BROWSERBASE_API_DESTINATION, needsTarget } from '@htn/shared';
 import { config, type ProviderConfig } from '../../config.js';
 
 /**
- * The raw Browserbase SDK, for the live-view URL only. Stagehand does not
- * surface `sessions.debug()`, and the SDK is present in the store as a
- * transitive dependency but is NOT a declared one — pnpm's strict layout means
- * it cannot be imported until someone adds it:
+ * The live-view URL comes from Browserbase's REST API, called directly.
  *
- *     pnpm --filter @htn/api add @browserbasehq/sdk   # dependency owner's call
+ * This USED to go through `@browserbasehq/sdk` via a variable specifier, so the
+ * file would still compile without it. The catch was that the package is only a
+ * transitive dependency under pnpm's strict layout, so the import never
+ * resolved, the URL was always `undefined`, and a live session reported no live
+ * view at all -- silently, because the whole path was written to degrade
+ * quietly. Measured against a real Browserbase run: `interactive: false`, no URL.
  *
- * Imported through a variable specifier so this file compiles and runs without
- * it; the live-view URL is simply `undefined` until it lands, which the UI
- * already handles and which is the truthful answer in the meantime.
+ * Two plain `fetch` calls do the same job with NO new dependency, which also
+ * keeps this off the "only the dependency owner adds packages" path and out of
+ * the hour-30 freeze. If the SDK is ever added for other reasons, this can go
+ * back to using it -- the shape returned here is the contract, not the transport.
  */
-const BROWSERBASE_SDK = '@browserbasehq/sdk';
+const BROWSERBASE_API = 'https://api.browserbase.com/v1';
 
 interface Snapshot {
   id: string;
@@ -89,6 +92,8 @@ interface Handle {
   stagehand?: Stagehand;
   /** The real Browserbase session id, for the live-view URL. */
   remoteSessionId?: string;
+  /** Where the session was pointed, so liveView can re-pick the right tab. */
+  startUrl?: string;
   /** Region-specific where known; approvals bind to this. */
   destination: string;
   snapshot?: Snapshot;
@@ -287,40 +292,106 @@ function rejected<T>(
   };
 }
 
+/** One Browserbase REST GET. Returns null rather than throwing -- see liveViewUrl. */
+async function bbGet<T>(apiKey: string, path: string): Promise<T | null> {
+  try {
+    const res = await fetch(BROWSERBASE_API + path, {
+      headers: { 'X-BB-API-Key': apiKey },
+      // Generous but bounded: this runs inside openSession, and a hung metadata
+      // call must not hold up a session the caller is waiting on.
+      signal: AbortSignal.timeout(8_000),
+    });
+    return res.ok ? ((await res.json()) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The live-view URL, if the raw SDK is installed. Best effort by design: a
- * missing URL costs the UI an iframe, while a thrown error would cost the run
- * its session.
+ * The live-view URL and the session's region.
+ *
+ * BEST EFFORT BY DESIGN: a missing URL costs the UI a live view, while a thrown
+ * error would cost the run its session. Every failure path here returns
+ * partial data rather than raising -- that is deliberate, not sloppy.
+ *
+ * `debuggerFullscreenUrl` is the INTERACTIVE debug view: a person can click and
+ * type in it. That is what `interactive: true` promises downstream and what
+ * makes a `handoff` node possible, so it is the only field allowed to set it.
+ *
+ * MUST BE CALLED WHILE THE SESSION IS RUNNING. `/debug` returns 410 Gone once a
+ * session stops, so there is no second chance at this after the fact.
  */
+interface DebugPage {
+  id?: string;
+  url?: string;
+  debuggerFullscreenUrl?: string;
+}
+
+interface DebugResponse {
+  debuggerFullscreenUrl?: string;
+  pages?: DebugPage[];
+}
+
+/** Trailing-slash-insensitive, so "https://x.com" matches "https://x.com/". */
+function sameUrl(a: string, b: string): boolean {
+  const trim = (u: string) => u.replace(/\/+$/, '').toLowerCase();
+  return trim(a) === trim(b);
+}
+
+/**
+ * WHICH TAB the live view should show.
+ *
+ * The top-level `debuggerFullscreenUrl` points at the session's FIRST page,
+ * and that is the wrong one whenever a start URL was given: openSession calls
+ * `context.newPage(startUrl)`, which leaves page 0 sitting on about:blank and
+ * puts the real page second. Measured on a live session -- page 0
+ * `about:blank`, page 1 `https://example.com/` -- so someone following the
+ * handoff link landed on a blank tab and had no idea why.
+ *
+ * Preference order: the page matching the start URL, then the last page that
+ * is not blank, then whatever the top level said. The last fallback means this
+ * can only improve on the old behaviour, never do worse than it.
+ */
+function pickPage(debug: DebugResponse, startUrl?: string): { url?: string; pageUrl?: string } {
+  const pages = (debug.pages ?? []).filter((page) => page.debuggerFullscreenUrl);
+
+  if (startUrl) {
+    const exact = pages.find((page) => page.url && sameUrl(page.url, startUrl));
+    if (exact) return { url: exact.debuggerFullscreenUrl, pageUrl: exact.url };
+  }
+
+  const real = [...pages].reverse().find((page) => page.url && page.url !== 'about:blank');
+  if (real) return { url: real.debuggerFullscreenUrl, pageUrl: real.url };
+
+  // Nothing but blank pages. Returning the blank one is still correct -- there
+  // is genuinely nothing else to show -- but `pageUrl` reports that honestly so
+  // the caller can say "no page is loaded" instead of handing over a white box.
+  const fallback = pages[0];
+  return {
+    ...((fallback?.debuggerFullscreenUrl ?? debug.debuggerFullscreenUrl)
+      ? { url: fallback?.debuggerFullscreenUrl ?? debug.debuggerFullscreenUrl }
+      : {}),
+    ...(fallback?.url ? { pageUrl: fallback.url } : {}),
+  };
+}
+
 async function liveViewUrl(
   apiKey: string,
   sessionId: string,
-): Promise<{ url?: string; region?: string }> {
-  try {
-    const mod = (await import(BROWSERBASE_SDK)) as {
-      default?: new (o: { apiKey: string }) => unknown;
-      Browserbase?: new (o: { apiKey: string }) => unknown;
-    };
-    const Ctor = mod.Browserbase ?? mod.default;
-    if (!Ctor) return {};
-    const client = new Ctor({ apiKey }) as {
-      sessions: {
-        debug(id: string): Promise<{ debuggerFullscreenUrl?: string }>;
-        retrieve(id: string): Promise<{ region?: string }>;
-      };
-    };
-    const [debug, session] = await Promise.all([
-      client.sessions.debug(sessionId).catch(() => ({ debuggerFullscreenUrl: undefined })),
-      client.sessions.retrieve(sessionId).catch(() => ({ region: undefined })),
-    ]);
-    return {
-      ...(debug.debuggerFullscreenUrl ? { url: debug.debuggerFullscreenUrl } : {}),
-      ...(session.region ? { region: session.region } : {}),
-    };
-  } catch {
-    // Not installed. Normal, and documented at the top of this file.
-    return {};
-  }
+  startUrl?: string,
+): Promise<{ url?: string; pageUrl?: string; region?: string }> {
+  const [debug, session] = await Promise.all([
+    bbGet<DebugResponse>(apiKey, '/sessions/' + sessionId + '/debug'),
+    bbGet<{ region?: string }>(apiKey, '/sessions/' + sessionId),
+  ]);
+
+  const picked = debug ? pickPage(debug, startUrl) : {};
+
+  return {
+    ...(picked.url ? { url: picked.url } : {}),
+    ...(picked.pageUrl ? { pageUrl: picked.pageUrl } : {}),
+    ...(session?.region ? { region: session.region } : {}),
+  };
 }
 
 export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
@@ -521,7 +592,9 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         const remoteSessionId = browser.sessionId;
         // Capture the live-view URL NOW. sessions.debug() returns 410 Gone once
         // the session stops, so there is no second chance at this.
-        const view = remoteSessionId ? await liveViewUrl(cfg.apiKey, remoteSessionId) : {};
+        const view = remoteSessionId
+          ? await liveViewUrl(cfg.apiKey, remoteSessionId, input.startUrl)
+          : {};
 
         const destination = view.region
           ? 'https://connect.' + view.region + '.browserbase.com'
@@ -535,11 +608,19 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           stagehand,
           destination,
           ...(remoteSessionId ? { remoteSessionId } : {}),
+          ...(input.startUrl ? { startUrl: input.startUrl } : {}),
         });
 
         return {
           ok: true as const,
-          data: { sessionId, ...(view.url ? { liveViewUrl: view.url } : {}) },
+          data: {
+            sessionId,
+            // `debuggerFullscreenUrl` is Browserbase's INTERACTIVE debug view,
+            // not a recording: a person can genuinely click and type in it.
+            // That is what makes a `handoff` node possible, so the flag is
+            // tied to having that exact URL and nothing else.
+            ...(view.url ? { liveViewUrl: view.url, interactive: true } : {}),
+          },
           meta: meta('openSession', started, destination),
         };
       } catch (err) {
@@ -778,6 +859,43 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
       } catch (err) {
         return failure<BrowserPerformResult>('perform', started, err, handle.destination);
       }
+    },
+
+    /**
+     * A FRESH viewer URL, minted now.
+     *
+     * The URL captured at openSession is signed with a short-lived token, so it
+     * is already dead by the time a person clicks a handoff link. Re-fetching
+     * per request is the whole point of this method -- do not cache what it
+     * returns. Verified: a stale URL renders "WebSocket disconnected" and
+     * accepts no input; a freshly minted one for the SAME session renders the
+     * live page and is interactive.
+     */
+    async liveView(sessionId, _ctx) {
+      const started = Date.now();
+      const handle = sessions.get(sessionId);
+      // No key means no REST call, so no viewer -- same normal, non-error state
+      // as a session we do not hold.
+      if (!handle?.remoteSessionId || !cfg.apiKey) {
+        // Not an error: a session we do not hold, or one with no remote id,
+        // simply has no viewer. The caller renders that state.
+        return {
+          ok: true as const,
+          data: { interactive: false },
+          meta: meta('liveView', started, handle?.destination ?? null),
+        };
+      }
+
+      const view = await liveViewUrl(cfg.apiKey, handle.remoteSessionId, handle.startUrl);
+      return {
+        ok: true as const,
+        data: {
+          ...(view.url ? { liveViewUrl: view.url } : {}),
+          ...(view.pageUrl ? { pageUrl: view.pageUrl } : {}),
+          interactive: Boolean(view.url),
+        },
+        meta: meta('liveView', started, handle.destination),
+      };
     },
 
     async closeSession(sessionId, _ctx) {

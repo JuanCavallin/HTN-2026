@@ -60,6 +60,15 @@ export interface OrchestratorDeps {
   decisionService: DecisionService;
   sessionStateService: SessionStateService;
   toolRegistry?: ToolRegistry;
+  /** The trusted broker. Absent means graph tool nodes have no brokered path. */
+  toolBroker?: {
+    execute(request: {
+      sessionStateId: string;
+      toolId: string;
+      arguments: Json;
+      signal?: AbortSignal;
+    }): Promise<{ output: Json; summary: string }>;
+  };
   toolDiscovery?: {
     discoverForTask(input: {
       query: string;
@@ -412,6 +421,80 @@ export class Orchestrator {
         };
       },
 
+      callBrokeredTool: async ({ stepId, toolId, args }) => {
+        const broker = this.deps.toolBroker;
+        const registry = this.deps.toolRegistry;
+        if (!broker || !registry) return null;
+
+        const [descriptor] = await registry.resolve([toolId]);
+        // Unknown to the registry is not a broker problem -- let the caller
+        // fall back to the provider catalog, which owns its own names.
+        if (!descriptor) return null;
+
+        // A short-lived session state whose ONLY purpose is to carry the
+        // author's pinned choice as a grant the broker can verify. One tool,
+        // one turn. It is not a harness session and never binds one.
+        // HARNESS IS DELIBERATELY NOT 'hermes'.
+        //
+        // resolveActiveHarnessSession('hermes') requires exactly ONE active
+        // hermes session and throws "multiple active sessions are ambiguous"
+        // otherwise -- which is how Hermes's own MCP tool calls find their
+        // context. Labelling this ephemeral grant-carrier as hermes made every
+        // graph tool node leave a phantom hermes session behind, and the next
+        // agent_task died with a 409 it had nothing to do with.
+        //
+        // This is not a harness session. It is a one-call grant, so it says so.
+        const session = await sessionStateService.create({
+          runId,
+          stepId,
+          harness: 'graph',
+          objective: 'graph tool node: ' + toolId,
+          dataLabels: ['private'],
+          // One call, so one step of budget. This session exists to carry a
+          // grant, not to run a loop.
+          budget: { stepsRemaining: 1 },
+          candidateToolIds: [toolId],
+        });
+        await sessionStateService.beginTurn(session.id);
+        await sessionStateService.grantToolExposure(session.id, {
+          modelCallId: 'graph-node:' + stepId,
+          selectedToolVersions: { [descriptor.id]: descriptor.version },
+        });
+
+        try {
+          const result = await broker.execute({
+            sessionStateId: session.id,
+            toolId: descriptor.id,
+            arguments: args as Json,
+            signal,
+          });
+          return { output: result.output, summary: result.summary };
+        } finally {
+          // The grant must not outlive the one call it was minted for, and
+          // neither must the session: an ACTIVE one left behind is state that
+          // later lookups have to disambiguate. Terminal status first, which
+          // also clears the grant (see savePatch), then belt and braces.
+          await sessionStateService.setStatus(session.id, 'completed').catch(() => undefined);
+          await sessionStateService.clearToolExposure(session.id).catch(() => undefined);
+        }
+      },
+
+      announceBrowserSession: async (session) => {
+        await bus.emit(runId, {
+          type: 'browser.session.opened',
+          session: { runId, openedAt: nowIso(), ...session },
+        });
+      },
+
+      releaseBrowserSession: async (sessionId) => {
+        await bus.emit(runId, {
+          type: 'browser.session.closed',
+          runId,
+          sessionId,
+          at: nowIso(),
+        });
+      },
+
       recordSchedule: async (input) => {
         const decision: ScheduleDecision = {
           id: newId('sch'),
@@ -501,10 +584,90 @@ export class Orchestrator {
           let availableTools = [...new Set([...spec.availableTools, ...discoveredIds])];
           let selectedBeforeLegacyRoute = availableTools;
           if (this.deps.toolRegistry) {
-            const descriptors = eligibleTaskTools(
-              await this.deps.toolRegistry.resolve(availableTools),
-              decisionState,
+            const resolved = await this.deps.toolRegistry.resolve(availableTools);
+
+            // SAY SO WHEN A CANDIDATE DOES NOT EXIST. `resolve` drops unknown
+            // ids silently, and `eligibleTaskTools` drops unavailable ones, so
+            // a graph naming tools that were renamed or never registered hands
+            // the harness an EMPTY toolset and looks, from the outside, like
+            // the harness simply failing at its job. That is exactly what
+            // happened with `web.search`/`docs.read` in demo.graph: 0 of 7
+            // resolved, Hermes fell back to its own tools, and the only symptom
+            // was three `browser_exec` failures in a row.
+            //
+            // Warn, do not throw: an unknown candidate is an authoring mistake
+            // to surface, not a reason to abort a run that may still succeed on
+            // the tools that did resolve.
+            const unknown = availableTools.filter(
+              (id) => !resolved.some((descriptor) => descriptor.id === id),
             );
+            if (unknown.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" named ' +
+                  unknown.length +
+                  ' tool(s) that are not in the registry, so they were dropped: ' +
+                  unknown.join(', ') +
+                  '. Use the ids from GET /api/tools.',
+              );
+            }
+
+            const descriptors = eligibleTaskTools(resolved, decisionState);
+
+            // Report WHY each tool was dropped, separately. Lumping these
+            // together sends you hunting the wrong cause: the first time this
+            // fired it blamed data labels when the real reason was that every
+            // browser tool registers as `unavailable` outside live mode.
+            const unavailable = resolved.filter(
+              (descriptor) =>
+                descriptor.availability !== 'available' ||
+                descriptor.baselineEffect === 'unknown' ||
+                descriptor.simulated === true,
+            );
+            const mislabelled = resolved.filter(
+              (descriptor) =>
+                !unavailable.includes(descriptor) &&
+                !descriptors.some((kept) => kept.id === descriptor.id),
+            );
+            if (unavailable.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" dropped ' +
+                  unavailable.length +
+                  ' tool(s) as unavailable or unclassified: ' +
+                  unavailable
+                    .map((descriptor) => descriptor.id + ' (' + descriptor.availability + ')')
+                    .join(', '),
+              );
+            }
+            if (mislabelled.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" dropped ' +
+                  mislabelled.length +
+                  ' tool(s) whose data labels do not cover this task (' +
+                  decisionState.dataLabels.join(', ') +
+                  '): ' +
+                  mislabelled.map((descriptor) => descriptor.id).join(', '),
+              );
+            }
+
+            if (descriptors.length === 0 && availableTools.length > 0) {
+              await ctx.log(
+                'warn',
+                'Subtask "' +
+                  spec.label +
+                  '" has NO usable tools after resolution. The harness will run as a ' +
+                  'tool-less turn; any tool it appears to call is its own, not ours.',
+              );
+            }
+
             availableTools = descriptors.map((descriptor) => descriptor.id);
             selectedBeforeLegacyRoute = await selectTaskTools(
               descriptors,

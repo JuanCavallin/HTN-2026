@@ -32,8 +32,21 @@ export function registerBrowserTools(
 ): BrowserToolExecutor {
   registry.registerMany(
     browserToolRegistrations({
-      localAvailable: config.providers.localbrowser.mode === 'live',
-      browserbaseAvailable: config.providers.browserbase.mode === 'live',
+      // AVAILABLE MEANS "THIS BACKEND CAN SERVE A CALL", NOT "THIS BACKEND IS
+      // LIVE". A mocked adapter serves calls perfectly well -- that is the
+      // entire point of mock mode, and the README promises the full demo runs
+      // with no API keys at all.
+      //
+      // Requiring 'live' here made every browser tool `unavailable` under
+      // MOCK_ALL, and `eligibleTaskTools` drops unavailable tools, so an
+      // agent_task silently received an EMPTY toolset and the harness fell
+      // back to its own browser. Only 'disabled' means a backend cannot serve.
+      //
+      // Truthfulness is preserved elsewhere and not weakened here: withEgress
+      // records a mocked call against a `mock://` destination, and the provider
+      // badges report the mode, so nothing presents a mock as a live call.
+      localAvailable: config.providers.localbrowser.mode !== 'disabled',
+      browserbaseAvailable: config.providers.browserbase.mode !== 'disabled',
     }),
   );
 

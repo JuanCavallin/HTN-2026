@@ -20,6 +20,7 @@
  */
 
 import type { Iso } from './domain.js';
+import type { ProviderId } from './providers.js';
 
 /**
  * The operation vocabulary, matching `browser-use/jev-ultrafast`.
@@ -126,3 +127,54 @@ export const LOCAL_BROWSER_DESTINATION = 'local://chromium';
  * value is what gets recorded — this constant is only the API control plane.
  */
 export const BROWSERBASE_API_DESTINATION = 'https://api.browserbase.com';
+
+/* -------------------------------------------------------------------------- */
+/* Session records — what the UI needs to show a live browser                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One browser session, as the RUN knows about it.
+ *
+ * WHY THIS EXISTS AS A RUN-LEVEL RECORD rather than a field on a step: the
+ * session's live-view URL is only obtainable at OPEN time (Browserbase's
+ * `sessions.debug()` returns 410 Gone once a session stops — see
+ * browserbase/live.ts), and the node that opens a session is frequently not
+ * the node you want to watch. An `agent_task` opens one deep inside a harness
+ * loop; a `dispatch` opens one via whichever tool it chose. Hanging the URL off
+ * `browser.open`'s step output would mean the panel works for exactly one graph
+ * shape and silently shows nothing for the rest.
+ *
+ * So the session is announced on the event stream (`browser.session.opened`)
+ * and the UI keeps its own list. `nodeId` is best-effort attribution for the
+ * canvas; a session with none still shows up, it just isn't pinned to a node.
+ *
+ * NOTHING SENSITIVE BELONGS HERE. This record crosses SSE to the browser and is
+ * persisted in the run's event log. It carries a URL to a viewer and no page
+ * content — never put form values, cookies or credentials on it.
+ */
+export interface BrowserSessionRecord {
+  runId: string;
+  /** The adapter's own opaque id, as returned by openSession. */
+  sessionId: string;
+  /** The step that opened it, when one did. */
+  stepId?: string;
+  /** Best-effort: the graph node the opening step belonged to. */
+  nodeId?: string;
+  /** Which backend. Drives the "this ran locally" badge. */
+  providerId: ProviderId;
+  /**
+   * Embeddable viewer. Undefined for localbrowser and every mock, which is a
+   * NORMAL state the panel must render — fall back to the element table.
+   */
+  liveViewUrl?: string;
+  /**
+   * True when a human can actually type into `liveViewUrl`. Browserbase's
+   * `debuggerFullscreenUrl` is interactive; a recording or screenshot strip is
+   * not. A `handoff` node REQUIRES this to be true, so it must never be
+   * guessed — an adapter that cannot promise it leaves it false.
+   */
+  interactive: boolean;
+  /** Where the session was pointed when it opened, if anywhere. */
+  startUrl?: string;
+  openedAt: Iso;
+}

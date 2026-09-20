@@ -626,6 +626,79 @@ function TypeFields({
           </Field>
         </>
       );
+
+    case 'handoff':
+      return (
+        <>
+          <div className="rounded border border-rose-500/30 bg-rose-500/5 px-2.5 py-2 text-[11px] leading-relaxed text-rose-200/80">
+            The agent never performs this step. A person acts directly in the live browser, and
+            nothing they type passes through this system — there is no field here to put a secret
+            in, by design.
+          </div>
+          <Field
+            label="Instruction"
+            hint="Shown VERBATIM to the person. Say what to do, and that we cannot see it."
+          >
+            <textarea
+              className={inputClass + ' min-h-[3rem]'}
+              defaultValue={node.config.instruction}
+              onBlur={(e) =>
+                e.target.value.trim() && onCommit({ instruction: e.target.value.trim() })
+              }
+            />
+          </Field>
+          <Field label="Open at URL (optional)" hint="Leave blank to take over an existing session">
+            <input
+              className={inputClass}
+              defaultValue={node.config.url ?? ''}
+              onBlur={(e) => onCommit({ url: e.target.value.trim() || undefined })}
+            />
+          </Field>
+          <Field
+            label="Reuse session (optional)"
+            hint='A ref such as "{{open_portal.sessionId}}". Set this instead of a URL.'
+          >
+            <input
+              className={inputClass}
+              defaultValue={node.config.sessionId ?? ''}
+              onBlur={(e) => onCommit({ sessionId: e.target.value.trim() || undefined })}
+            />
+          </Field>
+          <Field label="Resume when">
+            <select
+              className={inputClass}
+              value={node.config.resumeWhen}
+              onChange={(e) => onCommit({ resumeWhen: e.target.value })}
+            >
+              <option value="human_confirms">the person clicks Done</option>
+              <option value="url_matches">the page reaches an expected URL</option>
+            </select>
+          </Field>
+          {node.config.resumeWhen === 'url_matches' && (
+            <Field label="Expected URL" hint="Matched as a prefix">
+              <input
+                className={inputClass}
+                defaultValue={node.config.expectUrl ?? ''}
+                onBlur={(e) => onCommit({ expectUrl: e.target.value.trim() || undefined })}
+              />
+            </Field>
+          )}
+          <Field
+            label="Timeout, ms (optional)"
+            hint="Fails the run. It never falls through to letting the agent try."
+          >
+            <input
+              type="number"
+              min={5000}
+              className={inputClass}
+              defaultValue={node.config.timeoutMs ?? ''}
+              onBlur={(e) =>
+                onCommit({ timeoutMs: e.target.value ? Number(e.target.value) : undefined })
+              }
+            />
+          </Field>
+        </>
+      );
   }
 }
 

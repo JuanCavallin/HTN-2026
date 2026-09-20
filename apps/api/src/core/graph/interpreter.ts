@@ -29,7 +29,7 @@
 
 import type { AgentGraph, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
 import type { PlaybookContext, PlaybookOutcome } from '../playbooks/types.js';
-import { resolveRefs, type RefScope } from './refs.js';
+import { collectRefs, lookup, resolveRefs, type RefScope } from './refs.js';
 import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
 
 /* -------------------------------------------------------------------------- */
@@ -50,6 +50,23 @@ interface Skipped {
 }
 
 type NodeOutcome = Ran | Skipped;
+
+/**
+ * Browser sessions a node opened and deliberately did NOT close.
+ *
+ * A `handoff` has to leave its session open past its own step -- the whole
+ * point is that a person signs in and LATER nodes inherit the authenticated
+ * browser. So the lifetime moves up to the run, which is the next scope that
+ * actually ends. Drained in runGraph before the failure check, so it runs on
+ * success, on a failed node, and on cancellation alike.
+ *
+ * Without this an opened session leaks, and a Browserbase session is billed
+ * and concurrency-capped.
+ */
+interface SessionLease {
+  hold(sessionId: string): void;
+  release(sessionId: string): void;
+}
 
 /** What a node executor returns: the internal value and the streamable output. */
 interface NodeResult {
@@ -84,6 +101,12 @@ export async function runGraph(
   /** Resolved outcomes so far. Read by resolveRefs; grows as nodes finish. */
   const outcomes = new Map<string, NodeOutcome>();
   const pending = new Map<string, Promise<NodeOutcome>>();
+
+  const held = new Set<string>();
+  const lease: SessionLease = {
+    hold: (sessionId) => held.add(sessionId),
+    release: (sessionId) => held.delete(sessionId),
+  };
 
   /** Built fresh per node so a ref can only see work that has actually finished. */
   function scopeNow(): RefScope {
@@ -123,7 +146,9 @@ export async function runGraph(
         }
       }
 
-      const result = await executeNode(ctx, node, scopeNow(), graph);
+      const scope = scopeNow();
+      await warnUnresolvedRefs(ctx, node, scope);
+      const result = await executeNode(ctx, node, scope, graph, lease);
       const ran: Ran = { ran: true, value: result.value, choice: result.choice };
       outcomes.set(nodeId, ran);
       return ran;
@@ -138,6 +163,10 @@ export async function runGraph(
   // were still emitting steps — and the web client closes its SSE stream on a
   // terminal status, so those steps would never be seen.
   const settled = await Promise.allSettled(graph.nodes.map((n) => resolve(n.id)));
+
+  // Every held session, released. BEFORE the failure check below, so a graph
+  // that throws still gives its sessions back.
+  await releaseHeldSessions(ctx, held);
 
   for (const [index, result] of settled.entries()) {
     const node = graph.nodes[index] as GraphNode;
@@ -155,6 +184,60 @@ export async function runGraph(
   return summarise(graph, outcomes, variables);
 }
 
+/**
+ * Say when a `{{ref}}` points at nothing.
+ *
+ * An unresolved ref resolves to `undefined` (whole form) or "" (embedded), by
+ * design -- see refs.ts. For a REQUIRED field a downstream zod parse then fails
+ * loudly, which is the behaviour that design note assumes. For an OPTIONAL one
+ * nothing fails at all: the field is simply absent and the node runs as if the
+ * author never wrote it.
+ *
+ * That is not hypothetical. A handoff whose `url` was "{{verify.output}}" --
+ * where the node actually produces `{text}`, not `{output}` -- opened a browser
+ * with no url at all and handed a person a blank page, with the same empty
+ * string interpolated invisibly into the instruction they were reading.
+ *
+ * So: warn, and NAME WHAT IS ACTUALLY AVAILABLE on that node. "verify has:
+ * text" turns a long hunt into a one-character fix. Warning rather than
+ * throwing is deliberate -- a ref into a skipped branch is legitimately empty,
+ * and a graph that is 90% right should still run.
+ */
+async function warnUnresolvedRefs(
+  ctx: PlaybookContext,
+  node: GraphNode,
+  scope: RefScope,
+): Promise<void> {
+  const unresolved = [...collectRefs(node.config)].filter(
+    (path) => lookup(scope, path) === undefined,
+  );
+  if (unresolved.length === 0) return;
+
+  const detail = unresolved.map((path) => {
+    const root = path.split('.')[0] as string;
+    const value = scope[root];
+    if (value === undefined) {
+      return path + ' (nothing named "' + root + '" has produced a value)';
+    }
+    const keys = value !== null && typeof value === 'object' ? Object.keys(value as object) : [];
+    return (
+      path + ' ("' + root + '" has: ' + (keys.length > 0 ? keys.join(', ') : typeof value) + ')'
+    );
+  });
+
+  await ctx
+    .log(
+      'warn',
+      'Node "' +
+        node.label +
+        '" has ' +
+        unresolved.length +
+        ' unresolved {{ref}}(s), which resolve to nothing: ' +
+        detail.join('; '),
+    )
+    .catch(() => undefined);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Per-node execution                                                         */
 /* -------------------------------------------------------------------------- */
@@ -164,6 +247,7 @@ async function executeNode(
   node: GraphNode,
   scope: RefScope,
   graph: AgentGraph,
+  lease: SessionLease,
 ): Promise<NodeResult> {
   switch (node.type) {
     case 'fetch':
@@ -173,9 +257,9 @@ async function executeNode(
     case 'decide':
       return runDecide(ctx, node, scope, graph);
     case 'tool':
-      return runTool(ctx, node, scope);
+      return runTool(ctx, node, scope, lease);
     case 'dispatch':
-      return runDispatch(ctx, node, scope);
+      return runDispatch(ctx, node, scope, lease);
     case 'judge':
       return runJudge(ctx, node, scope);
     case 'agent_task':
@@ -183,9 +267,11 @@ async function executeNode(
     case 'swarm':
       return runSwarm(ctx, node, scope, graph);
     case 'submit':
-      return runSubmit(ctx, node, scope);
+      return runSubmit(ctx, node, scope, lease);
     case 'approval':
       return runApproval(ctx, node, scope);
+    case 'handoff':
+      return runHandoff(ctx, node, scope, lease);
   }
 }
 
@@ -311,9 +397,71 @@ async function callToolGated(
     amountCents?: number;
     /** Force a human regardless of classification (an explicit `submit`). */
     forceApproval?: boolean;
+    /**
+     * Run-scoped session lease. A browser `open` deliberately does NOT close
+     * what it opened (core/tools/browser.ts sets ownsSession = false and hands
+     * the id back), so without this a plain `tool` node that opens a browser
+     * leaks a billed, concurrency-capped session on every run. Handing the
+     * lease down means the run releases it, exactly as a handoff's is.
+     */
+    lease?: SessionLease;
   },
 ): Promise<unknown> {
   const risk = toolRisk(args.tool, args.actionKind);
+
+  // THE BROKER FIRST. A tool AgentOS itself registers -- the browser family,
+  // local tools, anything reached over MCP -- executes through the same trusted
+  // path a harness turn uses: schema-validated arguments, availability and
+  // scope checks, exact-action authorization, and its own approval gate.
+  //
+  // This is not an optimisation. Every graph tool call used to go to the
+  // `toolbox` provider, so a node naming `browserbase.open` was handed to
+  // Composio, which has never heard of it: "Tool/version was not resolved from
+  // trusted Composio catalog metadata". The toolbox owns its own names and
+  // nothing else.
+  //
+  // NO requireApproval AROUND AN ORDINARY BROKERED CALL. The broker gates the
+  // concrete action itself; gating here as well asks a person twice for one
+  // call. That is the same rule the old tool routes stated as `gatesItself`.
+  //
+  // AN EXPLICIT `submit` NODE IS THE ONE EXCEPTION. "Always stop for a human"
+  // is the author's decision and must not depend on how the registry happens
+  // to classify the tool -- a submit node naming a reversible tool still stops.
+  // So it gates here FIRST and is then executed through the broker like
+  // anything else, rather than being pushed down the toolbox path where its
+  // name would not resolve.
+  if (args.forceApproval) {
+    await ctx.requireApproval(args.stepId, {
+      kind: risk.kind,
+      description: args.description,
+      amountCents: args.amountCents,
+      reversibility: 'irreversible',
+      payload: { tool: args.tool, args: args.toolArgs } as Json,
+    });
+  }
+
+  const brokered = await ctx.callBrokeredTool({
+    stepId: args.stepId,
+    toolId: args.tool,
+    args: args.toolArgs,
+  });
+  // null means the registry does not know this tool, which is the normal
+  // answer for a Composio name -- fall through to the toolbox below.
+  if (brokered) {
+    await holdOpenedSession(ctx, args.stepId, brokered.output, args.toolArgs, args.lease);
+    return brokered.output;
+  }
+
+  // Already gated above; do not ask again on the toolbox path either.
+  if (args.forceApproval) {
+    const toolbox = ctx.provider('toolbox');
+    const res = await toolbox.callTool(
+      { name: args.tool, args: args.toolArgs },
+      ctx.callContext({ stepId: args.stepId, policyRule: 'graph-node-submit' }),
+    );
+    if (!res.ok) throw new Error('Tool ' + args.tool + ' failed: ' + res.error.message);
+    return res.data;
+  }
 
   if (risk.unknown) {
     await ctx.log(
@@ -383,6 +531,7 @@ async function runTool(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'tool' }>,
   scope: RefScope,
+  lease: SessionLease,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -395,6 +544,7 @@ async function runTool(
         toolArgs: cfg.args,
         actionKind: cfg.actionKind,
         description: 'Call ' + cfg.tool,
+        lease,
       }),
   );
 
@@ -410,6 +560,7 @@ async function runDispatch(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'dispatch' }>,
   scope: RefScope,
+  lease: SessionLease,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -466,6 +617,7 @@ async function runDispatch(
         toolArgs,
         actionKind: cfg.actionKind,
         description: cfg.goal + ' (selected: ' + tool + ')',
+        lease,
       });
 
       return { tool, confidence: decision.data.confidence, result };
@@ -602,6 +754,7 @@ async function runSubmit(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'submit' }>,
   scope: RefScope,
+  lease: SessionLease,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -614,6 +767,7 @@ async function runSubmit(
         toolArgs: cfg.args,
         actionKind: cfg.actionKind,
         description: cfg.description,
+        lease,
         amountCents: cfg.amountCents,
         // A submit node means the author already decided this is consequential.
         forceApproval: true,
@@ -643,6 +797,254 @@ async function runApproval(
   });
 
   return { value: { approved: true }, output: { approved: true } };
+}
+
+/**
+ * Hold a browser session a tool call just opened.
+ *
+ * Recognised by shape rather than by tool name: `open` is the only browser
+ * operation that returns a `sessionId` and leaves it running, and matching on
+ * the payload keeps this working for any backend that does the same. Anything
+ * else returns a value with no sessionId and is ignored.
+ */
+async function holdOpenedSession(
+  ctx: PlaybookContext,
+  stepId: string,
+  output: unknown,
+  /** The ARGS that were sent, which is the only place a requested url exists. */
+  toolArgs: Record<string, Json>,
+  lease?: SessionLease,
+): Promise<void> {
+  if (!lease || !output || typeof output !== 'object' || Array.isArray(output)) return;
+  const payload = output as Record<string, unknown>;
+  const sessionId = payload.sessionId;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+
+  lease.hold(sessionId);
+
+  // A browser opened with no url has nothing but about:blank in it, and a
+  // handoff that inherits it hands a person a white box. Say so at the moment
+  // it happens, naming the fix, rather than letting it surface as "the live
+  // view is broken" several nodes later.
+  const requestedUrl = toolArgs.url;
+  if (typeof requestedUrl !== 'string' || requestedUrl.trim() === '') {
+    await ctx
+      .log(
+        'warn',
+        'A browser session was opened with no url, so it is sitting on about:blank. ' +
+          'Anything that shows this session -- a handoff live view in particular -- will ' +
+          'look blank until something navigates it. Give the open node a url argument.',
+      )
+      .catch(() => undefined);
+  }
+
+  // ANNOUNCE IT TOO. A session opened by a `tool` node is just as watchable as
+  // one a handoff opened, and a later handoff that INHERITS this session has no
+  // other way to tell the UI which browser it is waiting on.
+  await ctx
+    .announceBrowserSession({
+      sessionId,
+      stepId,
+      providerId: ctx.providerFor('browser'),
+      // Whatever the open returned is already stale by the time anyone clicks
+      // it (Browserbase signs its viewer with a short-lived token), so this is
+      // only a "a viewer exists" signal. The URL is minted on demand.
+      interactive: typeof payload.liveViewUrl === 'string',
+    })
+    .catch(() => undefined);
+}
+
+/** Ten minutes. A person who has walked away, not a person who is reading. */
+const HANDOFF_TIMEOUT_MS = 600_000;
+
+/**
+ * Give back every session the run is still holding.
+ *
+ * Best effort and never throws: a session that cannot be released is a billing
+ * annoyance, while letting this reject would turn a SUCCESSFUL run into a
+ * failed one at the very last moment.
+ *
+ * Goes through the browser CAPABILITY, so the release is ledgered by
+ * withEgress like any other provider call rather than being a side channel.
+ */
+async function releaseHeldSessions(ctx: PlaybookContext, held: Set<string>): Promise<void> {
+  if (held.size === 0) return;
+
+  await Promise.all(
+    [...held].map(async (sessionId) => {
+      try {
+        await ctx
+          .provider('browser')
+          .closeSession(sessionId, ctx.callContext({ policyRule: 'run-teardown-session-release' }));
+        await ctx.releaseBrowserSession(sessionId);
+      } catch (err) {
+        await ctx
+          .log('warn', 'Could not release browser session ' + sessionId + ': ' + String(err))
+          .catch(() => undefined);
+      }
+    }),
+  );
+  held.clear();
+}
+
+/**
+ * Fail the node if nobody acts in time.
+ *
+ * `Promise.race` and NOT an abort of the underlying approval: the approval
+ * genuinely stays pending server-side, and saying otherwise in the UI would be
+ * a lie. What this bounds is how long the RUN waits, which is the thing that
+ * actually needs bounding. The timer is always cleared.
+ */
+async function withHandoffTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'Handoff "' +
+                  label +
+                  '" timed out after ' +
+                  Math.round(ms / 1000) +
+                  's with nobody acting. The agent does NOT attempt this step itself.',
+              ),
+            ),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * THE HUMAN DOES IT — see handoffNodeSchema for why this is not an `approval`.
+ *
+ * Mechanically this is `runApproval` with a browser session attached, and that
+ * is deliberate: the blocking primitive (requireApproval -> waitForApproval ->
+ * POST /approvals/:id/decide) is already correct, already cancellable via the
+ * run's AbortSignal, and already surfaces in the UI. A second way to block a
+ * run would be a second way to get cancellation wrong.
+ *
+ * WHY THE SESSION IS OPENED THROUGH THE CAPABILITY AND NOT THE TOOL BROKER:
+ * the broker authorizes a tool call against an agent session's exposure grant
+ * (see core/tools/broker.ts, assertSelected). A graph node has no such grant --
+ * it is not a harness turn. The call still goes through the `browser`
+ * capability, so withEgress ledgers it and the privacy story is unchanged; and
+ * this node blocks for a human by construction, which is a stricter gate than
+ * the `read_page` classification an open would otherwise get.
+ *
+ * NO CREDENTIAL PASSES THROUGH HERE. There is nothing in this function that
+ * reads a secret, and `output` carries only the instruction, the session id and
+ * how the wait ended. Keep it that way.
+ */
+async function runHandoff(
+  ctx: PlaybookContext,
+  node: Extract<GraphNode, { type: 'handoff' }>,
+  scope: RefScope,
+  lease: SessionLease,
+): Promise<NodeResult> {
+  const cfg = resolveRefs(node.config, scope);
+
+  // An inherited session belongs to whoever opened it. Only a session THIS
+  // node opens is one this node may hand downstream or hold for the run.
+  const inherited = typeof cfg.sessionId === 'string' && cfg.sessionId.length > 0;
+
+  const result = await ctx.step(
+    { label: node.label, kind: 'handoff', nodeId: node.id, providerId: ctx.providerFor('browser') },
+    async (step) => {
+      let sessionId = inherited ? (cfg.sessionId as string) : undefined;
+
+      // A handoff opens its OWN browser only when no session was handed to it.
+      // Doing that with no url means handing a person about:blank, which is
+      // almost never what the author meant -- the common cause is a `url` whose
+      // {{ref}} resolved to nothing (see warnUnresolvedRefs) or a missing
+      // `sessionId` that should have inherited an earlier node's browser.
+      if (!inherited && (typeof cfg.url !== 'string' || cfg.url.trim() === '')) {
+        await ctx
+          .log(
+            'warn',
+            'Handoff "' +
+              node.label +
+              '" has neither a sessionId to inherit nor a url to open, so the person ' +
+              'will be handed a blank browser. Give it sessionId (to reuse the browser an ' +
+              'earlier node opened) or a url that resolves.',
+          )
+          .catch(() => undefined);
+      }
+
+      if (!inherited) {
+        const opened = await ctx
+          .provider('browser')
+          .openSession(
+            { ...(cfg.url ? { startUrl: cfg.url } : {}) },
+            ctx.callContext({ stepId: step.id, policyRule: 'handoff-open-for-human' }),
+          );
+        if (!opened.ok) {
+          throw new Error(
+            'Handoff "' +
+              node.label +
+              '" could not open a browser to hand over: ' +
+              opened.error.message,
+          );
+        }
+        sessionId = opened.data.sessionId;
+
+        // Held for the REST OF THE RUN, not this step: downstream nodes inherit
+        // the authenticated session. runGraph's drain is what gives it back.
+        lease.hold(sessionId);
+
+        // The person cannot reach the browser unless the viewer URL is put on
+        // the run stream. Undefined liveViewUrl is NORMAL (local and mocked
+        // browsers have no viewer) and the UI says so rather than dead-linking.
+        await ctx.announceBrowserSession({
+          sessionId,
+          stepId: step.id,
+          nodeId: node.id,
+          providerId: ctx.providerFor('browser'),
+          ...(opened.data.liveViewUrl ? { liveViewUrl: opened.data.liveViewUrl } : {}),
+          interactive: opened.data.interactive === true,
+          ...(cfg.url ? { startUrl: cfg.url } : {}),
+        });
+      }
+
+      // BLOCKS. Rejection throws ApprovalRejectedError and fails the node,
+      // which is correct: a person declining to do the step is not a step that
+      // can be worked around.
+      const waiting = ctx.requireApproval(step.id, {
+        kind: 'human_handoff',
+        description: cfg.instruction,
+        // Irreversible so the gate can never classify this away. A handoff is
+        // an explicit author decision, exactly like an `approval` node.
+        reversibility: 'irreversible',
+        // The PAYLOAD is what reaches the UI: the orchestrator stores
+        // `action.payload ?? action`, so the discriminator has to live in here
+        // or the approval panel cannot tell a handoff from an ordinary gate.
+        payload: {
+          kind: 'human_handoff',
+          instruction: cfg.instruction,
+          sessionId,
+          resumeWhen: cfg.resumeWhen,
+          ...(cfg.expectUrl ? { expectUrl: cfg.expectUrl } : {}),
+        },
+      });
+
+      // THE TIMEOUT FAILS THE RUN. It never falls through to letting the agent
+      // do it -- see handoffNodeSchema.
+      await withHandoffTimeout(waiting, cfg.timeoutMs ?? HANDOFF_TIMEOUT_MS, node.label);
+
+      return { sessionId, handedOff: true, resumeWhen: cfg.resumeWhen };
+    },
+  );
+
+  return {
+    value: { sessionId: result.sessionId, handedOff: true },
+    output: result as Json,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

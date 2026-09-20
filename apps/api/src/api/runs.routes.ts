@@ -6,6 +6,7 @@ import {
   type CreateRunRequest,
   type ListRunsQuery,
 } from '@htn/shared';
+import { providers } from '../services/runtime.js';
 import {
   availablePlaybooks,
   cancelRun,
@@ -88,6 +89,52 @@ runsRouter.get('/runs/:id/egress', async (req, res) => {
  * @htn/shared so the web app runs the SAME function over the SSE stream for
  * live numbers. One implementation, two callers.
  */
+/**
+ * A CURRENT viewer URL for a browser session this run holds.
+ *
+ * Minted per request on purpose. Browserbase signs its debug URL with a
+ * short-lived token, so the URL captured when the session opened is already
+ * dead by the time a person clicks a handoff link -- it renders a blank page
+ * that accepts no input. Never cache what this returns.
+ *
+ * 200 with `liveViewUrl: null` is a NORMAL answer, not an error: local and
+ * mocked browsers have no viewer, and a session that has since closed cannot
+ * produce one. The UI renders that state rather than a dead link.
+ */
+runsRouter.get('/runs/:id/browser/:sessionId/live-view', async (req, res) => {
+  const runId = param(req, 'id');
+  const sessionId = param(req, 'sessionId');
+
+  const detail = await getRunDetail(runId);
+  if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+
+  const adapter = providers.provider('browser');
+  if (!adapter.liveView) {
+    // Same shape on every path: a caller that reads `pageUrl` must not get
+    // `undefined` from one branch and `null` from the others.
+    res.json({ liveViewUrl: null, pageUrl: null, interactive: false });
+    return;
+  }
+
+  const result = await adapter.liveView(sessionId, {
+    runId,
+    policyRule: 'handoff-live-view-refresh',
+  });
+
+  res.json(
+    result.ok
+      ? {
+          liveViewUrl: result.data.liveViewUrl ?? null,
+          // 'about:blank' here means the session is open but nothing is loaded
+          // -- almost always an `open` node with no url. The UI says so rather
+          // than handing over a white box.
+          pageUrl: result.data.pageUrl ?? null,
+          interactive: result.data.interactive,
+        }
+      : { liveViewUrl: null, pageUrl: null, interactive: false },
+  );
+});
+
 runsRouter.get('/runs/:id/analytics', async (req, res) => {
   const detail = await getRunDetail(param(req, 'id'));
   if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Run not found');

@@ -49,6 +49,29 @@ export function runReducer(state: RunView, event: RunEvent | { type: 'reset' }):
         scheduleDecisions: upsert(state.scheduleDecisions, event.decision),
       };
 
+    // A session can be announced more than once on replay, so this is an
+    // upsert keyed on sessionId rather than an append -- otherwise reconnecting
+    // mid-run shows the same browser twice.
+    case 'browser.session.opened': {
+      const at = state.browserSessions.findIndex((s) => s.sessionId === event.session.sessionId);
+      if (at !== -1) {
+        const next = [...state.browserSessions];
+        next[at] = { ...next[at], ...event.session };
+        return { ...state, browserSessions: next };
+      }
+      return { ...state, browserSessions: [...state.browserSessions, event.session] };
+    }
+
+    // Marked closed IN PLACE, never removed: a finished run still has to list
+    // the sessions it used so the panel can show their decision trail.
+    case 'browser.session.closed':
+      return {
+        ...state,
+        browserSessions: state.browserSessions.map((s) =>
+          s.sessionId === event.sessionId ? { ...s, closedAt: event.at } : s,
+        ),
+      };
+
     // The tool plane and Jev's selections. Without these the graph cannot show which tools
     // were exposed or called: an agent run has ONE outer step, and everything a tool did
     // arrives only as these events.

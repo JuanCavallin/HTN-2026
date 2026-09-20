@@ -60,6 +60,7 @@ export const EXECUTOR_BY_NODE_TYPE: Record<GraphNodeType, NodeExecutor> = {
   decide: 'model',
   agent_task: 'agent',
   approval: 'human',
+  handoff: 'human',
   swarm: 'group',
 };
 
@@ -135,7 +136,7 @@ export const EXECUTOR_STYLE: Record<NodeExecutor, ExecutorStyle> = {
     color: 'rose',
     opaque: false,
     cost: 'none',
-    description: 'Blocks until a person decides.',
+    description: 'Blocks until a person decides — or, for a handoff, until they act.',
   },
   group: {
     label: 'Swarm',
@@ -170,6 +171,7 @@ export const NODE_TYPE_ICON: Record<GraphNodeType | 'worker' | 'task', string> =
   judge: '⚖',
   submit: '↥',
   approval: '🛑',
+  handoff: '⌨',
   worker: '•',
   task: '▸',
 };

@@ -101,16 +101,40 @@ export function buildDemoGraph(at: string): AgentGraph {
         position: { x: 0, y: 390 },
         config: {
           goal: 'Given the case summary, identify what follow-up action, if any, is warranted.',
-          // Candidates only. The decision layer narrows this before the harness
-          // starts, and nothing irreversible belongs in the list.
+          /**
+           * REAL REGISTRY IDS, not invented ones.
+           *
+           * The orchestrator resolves these through the trusted tool registry
+           * (`toolRegistry.resolve`) and SILENTLY DROPS anything it does not
+           * know. This list used to be provider-style names -- `web.search`,
+           * `docs.read` -- that no longer register anywhere, so every one was
+           * dropped, the harness started with an empty toolset, and Hermes fell
+           * back to its own `browser_exec`, which fails. Measured before this
+           * change: availableTools 0, exposedTools 0.
+           *
+           * Naming registry ids instead puts the call on the AgentOS path: Jev
+           * selects from these, the selection becomes the turn's exposure grant,
+           * and Hermes reaches them over the MCP gateway where the broker
+           * enforces the grant. Its own tools are not an escape hatch from that.
+           *
+           * BOTH BACKENDS ARE LISTED ON PURPOSE. `eligibleTaskTools` filters by
+           * the session's data labels, so a private task keeps only the local
+           * browser while a public one may use either -- listing one backend
+           * would decide that statically and defeat the routing.
+           *
+           * READ-ONLY ONLY. `submit` is irreversible and must never appear in an
+           * unattended harness allowlist; `click`/`type` are left out because
+           * this subtask is analysis, not form-filling.
+           */
           availableTools: [
-            'browser.navigate',
-            'browser.extract',
-            'web.search',
-            'docs.read',
-            'sheets.append',
-            'calendar.create',
-            'docs.draft',
+            'localbrowser.search',
+            'localbrowser.open',
+            'localbrowser.extract',
+            'localbrowser.inspect',
+            'browserbase.search',
+            'browserbase.open',
+            'browserbase.extract',
+            'browserbase.inspect',
           ],
           harness: 'hermes',
         },

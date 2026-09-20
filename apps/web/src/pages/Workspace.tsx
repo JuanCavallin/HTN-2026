@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { emptyRunView, isTerminal } from '@htn/shared';
+import { emptyRunView, isTerminal, type Conversation } from '@htn/shared';
 import { api } from '../lib/api';
 import {
   advancePreview,
@@ -20,6 +20,7 @@ import { useHarness } from '../components/layout/AppShell';
 import { DecisionCanvas } from '../components/graph/DecisionCanvas';
 import { MetricsStrip, RunInspector, TaskComposer } from '../components/chat/WorkspacePanels';
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel';
+import { handoffSessionIdFor } from '../lib/handoff';
 import { EgressLedger } from '../components/egress/EgressLedger';
 import { Icon, Mark } from '../components/ui/Icon';
 
@@ -701,9 +702,19 @@ export function LiveRunWorkspace() {
             )}
             {view.approvals
               .filter((approval) => approval.status === 'pending')
-              .map((approval) => (
-                <ApprovalPanel key={approval.id} approval={approval} />
-              ))}
+              .map((approval) => {
+                // A handoff approval carries the id of a browser session the
+                // run is holding open. Passing its URL through is what turns
+                // "approve this" into "here is the browser, go and do it".
+                const sessionId = handoffSessionIdFor(approval, view.browserSessions);
+                return (
+                  <ApprovalPanel
+                    key={approval.id}
+                    approval={approval}
+                    {...(sessionId ? { handoffSessionId: sessionId } : {})}
+                  />
+                );
+              })}
             {view.run?.error && (
               <p className="error-note" role="alert">
                 {view.run.error.message}

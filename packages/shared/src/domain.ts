@@ -44,6 +44,32 @@ export function isTerminal(status: RunStatus): boolean {
   return (TERMINAL_RUN_STATUSES as readonly string[]).includes(status);
 }
 
+/**
+ * What the OPERATOR has asked of a live run -- kept apart from `status` (what
+ * the run is DOING) because the two are independent: a run can be blocked on an
+ * approval and have a pause requested at the same moment.
+ *
+ *   running   the default. Absent on a run that was never paused.
+ *   pausing   pause requested. Nothing NEW may start; work already in flight is
+ *             allowed to finish. This is a wait, not an interrupt -- see
+ *             core/runGate.ts for why, and for what counts as "in flight".
+ *   paused    nothing is running. Resume continues from the next step.
+ *
+ * Cleared when the run reaches a terminal status.
+ */
+export type RunControl = 'running' | 'pausing' | 'paused';
+
+/**
+ * One stretch a run spent fully paused: from the moment nothing was running
+ * until it was resumed. The `pausing` drain is NOT included, because work was
+ * still happening then and it belongs in the run's time.
+ */
+export interface PauseSpan {
+  at: Iso;
+  /** Absent while the pause is still open. */
+  resumedAt?: Iso;
+}
+
 export interface Run {
   id: string;
   /** Playbook id. THE pivot knob — the only product-specific thing at this level. */
@@ -59,6 +85,10 @@ export interface Run {
   /** Per-kind payload. The UI picks a result renderer by `kind`. */
   result?: Json;
   error?: { code: string; message: string };
+  /** See RunControl. Only meaningful while the run is non-terminal. */
+  control?: RunControl;
+  /** Every completed or open pause, oldest first. Lets analytics exclude idle time. */
+  pauses?: PauseSpan[];
   createdAt: Iso;
   updatedAt: Iso;
 }

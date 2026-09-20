@@ -12,10 +12,24 @@ import { z } from 'zod';
 import { PROVIDER_IDS, type ProviderId, type ProviderMode } from '@htn/shared';
 
 const modeEnum = z.enum(['mock', 'live', 'disabled']);
-const optionalUrl = z.preprocess(
-  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-  z.string().url().optional(),
-);
+/**
+ * A BLANK ENV VALUE MEANS UNSET, which is what `FOO=` means to a human editing
+ * a .env file -- and the only reading that survives `??`.
+ *
+ * `env.FOO ?? fallback` does NOT fall through for an empty string, so a var
+ * declared as a plain optional string turns a blank line into a real `''` that
+ * silently wins over every default behind it. That cost a debugging session:
+ * a blank `HERMES_BASE_URL=` beat the model-gateway default and every
+ * agent_task died with "AgentOS model gateway base URL is not configured".
+ *
+ * Use `optionalString` for any optional env string, and `optionalUrl` when it
+ * must also parse as a URL.
+ */
+const blankIsUnset = (value: unknown) =>
+  typeof value === 'string' && value.trim() === '' ? undefined : value;
+
+const optionalString = z.preprocess(blankIsUnset, z.string().optional());
+const optionalUrl = z.preprocess(blankIsUnset, z.string().url().optional());
 
 /** Accepts 1/true/yes/on, case-insensitive; anything else is false. */
 const boolish = z
@@ -39,9 +53,9 @@ const envSchema = z.object({
   // Hermes is driven as a local subprocess over ACP (`uv run hermes-acp`), not
   // an HTTP API — there is no bearer key. What live mode actually needs is the
   // absolute path to a `hermes-agent` checkout with the `acp` and `mcp` extras installed.
-  HERMES_CWD: z.string().optional(),
-  HERMES_PROFILE_DIR: z.string().optional(),
-  HERMES_API_KEY: z.string().optional(),
+  HERMES_CWD: optionalString,
+  HERMES_PROFILE_DIR: optionalString,
+  HERMES_API_KEY: optionalString,
   // optionalUrl, not z.string(): `.env.example` ships `HERMES_BASE_URL=`, and an empty
   // string would otherwise defeat the `??` fallback to the model gateway below.
   HERMES_BASE_URL: optionalUrl,
@@ -51,18 +65,18 @@ const envSchema = z.object({
   MCP_GATEWAY_URL: optionalUrl,
   MCP_GATEWAY_API_KEY: z.string().default('agentos-mcp-local'),
 
-  AI_GATEWAY_API_KEY: z.string().optional(),
+  AI_GATEWAY_API_KEY: optionalString,
   AI_GATEWAY_BASE_URL: optionalUrl,
   JEV_MODE: modeEnum.default('mock'),
   /** Legacy aliases retained so existing local setups keep working. */
-  JEV_API_KEY: z.string().optional(),
+  JEV_API_KEY: optionalString,
   JEV_BASE_URL: optionalUrl,
 
   BROWSERBASE_MODE: modeEnum.default('mock'),
-  BROWSERBASE_API_KEY: z.string().optional(),
-  BROWSERBASE_PROJECT_ID: z.string().optional(),
+  BROWSERBASE_API_KEY: optionalString,
+  BROWSERBASE_PROJECT_ID: optionalString,
   LOCALBROWSER_MODE: modeEnum.default('mock'),
-  LOCALBROWSER_CHANNEL: z.string().optional(),
+  LOCALBROWSER_CHANNEL: optionalString,
   BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
   BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
@@ -72,16 +86,16 @@ const envSchema = z.object({
   BROWSER_SETTLE_SELECT_MS: z.coerce.number().int().min(0).default(200),
 
   COMPOSIO_MODE: modeEnum.default('mock'),
-  COMPOSIO_API_KEY: z.string().optional(),
+  COMPOSIO_API_KEY: optionalString,
   COMPOSIO_BASE_URL: optionalUrl,
   COMPOSIO_USER_ID: z.string().default('agentos-demo-user'),
-  COMPOSIO_AUTH_CONFIG_ID: z.string().optional(),
+  COMPOSIO_AUTH_CONFIG_ID: optionalString,
   COMPOSIO_TOOL_SLUGS: z.string().default('GMAIL_SEND_EMAIL'),
   COMPOSIO_TOOLKITS: z.string().default(''),
   COMPOSIO_DISCOVERY_LIMIT: z.coerce.number().int().min(1).max(100).default(24),
 
   OPENROUTER_MODE: modeEnum.default('mock'),
-  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_API_KEY: optionalString,
   OPENROUTER_BASE_URL: optionalUrl,
   OPENROUTER_CHEAP_MODEL: z.string().default('openai/gpt-5.6-luna'),
   OPENROUTER_FRONTIER_MODEL: z.string().default('openai/gpt-5.6-sol'),
@@ -91,27 +105,27 @@ const envSchema = z.object({
   OLLAMA_MODEL: z.string().default('qwen3:8b'),
 
   ANTHROPIC_MODE: modeEnum.default('mock'),
-  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: optionalString,
 
   // A DIRECT Google route, deliberately separate from the OpenRouter catalog.
   // Two distinct cloud vendors is what makes route selection a real decision
   // rather than a label, and it gives the ledger two distinct destinations.
   GEMINI_MODE: modeEnum.default('mock'),
-  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: optionalString,
   GEMINI_BASE_URL: optionalUrl,
   GEMINI_CHEAP_MODEL: z.string().default('gemini-3.5-flash-lite'),
   GEMINI_FRONTIER_MODEL: z.string().default('gemini-3.8-flash'),
 
   // Observability. Entirely inert without SENTRY_DSN: the no-key clone must
   // still boot and run the full demo, so this may never become required.
-  SENTRY_DSN: z.string().optional(),
+  SENTRY_DSN: optionalString,
   SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(1),
-  SENTRY_RELEASE: z.string().optional(),
+  SENTRY_RELEASE: optionalString,
 
   // Mock by default so a keyless clone still exercises the outbound-text check
   // end to end; GPTZERO_API_KEY plus GPTZERO_MODE=live scores for real.
   GPTZERO_MODE: modeEnum.default('mock'),
-  GPTZERO_API_KEY: z.string().optional(),
+  GPTZERO_API_KEY: optionalString,
   GPTZERO_BASE_URL: optionalUrl,
   /** P(ai) at or above which an authorized outbound send stops for a human. */
   GPTZERO_ESCALATION_THRESHOLD: z.coerce.number().min(0).max(1).default(0.75),

@@ -102,7 +102,22 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
   async function prepareProfile(): Promise<string> {
     if (!cfg.baseUrl) throw new Error('AgentOS model gateway base URL is not configured');
     if (!cfg.mcpUrl) throw new Error('AgentOS MCP gateway URL is not configured');
-    const profileDir = cfg.profileDir ?? resolve(process.cwd(), '.data/hermes-agentos');
+    // SCOPED TO THIS INSTANCE'S GATEWAY, not just to the repo.
+    //
+    // The profile holds a config.yaml naming the model gateway and MCP URLs,
+    // both of which carry THIS process's port. A second API instance --
+    // a verification run on another port, a colleague's server, a stale
+    // watcher -- would otherwise write the same file and the last writer would
+    // win, silently pointing a running Hermes at a port that may no longer
+    // exist. The symptom is a 401 from "a custom endpoint", which looks like a
+    // credentials problem and is not one.
+    //
+    // Deriving the directory from the gateway URL makes that collision
+    // impossible instead of merely unlikely. An explicit HERMES_PROFILE_DIR
+    // still wins, for anyone who wants one shared profile on purpose.
+    const profileKey = cfg.baseUrl.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const profileDir =
+      cfg.profileDir ?? resolve(process.cwd(), '.data/hermes-agentos-' + profileKey);
     await mkdir(profileDir, { recursive: true });
     const configYaml = [
       'model:',
@@ -161,6 +176,19 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           HERMES_HOME: profileDir,
           HERMES_ACP_SKIP_CONFIGURED_MCP: '0',
           AGENTOS_GATEWAY_API_KEY: cfg.apiKey ?? 'agentos-local',
+          // `key_env` in config.yaml does NOT reach the key Hermes actually
+          // sends. For a `custom` provider it resolves, in order:
+          //   explicit api_key -> OPENAI_API_KEY -> same-host main key
+          //   -> the literal "no-key-required"
+          // (hermes-agent/agent/auxiliary_client.py). With none of those set it
+          // sent "no-key-required" and every model call came back 401 against a
+          // gateway token that was correct on both sides -- which reads as a
+          // credentials bug and is not one.
+          //
+          // OPENAI_API_KEY is the supported hook, so it carries the same local
+          // gateway token. Scoped to this child process, and the base URL it
+          // pairs with is loopback, so the value never leaves the machine.
+          OPENAI_API_KEY: cfg.apiKey ?? 'agentos-local',
           AGENTOS_MCP_API_KEY: cfg.mcpApiKey ?? 'agentos-mcp-local',
         },
       });
