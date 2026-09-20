@@ -60,7 +60,16 @@ function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
           // inactivity check. Reporting a stale timestamp here would be a
           // mock-only false positive that live Hermes would never produce.
           if (n < 2) {
-            return { status: 'running' as const, log: ['working...'], lastActivityAt: nowIso() };
+            // Mirrors the live adapter: tool calls are reported while running,
+            // not withheld until the task finishes. The mock reports none yet
+            // because it fabricates them at completion, but the field is
+            // present so both adapters have the same shape mid-flight.
+            return {
+              status: 'running' as const,
+              log: ['working...'],
+              toolCalls: [],
+              lastActivityAt: nowIso(),
+            };
           }
 
           // Fabricate an audit trail using whatever tools this task was

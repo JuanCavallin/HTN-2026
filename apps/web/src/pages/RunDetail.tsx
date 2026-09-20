@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { isTerminal, rollup } from '@htn/shared';
 import { useRunStream } from '../hooks/useRunStream';
@@ -10,6 +10,7 @@ import { EgressLedger } from '../components/egress/EgressLedger';
 import { GraphCanvas } from '../components/graph/GraphCanvas';
 import { Legend } from '../components/graph/Legend';
 import { CompareLinks } from '../components/runs/CompareLinks';
+import { RunDevProvider } from '../components/runs/RunDevContext';
 import { StepTimeline } from '../components/runs/StepTimeline';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -20,6 +21,31 @@ export function RunDetail() {
   const { id } = useParams<{ id: string }>();
   const { run, steps, approvals, egress, piiSpans, scheduleDecisions, logs, connected } =
     useRunStream(id);
+
+  // Sticky across runs and reloads: someone debugging a harness wants every
+  // run they open to come up expanded, not to re-flip the switch each time.
+  // Read lazily so the first paint already has the right state.
+  const [devMode, setDevMode] = useState(() => {
+    try {
+      return localStorage.getItem('htn.devView') === '1';
+    } catch {
+      // Private mode / blocked storage. Defaulting to off is the honest
+      // fallback; the switch still works for this session.
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('htn.devView', devMode ? '1' : '0');
+    } catch {
+      /* not worth surfacing -- the toggle still works in-session */
+    }
+  }, [devMode]);
+
+  const devValue = useMemo(
+    () => ({ egress, scheduleDecisions, logs, devMode }),
+    [egress, scheduleDecisions, logs, devMode],
+  );
 
   // The graph this run executed. Uses the run's own snapshot, so editing the
   // graph afterwards never changes what this page shows.
@@ -109,8 +135,23 @@ export function RunDetail() {
       {/* Kept alongside the canvas on purpose: the timeline is the fallback
           that works for every run, including hand-written playbooks with no
           graph behind them. */}
-      <Card title="Steps">
-        <StepTimeline steps={steps} run={run} />
+      <Card
+        title="Steps"
+        actions={
+          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300">
+            <input
+              type="checkbox"
+              checked={devMode}
+              onChange={(e) => setDevMode(e.target.checked)}
+              className="h-3 w-3 accent-sky-500"
+            />
+            Dev view
+          </label>
+        }
+      >
+        <RunDevProvider value={devValue}>
+          <StepTimeline steps={steps} run={run} />
+        </RunDevProvider>
       </Card>
 
       <Card title="Egress ledger">

@@ -11,7 +11,11 @@
  *             means naming them, not just colouring a box.
  *
  * During a run it also carries live status and, once the run has produced
- * metrics, a token count -- so the expensive node is visibly expensive.
+ * metrics, a token count -- so the expensive node is visibly expensive. An
+ * agent-class node additionally shows exposed-vs-called tool counts, flagging
+ * any tool the harness called that Jev never suggested -- restriction on the
+ * harness is best-effort, not enforced (see hermes/live.ts), so this is the
+ * one place that gap is actually visible rather than silently trusted.
  */
 
 import { Handle, Position, type NodeProps } from '@xyflow/react';
@@ -142,6 +146,27 @@ export function NodeCard({ data }: NodeProps) {
           </span>
           {metrics.llmCalls > 0 && <span>{metrics.llmCalls} calls</span>}
           <span className="ml-auto">{(metrics.wallMs / 1000).toFixed(1)}s</span>
+        </div>
+      )}
+
+      {metrics?.calledToolNames && (
+        <div
+          className="mt-1 flex items-center gap-1.5 text-[10px] text-slate-500"
+          title={
+            'Exposed: ' +
+            (metrics.exposedToolNames?.join(', ') || 'none') +
+            '\nCalled: ' +
+            metrics.calledToolNames.join(', ')
+          }
+        >
+          <span>
+            {metrics.toolsExposed ?? 0} exposed · {metrics.calledToolNames.length} called
+          </span>
+          {metrics.toolDivergence && metrics.toolDivergence.length > 0 && (
+            <span className="ml-auto rounded-full bg-amber-500/15 px-1.5 py-px font-medium text-amber-300 ring-1 ring-inset ring-amber-500/30">
+              ⚠ {metrics.toolDivergence.length} not suggested
+            </span>
+          )}
         </div>
       )}
 

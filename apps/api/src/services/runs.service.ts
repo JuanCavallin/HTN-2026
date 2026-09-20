@@ -16,7 +16,7 @@ import type {
   ScheduleDecision,
   Step,
 } from '@htn/shared';
-import { stripPiiValue } from '@htn/shared';
+import { isTerminal, stripPiiValue } from '@htn/shared';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
 import { forkGraph, GraphNotFoundError } from './graphs.service.js';
 import { newId, nowIso } from '../lib/ids.js';
@@ -160,6 +160,34 @@ export async function cancelRun(id: string): Promise<Run | null> {
   }
   // The orchestrator's abort path writes the terminal status and emits.
   return run;
+}
+
+/**
+ * Cancel every non-terminal run this process is NOT actually executing.
+ *
+ * `orchestrator.isRunning()` is exact, not a heuristic: `inFlight` is only
+ * ever populated by THIS process's own `execute()`, so right after a boot it
+ * is empty and every non-terminal run found is, by construction, orphaned --
+ * left "running" forever by a previous process that died (a restart, a
+ * crash, a deliberate kill) with no chance to ever mark it terminal itself.
+ * A run genuinely still executing in this process is never touched: it IS in
+ * `inFlight`, so it's skipped, not raced against.
+ *
+ * Run automatically at boot (see index.ts) and available on demand via
+ * POST /runs/probe-stale, since a restart during development is routine, not
+ * exceptional, and each one otherwise leaves debris that looks alarmingly
+ * like a real stuck run to anyone looking at the dashboard.
+ */
+export async function probeStaleRuns(): Promise<{ checked: number; staleIds: string[] }> {
+  const all = await store.listRuns({ limit: 1000 });
+  const nonTerminal = all.filter((run) => !isTerminal(run.status));
+  const stale = nonTerminal.filter((run) => !orchestrator.isRunning(run.id));
+
+  for (const run of stale) {
+    await cancelRun(run.id);
+  }
+
+  return { checked: nonTerminal.length, staleIds: stale.map((run) => run.id) };
 }
 
 /**

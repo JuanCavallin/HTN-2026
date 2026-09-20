@@ -91,6 +91,17 @@ export interface NodeMetrics {
   /** Self-reported by the agent runtime after the fact. */
   toolCallsActual?: number;
   modelTier?: ModelTier;
+  /** Distinct tool names Jev exposed to the harness for this node (union across every ScheduleDecision on it). */
+  exposedToolNames?: string[];
+  /** Distinct tool names the harness self-reported actually calling (post-hoc audit; see AgentTaskResult.toolCalls). */
+  calledToolNames?: string[];
+  /**
+   * `calledToolNames` minus `exposedToolNames` -- tools the harness touched
+   * that were never suggested. Tool restriction on the harness is BEST-EFFORT,
+   * not enforced (see hermes/live.ts), so this is an expected, sometimes-real
+   * signal to surface, not evidence of a bug.
+   */
+  toolDivergence?: string[];
 }
 
 export interface RunTotals {
@@ -196,6 +207,28 @@ function toolCallCount(steps: Step[]): number | undefined {
   return total;
 }
 
+/**
+ * Distinct tool names the runtime self-reported calling, from every step's
+ * `output.toolCalls` (see AgentTaskResult.toolCalls -- the same field
+ * `toolCallCount` above counts, this collects the names instead).
+ */
+function toolCallNames(steps: Step[]): string[] {
+  const names = new Set<string>();
+  for (const step of steps) {
+    const output = step.output;
+    if (!output || typeof output !== 'object' || Array.isArray(output)) continue;
+    const calls = (output as Record<string, unknown>).toolCalls;
+    if (!Array.isArray(calls)) continue;
+    for (const call of calls) {
+      if (call && typeof call === 'object' && !Array.isArray(call)) {
+        const tool = (call as Record<string, unknown>).tool;
+        if (typeof tool === 'string') names.add(tool);
+      }
+    }
+  }
+  return [...names];
+}
+
 function metricsFor(
   nodeId: string,
   steps: Step[],
@@ -209,6 +242,9 @@ function metricsFor(
 
   const toolsAvailable = mine.reduce((sum, d) => sum + d.availableTools.length, 0);
   const toolsExposed = mine.reduce((sum, d) => sum + d.exposedTools.length, 0);
+  const exposedToolNames = [...new Set(mine.flatMap((d) => d.exposedTools))];
+  const calledToolNames = toolCallNames(steps);
+  const toolDivergence = calledToolNames.filter((name) => !exposedToolNames.includes(name));
 
   return {
     nodeId,
@@ -228,6 +264,9 @@ function metricsFor(
     toolsExposed: mine.length > 0 ? toolsExposed : undefined,
     toolCallsActual: toolCallCount(steps),
     modelTier: mine[0]?.modelTier,
+    exposedToolNames: mine.length > 0 ? exposedToolNames : undefined,
+    calledToolNames: calledToolNames.length > 0 ? calledToolNames : undefined,
+    toolDivergence: toolDivergence.length > 0 ? toolDivergence : undefined,
   };
 }
 

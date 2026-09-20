@@ -1,6 +1,15 @@
 /**
- * Two comparison entry points and a fork action, all keyed off `run.graphId`
- * -- the same "history of this task" query the Compare page's callers use.
+ * Actions off a finished (or in-progress) run, all keyed off `run.graphId` --
+ * the same "history of this task" query the Compare page's callers use.
+ *
+ * "Edit graph" points at the LIVE graph document (`/graphs/:graphId`), not
+ * the run -- a run is a frozen attempt, editing happens on the task, not on
+ * what already happened. It's offered for any run with a graphId, including
+ * a baseline: editing the task it was compared against is exactly as
+ * meaningful there. "Save as new task" is the one that instead points
+ * backward, at the exact snapshot THIS run executed (only graph-kind runs
+ * have one) -- the two are not the same action and don't substitute for
+ * each other.
  *
  * "vs. baseline" and "vs. previous run" answer different questions (does the
  * structure help at all vs. did this edit help) and neither substitutes for
@@ -55,11 +64,16 @@ export function CompareLinks({ run }: { run: Run }) {
     }
   };
 
-  const hasActions = previousRun || baselineRun || run.kind === 'graph';
+  const hasActions = run.graphId || previousRun || baselineRun || run.kind === 'graph';
   if (!hasActions) return null;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {run.graphId && (
+        <Button variant="ghost" onClick={() => navigate('/graphs/' + run.graphId)}>
+          Edit graph
+        </Button>
+      )}
       {baselineRun && (
         <Button
           variant="ghost"

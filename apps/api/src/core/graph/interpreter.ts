@@ -516,6 +516,8 @@ async function runAgentTaskNode(
     pollIntervalMs: cfg.pollIntervalMs,
     maxPolls: cfg.maxPolls,
     inactivityTimeoutMs: cfg.inactivityTimeoutMs,
+    maxDurationMs: cfg.maxDurationMs,
+    maxFailedToolCalls: cfg.maxFailedToolCalls,
   });
 
   return {

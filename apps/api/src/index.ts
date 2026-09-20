@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { config, logConfigSummary } from './config.js';
 import { seedGraphs } from './services/graphs.service.js';
+import { probeStaleRuns } from './services/runs.service.js';
 import { loadToolClassifications } from './services/runtime.js';
 import { store } from './store/index.js';
 
@@ -12,6 +13,23 @@ async function main(): Promise<void> {
 
   // So the canvas is never empty on a cold start. Never overwrites an edit.
   await seedGraphs();
+
+  // Runs persist in SQLite across a restart (see store/sqlite.ts), but the
+  // orchestrator driving them is in-memory and does not -- every restart
+  // otherwise leaves any non-terminal run permanently stuck "running" with
+  // nothing left to ever finish it. `inFlight` is genuinely empty this early,
+  // so anything non-terminal found here is, by construction, orphaned.
+  const { checked, staleIds } = await probeStaleRuns();
+  if (staleIds.length > 0) {
+    console.log(
+      '[runs] cancelled ' +
+        staleIds.length +
+        ' of ' +
+        checked +
+        ' non-terminal run(s) orphaned by a previous process: ' +
+        staleIds.join(', '),
+    );
+  }
 
   // Seed the tool -> action-kind index the risk gate reads. Until this runs
   // every tool is unclassified and stops for a human, so it happens before the

@@ -128,6 +128,26 @@ export interface ProviderAdapter {
 /* Capability interfaces — our vocabulary, deliberately narrow.               */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * One tool call a harness reports having made inside its own loop.
+ *
+ * `status` and `result` are what make this actionable rather than merely
+ * informative. Without them a caller can see THAT a tool ran but not whether
+ * it worked, so a harness stuck retrying a broken tool is indistinguishable
+ * from one making progress -- which is precisely how a task burns its whole
+ * budget and then reports only "timed out". A runtime that cannot report
+ * either field omits it, same convention as the rest of this interface.
+ */
+export interface HarnessToolCall {
+  tool: string;
+  /** ACP-style status: 'pending' | 'in_progress' | 'completed' | 'failed'. */
+  status?: string;
+  /** Short preview of what the tool returned, truncated by the adapter. */
+  result?: string;
+  args?: unknown;
+  at: string;
+}
+
 export interface AgentRuntimeAdapter extends ProviderAdapter {
   startTask(
     input: { goal: string; context?: unknown; tools?: string[] },
@@ -149,7 +169,7 @@ export interface AgentRuntimeAdapter extends ProviderAdapter {
        * the fact. If the real runtime cannot report this, the field stays
        * empty and that blind spot should be called out, not hidden.
        */
-      toolCalls?: { tool: string; args?: unknown; at: string }[];
+      toolCalls?: HarnessToolCall[];
       /**
        * ISO timestamp of the last sign of life the runtime reported (a chunk,
        * a tool call, anything). Lets the caller tell "still working, just

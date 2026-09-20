@@ -3,53 +3,34 @@ import { useNavigate } from 'react-router-dom';
 import { isTerminal } from '@htn/shared';
 import { api } from '../lib/api';
 import { useGraphs } from '../hooks/useGraph';
-import { usePlaybooks, useRuns } from '../hooks/useRuns';
+import { useRuns } from '../hooks/useRuns';
 import { ActiveRunCard } from '../components/runs/ActiveRunCard';
 import { RunList } from '../components/runs/RunList';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 
 /**
- * One dropdown, two sources.
- *
- * A playbook with required input cannot be launched from a generic form -- the
- * `graph` playbook needs a graphId, and offering it here with an empty input is
- * a guaranteed validation error. So playbooks that say `directLaunch: false`
- * are excluded, and the graphs themselves are offered instead, each launching
- * with its own id.
+ * Graphs only, deliberately -- a graph IS the task; a run is just one
+ * attempt at it. Launching a raw playbook kind directly (skipping past a
+ * graph entirely) used to be offered here too, but that's exactly the
+ * "run with nothing to point back to, edit, or compare against" shape the
+ * rest of this app (task history, Compare, Save as new task) assumes never
+ * happens. `demo` and `baseline` stay registered and launchable via the API
+ * for exactly what each is actually for -- demo as the works-even-if-graphs-
+ * break fallback (see graph_demo, its graph-shaped equivalent, for the UI
+ * path to the same behaviour), baseline only ever launched contextually
+ * from GraphEditor's "Run + compare to baseline" button, never standalone.
  */
-type LaunchOption =
-  | { key: string; label: string; kind: 'playbook'; playbookKind: string }
-  | { key: string; label: string; kind: 'graph'; graphId: string };
-
 export function Home() {
   const navigate = useNavigate();
   const { runs, loading } = useRuns();
-  const playbooks = usePlaybooks();
   const { graphs } = useGraphs();
 
-  const options: LaunchOption[] = [
-    ...playbooks
-      .filter((playbook) => playbook.directLaunch)
-      .map((playbook) => ({
-        key: 'playbook:' + playbook.kind,
-        label: playbook.title,
-        kind: 'playbook' as const,
-        playbookKind: playbook.kind,
-      })),
-    ...graphs.map((graph) => ({
-      key: 'graph:' + graph.id,
-      label: 'Graph — ' + graph.name,
-      kind: 'graph' as const,
-      graphId: graph.id,
-    })),
-  ];
-
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selected = options.find((o) => o.key === selectedKey) ?? options[0];
+  const selectedGraphId = selectedId ?? graphs[0]?.id ?? null;
 
   // Split once here rather than filtering inside two different components --
   // a run that just went terminal moves from the live grid to the plain list
@@ -59,14 +40,11 @@ export function Home() {
   const pastRuns = runs.filter((run) => isTerminal(run.status));
 
   const launch = async () => {
-    if (!selected) return;
+    if (!selectedGraphId) return;
     setLaunching(true);
     setError(null);
     try {
-      const { run } =
-        selected.kind === 'graph'
-          ? await api.runGraph(selected.graphId, { target: 'ACME-2026-TERM-FEES' })
-          : await api.createRun(selected.playbookKind, {});
+      const { run } = await api.runGraph(selectedGraphId, { target: 'ACME-2026-TERM-FEES' });
       navigate('/runs/' + run.id);
     } catch (err) {
       setError((err as Error).message);
@@ -83,29 +61,40 @@ export function Home() {
           independent work to do, and stops for you before anything irreversible.
         </p>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={selected?.key ?? ''}
-            onChange={(event) => setSelectedKey(event.target.value)}
-            className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-200"
-          >
-            {options.map((option) => (
-              <option key={option.key} value={option.key}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+        {graphs.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            No tasks yet —{' '}
+            <button
+              onClick={() => navigate('/graphs')}
+              className="text-sky-400 underline underline-offset-2 hover:text-sky-300"
+            >
+              describe one
+            </button>{' '}
+            to get started.
+          </p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={selectedGraphId ?? ''}
+              onChange={(event) => setSelectedId(event.target.value)}
+              className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-200"
+            >
+              {graphs.map((graph) => (
+                <option key={graph.id} value={graph.id}>
+                  {graph.name}
+                </option>
+              ))}
+            </select>
 
-          <Button onClick={() => void launch()} disabled={launching || options.length === 0}>
-            {launching ? 'Starting…' : 'Launch'}
-          </Button>
+            <Button onClick={() => void launch()} disabled={launching || !selectedGraphId}>
+              {launching ? 'Starting…' : 'Launch'}
+            </Button>
 
-          {selected?.kind === 'graph' && (
-            <Button variant="ghost" onClick={() => navigate('/graphs/' + selected.graphId)}>
+            <Button variant="ghost" onClick={() => navigate('/graphs/' + selectedGraphId)}>
               Open in editor
             </Button>
-          )}
-        </div>
+          </div>
+        )}
 
         {error && <p className="mt-2 text-xs text-rose-400">{error}</p>}
 
