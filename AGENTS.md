@@ -19,41 +19,49 @@ for scope, contracts, safety invariants and acceptance criteria.
 **Jev cannot generate text.** This is the single most common mistake, and it invalidates
 whatever you were about to build.
 
-Jev is TypeSafe AI's *System One* decision model. You give it state plus typed questions;
+Jev is TypeSafe AI's _System One_ decision model. You give it state plus typed questions;
 it returns a **choice**, a **score**, or a **probability** — each with calibrated
 confidence and a full probability distribution. There is no content string, no tool
 calling, no agent loop.
 
-| Task | Jev? |
-| --- | --- |
-| Pick one of N known options | **yes** |
-| Rate something on an ordered scale | **yes** |
-| Probability that a statement is true | **yes** |
-| Write a selector, plan, or any prose | **no** — use a generative model |
-| Decide what to type into a field | **no** — Jev picks the field, a small LLM writes the value |
+| Task                                 | Jev?                                                       |
+| ------------------------------------ | ---------------------------------------------------------- |
+| Pick one of N known options          | **yes**                                                    |
+| Rate something on an ordered scale   | **yes**                                                    |
+| Probability that a statement is true | **yes**                                                    |
+| Write a selector, plan, or any prose | **no** — use a generative model                            |
+| Decide what to type into a field     | **no** — Jev picks the field, a small LLM writes the value |
 
-```bash
-npm install @typesafe-ai/sdk     # Node 20+; TYPESAFE_API_KEY in the root .env
-```
+**We reach Jev through the Vercel AI SDK's AI Gateway. Do NOT use `@typesafe-ai/sdk`.**
+It is the AI SDK's _evaluation_ API, not the OpenAI-compatible chat-completions endpoint.
 
 ```ts
-import { choice, noul, score, TypeSafeClient } from '@typesafe-ai/sdk';
+import { createGateway, experimental_evaluate as evaluate } from 'ai';
 
-const client = new TypeSafeClient(); // model: "jev-latest"
-const r = await client.systemOne({
+// AI_GATEWAY_API_KEY in the root .env; config.providers.jev holds it.
+const gateway = createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY });
+const model = gateway.evaluationModel('typesafe-ai/jev');
+
+const r = await evaluate({
+  model,
   state: { document: 'I was charged twice.' },
   questions: {
-    billing: noul('Is this about billing?'),
-    tone: choice('Tone?', { calm: null, angry: null }),
-    urgency: score('How urgent?', ['can wait', 'this week', 'today']),
+    tone: { type: 'choice', instructions: 'Tone?', criteria: { calm: '...', angry: '...' } },
+    billing: { type: 'boolean', instructions: 'Is this about billing?' },
   },
+  maxRetries: 2,
+  abortSignal: ctx.signal,
 });
 
-r.answers.billing.noul; // 0..1
-r.answers.tone.choice; // a criteria key — type-inferred
-r.answers.urgency.score; // float, e.g. 1.3
-r.answers.tone.confidence; // calibrated
+r.answers.tone.choice; // a criteria key
+r.answers.tone.probabilities; // distribution -> confidence
+r.answers.billing.probability; // 0..1
+r.usage; // { inputTokens, outputTokens } -> report into ProviderMeta
 ```
+
+Both callers share one gateway and one credential slot: `providers/jev/live.ts`
+(Person 2's `decide`/`route`) and `providers/jev/browserDecider.ts` (3B's browser
+operation + target).
 
 Many questions in one request is cheap — latency is per-request. Batch aggressively.
 
@@ -94,13 +102,13 @@ These come from the design spec's safety invariants. Do not relax them for conve
 
 ## Who owns what
 
-| Person | Owns | Don't build this unless it's yours |
-| --- | --- | --- |
-| 1 | API, session state, Hermes adapter, SSE, pause/resume/cancel, approvals | the runtime and the loop |
-| 2 | **Jev**, model routing, context builder, privacy labels, risk rules, `authorize_action` | anything deciding *whether* something is allowed |
-| 3A | Tool registry, MCP, plugin manifests, `select_tool_metadata` | the catalog |
-| 3B | Browser tool family, Browserbase + local backends, browser executor, the Jev call | `apps/api/src/core/tools/`, `apps/api/src/providers/{localbrowser,browserbase}/` |
-| 4 | Dashboard, metrics, demo | the UI |
+| Person | Owns                                                                                    | Don't build this unless it's yours                                               |
+| ------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 1      | API, session state, Hermes adapter, SSE, pause/resume/cancel, approvals                 | the runtime and the loop                                                         |
+| 2      | **Jev**, model routing, context builder, privacy labels, risk rules, `authorize_action` | anything deciding _whether_ something is allowed                                 |
+| 3A     | Tool registry, MCP, plugin manifests, `select_tool_metadata`                            | the catalog                                                                      |
+| 3B     | Browser tool family, Browserbase + local backends, browser executor, the Jev call       | `apps/api/src/core/tools/`, `apps/api/src/providers/{localbrowser,browserbase}/` |
+| 4      | Dashboard, metrics, demo                                                                | the UI                                                                           |
 
 If a change lands in someone else's track, **say so instead of building it**. Depend on a
 Protocol and ship a deterministic stub — that is how `authorize_action` is handled today,
@@ -108,13 +116,13 @@ and the spec requires deterministic fallbacks anyway.
 
 ## Repo layout
 
-| Path | What |
-| --- | --- |
-| `apps/api/` | TypeScript/Express scaffold. Works, runs the mock demo. **Superseded for 3B.** |
-| `config/plugins/` | Plugin manifests, one per provider. Empty until sponsor APIs are chosen. |
-| `apps/web/` | React dashboard. Speaks HTTP/SSE; stack-agnostic. |
-| `packages/shared/` | Shared TS types. `domain.ts` is a published API — **additive edits only.** |
-| `docs/` | Design spec, Jev reference, per-person task lists. |
+| Path               | What                                                                           |
+| ------------------ | ------------------------------------------------------------------------------ |
+| `apps/api/`        | TypeScript/Express scaffold. Works, runs the mock demo. **Superseded for 3B.** |
+| `config/plugins/`  | Plugin manifests, one per provider. Empty until sponsor APIs are chosen.       |
+| `apps/web/`        | React dashboard. Speaks HTTP/SSE; stack-agnostic.                              |
+| `packages/shared/` | Shared TS types. `domain.ts` is a published API — **additive edits only.**     |
+| `docs/`            | Design spec, Jev reference, per-person task lists.                             |
 
 **Stack: TypeScript. This is settled — build here.** Person 1's Hermes adapter
 (`apps/api/src/providers/hermes/live.ts`) drives Hermes as a **local subprocess over ACP**
@@ -122,13 +130,13 @@ and the spec requires deterministic fallbacks anyway.
 Hermes install and merged to `main`. ACP is language-agnostic, so the control plane does
 not need to be Python.
 
-Older docs claimed *"the spec says FastAPI and SQLite."* **It does not** — the design
+Older docs claimed _"the spec says FastAPI and SQLite."_ **It does not** — the design
 spec names no stack; that line was copied between documents unchecked. A Python service
 built on that false premise has been deleted; everything lives in `apps/api/`.
 
 **Known gap, Person 1 + Person 2:** Hermes's ACP `_meta.enabled_toolsets` is best-effort
 and did **not** narrow Hermes's own tool search in testing. "Expose only Jev-selected
-tools" is therefore *not enforced* at that boundary — Jev must not hand the adapter a
+tools" is therefore _not enforced_ at that boundary — Jev must not hand the adapter a
 tool list wider than what is actually safe. Hermes's permission callback is the real gate
 hook and is not yet wired to the approval flow.
 
@@ -141,6 +149,17 @@ hook and is not yet wired to the approval flow.
   generic host). Approvals bind to destination, so bind to the per-session value.
 - **Browserbase live-view URLs expire with the session** — `sessions.debug()` returns
   `410 Gone` afterwards. Capture the URL while the session is open.
+- **Playwright/Stagehand `evaluate('el => ...')` silently returns `undefined`.** The
+  string form evaluates an **expression**; a string holding arrow-function source
+  evaluates to a function object, which is not serialisable, so you get `undefined` with
+  no error. Use a self-invoking expression: `evaluate('(() => { ... })()')`. This cost two
+  real bugs — every element role resolved to `'element'`, and an occlusion check that
+  never once returned true. Both looked like working code.
+- **Stagehand v4: `model` is OPTIONAL, but an empty one is fatal.** Passing
+  `model: { apiKey: undefined }` fails the SDK's own `min(1)` validation, so `openSession`
+  dies with a raw zod dump and _nothing_ works. Omit the key entirely when you have no LLM
+  key. Also: `Stagehand.create({ browser })` must run before `browser.context` is usable
+  at all — without it you get "Browser context is unavailable".
 
 ## Verifying your work
 

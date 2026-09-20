@@ -17,38 +17,44 @@
  * classify the tool, not to loosen the default.
  *
  * ============================================================================
- * TODO(person-3): DELETE THIS TABLE.
+ * DONE(person-3): the table is gone. This is now a lookup against the catalog.
  *
- * implementation_plan.md M1 already assigns "implement common tool interface
- * and read/write classification" to the tool registry. Once ToolCatalogEntry
- * carries that classification, this file becomes a lookup against the registry
- * and the hardcoded map goes away. Full handoff, including every other place
- * that has to match: docs/tool-registry-handoff.md
+ * `ToolCatalogEntry.actionKind` carries the classification, so the mapping
+ * lives with the tool as the handoff asked. What is deliberately UNCHANGED:
+ *
+ *   - `explicit` still wins. A graph author who names the kind knows more than
+ *     the catalog does.
+ *   - An unclassified tool still FAILS CLOSED. A tool absent from the catalog,
+ *     or present with no `actionKind`, is treated as irreversible and stops for
+ *     a human. Noisy by design; the fix is to classify the tool, not to loosen
+ *     the default.
+ *
+ * The catalog is injected rather than imported so this file stays pure — core
+ * does not reach into providers. `services/runtime.ts` supplies it once at
+ * startup; until it does, the lookup is empty and EVERYTHING stops for a human,
+ * which is the safe direction to be wrong in.
  * ============================================================================
  */
 
-/** Tool name -> ProposedAction.kind, in core/risk.ts's vocabulary. */
-const TOOL_ACTION_KIND: Record<string, string> = {
-  // Reads. Reversible, run automatically.
-  'browser.navigate': 'read_page',
-  'browser.extract': 'read_page',
-  'web.search': 'read_page',
-  'docs.read': 'read_page',
+/**
+ * Tool name -> action kind, populated from the catalog at startup.
+ *
+ * Empty until `setToolClassifications` runs. An empty index means every tool is
+ * unclassified, which means every tool stops for a human — loud, and safe.
+ */
+let CLASSIFICATIONS: ReadonlyMap<string, string> = new Map();
 
-  // Recoverable: undoable, but only by a human or a support path.
-  'sheets.append': 'update_profile',
-  'calendar.create': 'schedule',
-  'docs.draft': 'create_draft',
+/** Called once at startup with whatever the catalog reports. */
+export function setToolClassifications(
+  entries: readonly { name: string; actionKind?: string }[],
+): void {
+  const next = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.actionKind) next.set(entry.name, entry.actionKind);
+  }
+  CLASSIFICATIONS = next;
+}
 
-  // Irreversible. These always stop for a human.
-  'forms.submit': 'submit_form',
-  'mail.send': 'send_email',
-  'notify.slack': 'send_message',
-  'notify.sms': 'send_message',
-  'payments.charge': 'make_payment',
-};
-
-/** Used when a tool is not in the table. Classifies as ask_human. */
 export const UNKNOWN_TOOL_ACTION_KIND = 'unclassified_tool';
 
 export interface ToolRisk {
@@ -63,12 +69,12 @@ export interface ToolRisk {
  */
 export function toolRisk(tool: string, explicit?: string): ToolRisk {
   if (explicit) return { kind: explicit, unknown: false };
-  const known = TOOL_ACTION_KIND[tool];
+  const known = CLASSIFICATIONS.get(tool);
   if (known) return { kind: known, unknown: false };
   return { kind: UNKNOWN_TOOL_ACTION_KIND, unknown: true };
 }
 
-/** Every tool this table can classify. Handy for seeding demo graphs. */
+/** Every tool the catalog can classify. Handy for seeding demo graphs. */
 export function classifiedTools(): string[] {
-  return Object.keys(TOOL_ACTION_KIND);
+  return [...CLASSIFICATIONS.keys()];
 }

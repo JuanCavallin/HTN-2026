@@ -149,22 +149,29 @@ export const demoPlaybook = definePlaybook<DemoInput>({
         );
         if (!session.ok) throw new Error('Could not open session: ' + session.error.message);
 
-        const extracted = await browser.extract<{ note: string }>(
-          { sessionId: session.data.sessionId, instruction: 'Read ' + source },
-          ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
-        );
+        // try/finally, because a browser session burns concurrency and money
+        // while it is open. Without it, an extract() that throws leaks the
+        // session for the rest of the process's life — and with a live backend
+        // a swarm of N workers leaks N sessions at once. TypeScript has no
+        // `async with`, so this is the only construct that gets it right.
+        try {
+          const extracted = await browser.extract<{ note: string }>(
+            { sessionId: session.data.sessionId, instruction: 'Read ' + source },
+            ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
+          );
 
-        await browser.closeSession(
-          session.data.sessionId,
-          ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
-        );
-
-        return {
-          source,
-          finding: extracted.ok ? extracted.data.note : 'no data',
-          // Deterministic so the demo is identical every time it is rehearsed.
-          flagged: index % 2 === 0,
-        };
+          return {
+            source,
+            finding: extracted.ok ? extracted.data.note : 'no data',
+            // Deterministic so the demo is identical every time it is rehearsed.
+            flagged: index % 2 === 0,
+          };
+        } finally {
+          await browser.closeSession(
+            session.data.sessionId,
+            ctx.callContext({ stepId: step.id, policyRule: 'read-only-public-source' }),
+          );
+        }
       },
     });
 

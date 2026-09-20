@@ -47,12 +47,28 @@ async function main() {
 
   const providers = await api('/api/providers');
   const list = providers.body?.providers ?? [];
-  check('six providers reported', list.length === 6, list.length + ' found');
+  // Seven since Person 3 added `localbrowser` — the LOCAL browser destination,
+  // a separate provider from `browserbase` on purpose so policy can choose
+  // between them and the two produce distinct egress-ledger rows.
+  check('seven providers reported', list.length === 7, list.length + ' found');
   check(
-    'no provider is in live mode without a key',
-    list.every((p) => p.mode !== 'live'),
-    list.map((p) => p.id + '=' + p.mode).join(' '),
+    'localbrowser is registered',
+    list.some((p) => p.id === 'localbrowser'),
+    list.map((p) => p.id).join(' '),
   );
+  // This asserts the MOCK contract, so it only holds when nothing is configured
+  // live. A developer with real keys in .env is not failing the smoke test.
+  const liveProviders = list.filter((p) => p.mode === 'live');
+  if (liveProviders.length === 0) {
+    check('no provider is in live mode without a key', true,
+      list.map((p) => p.id + '=' + p.mode).join(' '));
+  } else {
+    console.log(
+      '  [INFO] live providers configured, mock-contract check skipped -> ' +
+        liveProviders.map((p) => p.id).join(', ') +
+        '   (run with MOCK_ALL=true to assert it)',
+    );
+  }
 
   // REGRESSION GUARD. Registering the `graph` playbook put it in the launch
   // dropdown, which posts an empty input -- and a graph run needs a graphId, so
@@ -201,6 +217,36 @@ async function main() {
   check('GET /api/tools is 200', tools.status === 200, 'status ' + tools.status);
   const catalog = tools.body?.tools ?? [];
   check('catalog returned tools', catalog.length > 0, catalog.length + ' tools');
+  // THE SAFETY ASSERTION. A tool with no actionKind is unclassified, and an
+  // unclassified tool stops for a human -- so a catalog that forgets one is
+  // noisy, not dangerous. But a tool classified into a kind core/risk.ts does
+  // not know silently becomes auto-approved, which is the dangerous direction.
+  const KNOWN_KINDS = new Set([
+    'read_page', 'interact', 'unclassified_tool',
+    'submit_form', 'send_email', 'send_message', 'transfer_funds', 'make_payment',
+    'cancel_service', 'delete', 'publish', 'accept_terms', 'place_order',
+    'schedule', 'book', 'upload_document', 'update_profile', 'create_draft',
+  ]);
+  const unclassified = catalog.filter((t) => !t.actionKind);
+  const unknownKind = catalog.filter((t) => t.actionKind && !KNOWN_KINDS.has(t.actionKind));
+  check(
+    'every tool carries an actionKind for the risk gate',
+    unclassified.length === 0,
+    unclassified.map((t) => t.name).join(', ') || 'all classified',
+  );
+  check(
+    'no tool uses an actionKind core/risk.ts does not know',
+    unknownKind.length === 0,
+    unknownKind.map((t) => t.name + '=' + t.actionKind).join(', ') || 'all recognised',
+  );
+  check(
+    'the irreversible tools are still classified irreversible',
+    ['mail.send', 'forms.submit', 'payments.charge'].every((name) => {
+      const tool = catalog.find((t) => t.name === name);
+      return !tool || ['send_email', 'submit_form', 'make_payment'].includes(tool.actionKind);
+    }),
+  );
+
   check(
     'every tool has a name and a description',
     catalog.every((t) => Boolean(t.name) && Boolean(t.description)),
