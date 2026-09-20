@@ -2172,9 +2172,11 @@ progress::-moz-progress-bar {
   padding-bottom: 24px;
   border-bottom: 1px solid var(--line);
 }
+/* Single column: the chat panel that used to take the first track is gone, and keeping
+   its 30% track squeezed the canvas into it. */
 .editor-workspace .editor-layout {
   display: grid;
-  grid-template-columns: minmax(260px, 30%) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
 }
 .editor-workspace .editor-layout > * {
