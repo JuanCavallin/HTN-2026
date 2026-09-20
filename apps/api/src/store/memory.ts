@@ -12,6 +12,7 @@ import { dirname, resolve } from 'node:path';
 import type {
   AgentGraph,
   Approval,
+  Conversation,
   EgressEvent,
   PiiSpanWithValue,
   Run,
@@ -25,6 +26,7 @@ import { NotFoundError, type ListRunsFilter, type Store } from './types.js';
 
 interface Snapshot {
   graphs?: AgentGraph[];
+  conversations?: Conversation[];
   runs: Run[];
   steps: Step[];
   approvals: Approval[];
@@ -47,6 +49,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   const scheduleDecisions = new Map<string, ScheduleDecision[]>();
   const events = new Map<string, StoredEvent[]>();
   const graphs = new Map<string, AgentGraph>();
+  const conversations = new Map<string, Conversation>();
   /** Monotonic step counter per run, so Step.seq is stable and gap-free. */
   const stepSeq = new Map<string, number>();
 
@@ -65,6 +68,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
   async function save(): Promise<void> {
     const snapshot: Snapshot = {
       graphs: [...graphs.values()],
+      conversations: [...conversations.values()],
       runs: [...runs.values()],
       steps: [...steps.values()],
       approvals: [...approvals.values()],
@@ -97,6 +101,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
       for (const d of snap.scheduleDecisions) push(scheduleDecisions, d.runId, d);
       for (const e of snap.events) push(events, e.runId, e);
       for (const g of snap.graphs ?? []) graphs.set(g.id, g);
+      for (const c of snap.conversations ?? []) conversations.set(c.id, c);
       console.log('[store] hydrated ' + snap.runs.length + ' run(s) from snapshot');
     } catch {
       // No snapshot yet, or it is unreadable. Starting empty is correct.
@@ -230,6 +235,19 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
       const existed = graphs.delete(id);
       if (existed) scheduleSave();
       return existed;
+    },
+
+    /* ------------------------------------------------------- Conversations */
+    async saveConversation(conversation) {
+      conversations.set(conversation.id, conversation);
+      scheduleSave();
+      return conversation;
+    },
+    async getConversation(id) {
+      return conversations.get(id) ?? null;
+    },
+    async listConversations() {
+      return [...conversations.values()].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
 
     /* -------------------------------------------------------------- Events */

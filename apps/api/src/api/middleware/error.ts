@@ -13,6 +13,7 @@ import {
   GraphValidationError,
 } from '../../services/graphs.service.js';
 import { ValidationError } from '../../services/runs.service.js';
+import { SynthesisError } from '../../services/synthesis.service.js';
 import { NotFoundError } from '../../store/types.js';
 import { HttpError } from './validate.js';
 
@@ -41,6 +42,15 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
   if (err instanceof GraphValidationError) {
     res.status(400).json({
+      error: { code: err.code, message: err.message, details: err.details },
+    });
+    return;
+  }
+
+  // The model could not produce a usable graph in two attempts. 422 rather
+  // than 500: the request was well formed, the result was not usable.
+  if (err instanceof SynthesisError) {
+    res.status(422).json({
       error: { code: err.code, message: err.message, details: err.details },
     });
     return;

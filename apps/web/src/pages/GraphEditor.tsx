@@ -1,33 +1,60 @@
 /**
- * The graph page: pick a graph, see its shape, run it.
+ * The graph page: describe a workflow, see its shape, run it.
  *
- * Read-only in Phase 2 -- drag, connect and the node inspector arrive in
- * Phase 4. The node panel below is already the shell that inspector will fill,
- * so the layout does not have to change when editing lands.
+ * Chat and canvas sit side by side on purpose. The chat produces a DOCUMENT,
+ * not a run -- you read what it built, and only then launch it. That gap is the
+ * product; a prompt box that immediately executes would be a different (and
+ * less defensible) thing.
+ *
+ * Drag, connect and the node inspector arrive in Phase 4. The node panel below
+ * is already the shell that inspector will fill.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { styleOf, type GraphNode } from '@htn/shared';
+import { styleOf, type AgentGraph, type Conversation, type GraphNode } from '@htn/shared';
 import { useGraph, useGraphs } from '../hooks/useGraph';
 import { api } from '../lib/api';
+import { ChatPanel } from '../components/chat/ChatPanel';
 import { GraphCanvas } from '../components/graph/GraphCanvas';
 import { Legend } from '../components/graph/Legend';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
-import { Spinner } from '../components/ui/Spinner';
 
 export function GraphEditor() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { graphs } = useGraphs();
-  const activeId = id ?? graphs[0]?.id;
-  const { graph, error } = useGraph(activeId);
+  const { graphs, refresh: refreshGraphs } = useGraphs();
+  const { graph: loaded } = useGraph(id ?? undefined);
 
+  // The chat can replace the graph under us, so the displayed document is local
+  // state seeded from whatever was loaded.
+  const [graph, setGraph] = useState<AgentGraph | null>(null);
+  const [conversation, setConversation] = useState<Conversation | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (loaded) setGraph(loaded);
+  }, [loaded]);
+
+  // With no graph in the URL, show the most recent one so the canvas is not
+  // empty while the chat is still untouched.
+  useEffect(() => {
+    if (!id && !graph && graphs.length > 0) setGraph(graphs[0] as AgentGraph);
+  }, [id, graph, graphs]);
+
+  // A DELIBERATE navigation to a different graph (the dropdown, or a link from
+  // elsewhere) must drop any active conversation. Without this, an existing
+  // conversation keeps the `graphId` it was seeded with, and a message typed
+  // after switching would silently edit the graph you navigated AWAY from
+  // while the canvas shows the one you switched TO. This does not fire when
+  // the chat itself updates `graph` in place -- only when the URL's :id changes.
+  useEffect(() => {
+    setConversation(null);
+  }, [id]);
 
   const launch = async () => {
     if (!graph) return;
@@ -43,29 +70,18 @@ export function GraphEditor() {
     }
   };
 
-  if (error) return <p className="text-sm text-rose-400">{error}</p>;
-
-  if (!graph) {
-    return (
-      <div className="flex items-center gap-2 text-sm text-slate-500">
-        <Spinner />
-        Loading graph…
-      </div>
-    );
-  }
-
-  const selected = graph.nodes.find((n) => n.id === selectedNodeId);
+  const selected = graph?.nodes.find((n) => n.id === selectedNodeId);
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-lg font-semibold text-slate-100">{graph.name}</h1>
-        <Badge tone="muted">v{graph.version}</Badge>
-        <Badge tone="muted">{graph.nodes.length} nodes</Badge>
+        <h1 className="text-lg font-semibold text-slate-100">{graph?.name ?? 'New workflow'}</h1>
+        {graph && <Badge tone="muted">v{graph.version}</Badge>}
+        {graph && <Badge tone="muted">{graph.nodes.length} nodes</Badge>}
         <div className="ml-auto flex items-center gap-2">
-          {graphs.length > 1 && (
+          {graphs.length > 0 && (
             <select
-              value={graph.id}
+              value={graph?.id ?? ''}
               onChange={(event) => navigate('/graphs/' + event.target.value)}
               className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-200"
             >
@@ -76,21 +92,41 @@ export function GraphEditor() {
               ))}
             </select>
           )}
-          <Button onClick={() => void launch()} disabled={launching}>
+          <Button onClick={() => void launch()} disabled={launching || !graph}>
             {launching ? 'Starting…' : 'Run graph'}
           </Button>
         </div>
       </div>
 
-      {graph.description && <p className="text-sm text-slate-400">{graph.description}</p>}
+      {graph?.description && <p className="text-sm text-slate-400">{graph.description}</p>}
       {launchError && <p className="text-xs text-rose-400">{launchError}</p>}
 
-      <GraphCanvas
-        graph={graph}
-        selectedNodeId={selectedNodeId}
-        onSelectNode={setSelectedNodeId}
-        className="h-[560px]"
-      />
+      <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
+        <ChatPanel
+          conversation={conversation}
+          graphId={graph?.id}
+          onConversation={setConversation}
+          onGraph={(next) => {
+            setGraph(next);
+            setSelectedNodeId(undefined);
+            void refreshGraphs();
+          }}
+          className="h-[560px]"
+        />
+
+        {graph ? (
+          <GraphCanvas
+            graph={graph}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
+            className="h-[560px]"
+          />
+        ) : (
+          <div className="flex h-[560px] items-center justify-center rounded-lg border border-dashed border-slate-800 text-sm text-slate-600">
+            Describe a workflow to build one.
+          </div>
+        )}
+      </div>
 
       <Legend />
 

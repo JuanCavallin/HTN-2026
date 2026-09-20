@@ -416,7 +416,150 @@ async function main() {
     );
   }
 
-  console.log('\n9. Rejection path');
+  console.log('\n9. Chat builds a graph, and leaves work for the runtime');
+  const conv = await api('/api/conversations', { method: 'POST' });
+  check('POST /api/conversations is 201', conv.status === 201, 'status ' + conv.status);
+  const convId = conv.body?.conversation?.id;
+  check('the conversation id is a ledger key', String(convId).startsWith('conv_'), convId);
+
+  const turn1 = await api('/api/conversations/' + convId + '/messages', {
+    method: 'POST',
+    body: JSON.stringify({ text: 'Check our vendor portals for overdue invoices' }),
+  });
+  check('a request produces a graph', turn1.status === 200, 'status ' + turn1.status);
+  const built = turn1.body?.graph;
+  check(
+    'the graph has nodes',
+    (built?.nodes ?? []).length > 0,
+    (built?.nodes ?? []).length + ' nodes',
+  );
+
+  // THE POINT OF THE WHOLE PHASE. A synthesiser that pins every tool call
+  // produces a graph that runs while making the decision layer and the agent
+  // harness ornamental. Synthesis rejects that, so a built graph must always
+  // leave something for runtime.
+  const delegation = turn1.body?.delegation;
+  check('the graph is not fully pinned', delegation?.fullyPinned === false);
+  check(
+    'something is left for the decision layer or the harness',
+    (delegation?.deferredToolChoices ?? 0) + (delegation?.agentSubtasks ?? 0) > 0,
+    (delegation?.deferredToolChoices ?? 0) +
+      ' dispatch, ' +
+      (delegation?.agentSubtasks ?? 0) +
+      ' agent',
+  );
+  check(
+    'candidate tools exist for it to narrow',
+    (delegation?.candidateTools ?? 0) > 1,
+    (delegation?.candidateTools ?? 0) + ' candidates',
+  );
+
+  // Synthesis is a real outbound call and must be recorded like any other.
+  const convEgress = await api('/api/runs/' + convId + '/egress');
+  check(
+    'the synthesis call is in the egress ledger',
+    (convEgress.body?.events ?? []).some((e) => e.policyRule === 'graph-synthesis'),
+    (convEgress.body?.events ?? []).length + ' rows under the conversation id',
+  );
+  check(
+    'and it reports what it cost',
+    (convEgress.body?.summary?.totalTokensOut ?? 0) > 0,
+    (convEgress.body?.summary?.totalTokensIn ?? 0) +
+      ' in / ' +
+      (convEgress.body?.summary?.totalTokensOut ?? 0) +
+      ' out',
+  );
+
+  const turn2 = await api('/api/conversations/' + convId + '/messages', {
+    method: 'POST',
+    body: JSON.stringify({ text: 'also summarise the document first and redact any PII' }),
+  });
+  check(
+    'a follow-up edits the SAME graph',
+    turn2.body?.graph?.id === built.id,
+    turn2.body?.graph?.id,
+  );
+  check(
+    'and bumps its version',
+    turn2.body?.graph?.version === built.version + 1,
+    'v' + built.version + ' -> v' + turn2.body?.graph?.version,
+  );
+  check(
+    'the transcript keeps both turns',
+    (turn2.body?.conversation?.messages ?? []).length === 4,
+    (turn2.body?.conversation?.messages ?? []).length + ' messages',
+  );
+
+  // Run what the chat produced, end to end.
+  const chatRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({
+      kind: 'graph',
+      input: { graphId: built.id, variables: { document: 'Contact avery.chen@example.edu' } },
+    }),
+  });
+  check('the synthesised graph launches', chatRun.status === 201, 'status ' + chatRun.status);
+  const chatRunId = chatRun.body?.run?.id;
+  const chatDone = await waitFor(
+    chatRunId,
+    (run) =>
+      run.status === 'succeeded' || run.status === 'failed' || run.status === 'awaiting_approval',
+    60_000,
+  );
+  check(
+    'it reaches a terminal or gated state',
+    Boolean(chatDone),
+    chatDone?.run?.status ?? 'timed out',
+  );
+  check(
+    'the decision layer actually ran inside it',
+    (chatDone?.scheduleDecisions ?? []).length > 0,
+    (chatDone?.scheduleDecisions ?? []).length + ' routing decision(s)',
+  );
+
+  // REGRESSION GUARD. Opening an EXISTING graph and chatting a change must
+  // edit that graph, not silently fork an unrelated new one -- the frontend
+  // has no way to seed this without POST /conversations accepting a graphId,
+  // and forgetting to wire it is invisible until someone notices their edit
+  // produced a different document than the one they were looking at.
+  console.log('\n9b. Chatting on an EXISTING graph edits that graph, not a fork of it');
+  const { body: beforeEdit } = await api('/api/graphs/graph_demo');
+  const seededConv = await api('/api/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ graphId: beforeEdit.graph.id }),
+  });
+  check(
+    'the conversation is seeded with graphId on creation',
+    seededConv.body?.conversation?.graphId === beforeEdit.graph.id,
+  );
+  const seededTurn = await api(
+    '/api/conversations/' + seededConv.body.conversation.id + '/messages',
+    {
+      method: 'POST',
+      body: JSON.stringify({ text: 'also check email for overdue notices' }),
+    },
+  );
+  check(
+    'the edit landed on the SAME graph id',
+    seededTurn.body?.graph?.id === beforeEdit.graph.id,
+    seededTurn.body?.graph?.id + ' vs ' + beforeEdit.graph.id,
+  );
+  check(
+    'and bumped its version rather than creating v1 of something new',
+    seededTurn.body?.graph?.version === beforeEdit.graph.version + 1,
+    'v' + beforeEdit.graph.version + ' -> v' + seededTurn.body?.graph?.version,
+  );
+  const badSeed = await api('/api/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ graphId: 'graph_does_not_exist' }),
+  });
+  check(
+    'seeding with an unknown graphId is rejected up front',
+    badSeed.status === 404,
+    'status ' + badSeed.status,
+  );
+
+  console.log('\n10. Rejection path');
   const second = await api('/api/runs', {
     method: 'POST',
     body: JSON.stringify({ kind: 'demo', input: { workerCount: 2 } }),

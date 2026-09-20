@@ -15,6 +15,11 @@ interface MockTask {
   tools: string[];
 }
 
+/** The mock is always "just active" — see the pollTask note below. */
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
 function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
   const base = mockBase('hermes', CAPABILITIES, cfg.mode);
   /** Fake task state so pollTask returns 'running' once before 'done'. */
@@ -50,7 +55,13 @@ function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
           const n = (task?.polls ?? 0) + 1;
           if (task) task.polls = n;
 
-          if (n < 2) return { status: 'running' as const, log: ['working...'] };
+          // lastActivityAt is always "now": the mock never actually goes
+          // idle, so it should never trip the orchestrator's new
+          // inactivity check. Reporting a stale timestamp here would be a
+          // mock-only false positive that live Hermes would never produce.
+          if (n < 2) {
+            return { status: 'running' as const, log: ['working...'], lastActivityAt: nowIso() };
+          }
 
           // Fabricate an audit trail using whatever tools this task was
           // actually given — this is standing in for Hermes self-reporting
@@ -65,6 +76,7 @@ function createMock(cfg: ProviderConfig): AgentRuntimeAdapter {
             result: { note: 'mock agent runtime completed task ' + taskId },
             log: ['working...', 'done'],
             toolCalls,
+            lastActivityAt: nowIso(),
           };
         },
         { tokensIn: 0, tokensOut: 180 },

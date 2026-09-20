@@ -14,6 +14,7 @@
 import type {
   AgentGraph,
   Approval,
+  Conversation,
   EgressEvent,
   PiiSpanWithValue,
   Run,
@@ -68,6 +69,11 @@ export interface Store {
   getGraph(id: string): Promise<AgentGraph | null>;
   listGraphs(): Promise<AgentGraph[]>;
   deleteGraph(id: string): Promise<boolean>;
+
+  // Conversations. Mutable like graphs, and not scoped to a run.
+  saveConversation(conversation: Conversation): Promise<Conversation>;
+  getConversation(id: string): Promise<Conversation | null>;
+  listConversations(): Promise<Conversation[]>;
 
   // Event log — append-only, monotonic seq per run. Powers SSE replay.
   appendEvent(runId: string, event: RunEvent): Promise<StoredEvent>;

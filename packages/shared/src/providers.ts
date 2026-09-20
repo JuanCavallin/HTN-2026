@@ -127,6 +127,15 @@ export interface AgentRuntimeAdapter extends ProviderAdapter {
        * empty and that blind spot should be called out, not hidden.
        */
       toolCalls?: { tool: string; args?: unknown; at: string }[];
+      /**
+       * ISO timestamp of the last sign of life the runtime reported (a chunk,
+       * a tool call, anything). Lets the caller tell "still working, just
+       * slow" apart from "gone silent" without knowing anything about the
+       * runtime's internals. Optional and self-reported, same convention as
+       * `toolCalls` — a runtime that cannot report it just omits the field,
+       * and the caller falls back to poll-count-only patience.
+       */
+      lastActivityAt?: string;
     }>
   >;
   cancelTask(taskId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;

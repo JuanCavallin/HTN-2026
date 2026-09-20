@@ -210,7 +210,10 @@ export const agentTaskNodeSchema = nodeVariant(
      */
     harness: z.enum(PROVIDER_IDS).optional(),
     pollIntervalMs: z.number().int().min(100).max(60_000).optional(),
-    maxPolls: z.number().int().min(1).max(200).optional(),
+    /** Absolute safety ceiling. See AgentTaskSpec.maxPolls for why this is rarely what actually fires. */
+    maxPolls: z.number().int().min(1).max(2000).optional(),
+    /** Give up if the runtime goes silent this long, even under maxPolls. See AgentTaskSpec. */
+    inactivityTimeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
   }),
 );
 
