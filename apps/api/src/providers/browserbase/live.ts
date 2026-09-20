@@ -64,18 +64,21 @@ import { BROWSERBASE_API_DESTINATION, needsTarget } from '@htn/shared';
 import { config, type ProviderConfig } from '../../config.js';
 
 /**
- * The raw Browserbase SDK, for the live-view URL only. Stagehand does not
- * surface `sessions.debug()`, and the SDK is present in the store as a
- * transitive dependency but is NOT a declared one — pnpm's strict layout means
- * it cannot be imported until someone adds it:
+ * The live-view URL comes from Browserbase's REST API, called directly.
  *
- *     pnpm --filter @htn/api add @browserbasehq/sdk   # dependency owner's call
+ * This USED to go through `@browserbasehq/sdk` via a variable specifier, so the
+ * file would still compile without it. The catch was that the package is only a
+ * transitive dependency under pnpm's strict layout, so the import never
+ * resolved, the URL was always `undefined`, and a live session reported no live
+ * view at all -- silently, because the whole path was written to degrade
+ * quietly. Measured against a real Browserbase run: `interactive: false`, no URL.
  *
- * Imported through a variable specifier so this file compiles and runs without
- * it; the live-view URL is simply `undefined` until it lands, which the UI
- * already handles and which is the truthful answer in the meantime.
+ * Two plain `fetch` calls do the same job with NO new dependency, which also
+ * keeps this off the "only the dependency owner adds packages" path and out of
+ * the hour-30 freeze. If the SDK is ever added for other reasons, this can go
+ * back to using it -- the shape returned here is the contract, not the transport.
  */
-const BROWSERBASE_SDK = '@browserbasehq/sdk';
+const BROWSERBASE_API = 'https://api.browserbase.com/v1';
 
 interface Snapshot {
   id: string;
@@ -287,40 +290,48 @@ function rejected<T>(
   };
 }
 
+/** One Browserbase REST GET. Returns null rather than throwing -- see liveViewUrl. */
+async function bbGet<T>(apiKey: string, path: string): Promise<T | null> {
+  try {
+    const res = await fetch(BROWSERBASE_API + path, {
+      headers: { 'X-BB-API-Key': apiKey },
+      // Generous but bounded: this runs inside openSession, and a hung metadata
+      // call must not hold up a session the caller is waiting on.
+      signal: AbortSignal.timeout(8_000),
+    });
+    return res.ok ? ((await res.json()) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The live-view URL, if the raw SDK is installed. Best effort by design: a
- * missing URL costs the UI an iframe, while a thrown error would cost the run
- * its session.
+ * The live-view URL and the session's region.
+ *
+ * BEST EFFORT BY DESIGN: a missing URL costs the UI a live view, while a thrown
+ * error would cost the run its session. Every failure path here returns
+ * partial data rather than raising -- that is deliberate, not sloppy.
+ *
+ * `debuggerFullscreenUrl` is the INTERACTIVE debug view: a person can click and
+ * type in it. That is what `interactive: true` promises downstream and what
+ * makes a `handoff` node possible, so it is the only field allowed to set it.
+ *
+ * MUST BE CALLED WHILE THE SESSION IS RUNNING. `/debug` returns 410 Gone once a
+ * session stops, so there is no second chance at this after the fact.
  */
 async function liveViewUrl(
   apiKey: string,
   sessionId: string,
 ): Promise<{ url?: string; region?: string }> {
-  try {
-    const mod = (await import(BROWSERBASE_SDK)) as {
-      default?: new (o: { apiKey: string }) => unknown;
-      Browserbase?: new (o: { apiKey: string }) => unknown;
-    };
-    const Ctor = mod.Browserbase ?? mod.default;
-    if (!Ctor) return {};
-    const client = new Ctor({ apiKey }) as {
-      sessions: {
-        debug(id: string): Promise<{ debuggerFullscreenUrl?: string }>;
-        retrieve(id: string): Promise<{ region?: string }>;
-      };
-    };
-    const [debug, session] = await Promise.all([
-      client.sessions.debug(sessionId).catch(() => ({ debuggerFullscreenUrl: undefined })),
-      client.sessions.retrieve(sessionId).catch(() => ({ region: undefined })),
-    ]);
-    return {
-      ...(debug.debuggerFullscreenUrl ? { url: debug.debuggerFullscreenUrl } : {}),
-      ...(session.region ? { region: session.region } : {}),
-    };
-  } catch {
-    // Not installed. Normal, and documented at the top of this file.
-    return {};
-  }
+  const [debug, session] = await Promise.all([
+    bbGet<{ debuggerFullscreenUrl?: string }>(apiKey, '/sessions/' + sessionId + '/debug'),
+    bbGet<{ region?: string }>(apiKey, '/sessions/' + sessionId),
+  ]);
+
+  return {
+    ...(debug?.debuggerFullscreenUrl ? { url: debug.debuggerFullscreenUrl } : {}),
+    ...(session?.region ? { region: session.region } : {}),
+  };
 }
 
 export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
@@ -539,7 +550,14 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
 
         return {
           ok: true as const,
-          data: { sessionId, ...(view.url ? { liveViewUrl: view.url } : {}) },
+          data: {
+            sessionId,
+            // `debuggerFullscreenUrl` is Browserbase's INTERACTIVE debug view,
+            // not a recording: a person can genuinely click and type in it.
+            // That is what makes a `handoff` node possible, so the flag is
+            // tied to having that exact URL and nothing else.
+            ...(view.url ? { liveViewUrl: view.url, interactive: true } : {}),
+          },
           meta: meta('openSession', started, destination),
         };
       } catch (err) {

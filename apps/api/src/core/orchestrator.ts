@@ -22,9 +22,10 @@ import type {
 import { stripPiiValue } from '@htn/shared';
 import type { Store } from '../store/types.js';
 import { newId, nowIso } from '../lib/ids.js';
-import { ApprovalRejectedError, waitForApproval } from './approvalGate.js';
+import { ApprovalRejectedError, waitForApproval, type ApprovalOutcome } from './approvalGate.js';
 import { registerRunContext, releaseRunContext } from './runContexts.js';
 import type { RunBus } from './bus.js';
+import * as runGate from './runGate.js';
 import { buildEgressEvent } from './ledger.js';
 import { detectPii } from './redaction.js';
 import { classify } from './risk.js';
@@ -69,6 +70,63 @@ export class Orchestrator {
   }
 
   /**
+   * Ask a run to pause: block new work, let whatever is already running
+   * finish. See core/runGate.ts for the full model. Returns the updated Run,
+   * or null if this process is not actually executing it (already terminal,
+   * or running in a different process/before a restart).
+   *
+   * Idempotent: pausing an already-pausing or already-paused run is a no-op
+   * that returns the current Run unchanged.
+   */
+  async pause(runId: string): Promise<Run | null> {
+    if (!this.inFlight.has(runId)) return null;
+    const before = await this.deps.store.getRun(runId);
+    if (!before) return null;
+    if (before.control === 'pausing' || before.control === 'paused') return before;
+
+    await this.patchRun(runId, { control: 'pausing' });
+    await runGate.requestPause(runId);
+
+    // A concurrent resume() can win this race (see runGate.requestPause's own
+    // note) -- if so, resumeRun() already patched control back to 'running',
+    // and pausing now would silently re-pause a run the operator just resumed.
+    if (runGate.stateOf(runId) !== 'paused') return this.deps.store.getRun(runId);
+
+    const current = await this.deps.store.getRun(runId);
+    return this.patchRun(runId, {
+      control: 'paused',
+      pauses: [...(current?.pauses ?? []), { at: nowIso() }],
+    });
+  }
+
+  /**
+   * Resume a paused (or still-draining) run. No-op if it is not paused.
+   * Closes the most recent open PauseSpan so analytics can exclude exactly
+   * the time actually spent idle -- not the "pausing" drain, which was real
+   * work finishing, and not time after a race where pause never completed.
+   */
+  async resumeRun(runId: string): Promise<Run | null> {
+    if (!this.inFlight.has(runId)) return null;
+    const current = await this.deps.store.getRun(runId);
+    if (!current) return null;
+    if (current.control === undefined || current.control === 'running') return current;
+
+    const pauses = current.pauses ?? [];
+    const lastIndex = pauses.length - 1;
+    const closed =
+      lastIndex >= 0 && !pauses[lastIndex]?.resumedAt
+        ? pauses.map((pause, i) => (i === lastIndex ? { ...pause, resumedAt: nowIso() } : pause))
+        : pauses;
+
+    const run = await this.patchRun(runId, { control: 'running', pauses: closed });
+    // Order matters: patch the durable record first, THEN release waiters --
+    // a checkpoint() that wakes up and immediately re-reads run state (it
+    // does not today, but a future caller might) must see 'running' already.
+    runGate.resume(runId);
+    return run;
+  }
+
+  /**
    * Fire-and-forget. The HTTP layer responds 201 immediately; progress arrives
    * over SSE. Never await this from a route handler.
    */
@@ -108,6 +166,7 @@ export class Orchestrator {
     } finally {
       this.inFlight.delete(run.id);
       releaseRunContext(run.id);
+      runGate.dispose(run.id);
       void bus;
       void store;
     }
@@ -193,9 +252,12 @@ export class Orchestrator {
       },
 
       step: async (spec, fn) => {
+        // A new step is exactly the "new work" a pause must not let start.
+        // Whatever is already running is untouched -- see core/runGate.ts.
+        await runGate.checkpoint(runId, signal);
         const step = await createStep(spec);
         try {
-          const output = await fn(step);
+          const output = await runGate.track(runId, () => fn(step));
           await this.upsertStep(step.id, {
             status: 'succeeded',
             output: toJson(output),
@@ -213,11 +275,17 @@ export class Orchestrator {
       },
 
       fanOut: async <I, O>(spec: FanOutSpec<I, O>): Promise<FanOutOutcome<O>[]> => {
+        await runGate.checkpoint(runId, signal);
         const parent = await createStep({ label: spec.label, kind: 'swarm', nodeId: spec.nodeId });
 
         const outcomes = await fanOut<I, O>(
           spec.items,
           async (item, index) => {
+            // Checked per worker, not once before the whole fan-out: a pause
+            // requested mid-swarm must stop handing out NEW items while the
+            // ones already in flight run to completion (bounded concurrency
+            // means not every item has started yet when pause is requested).
+            await runGate.checkpoint(runId, signal);
             const child = await createStep({
               label: spec.workerLabel(item, index),
               kind: 'worker',
@@ -226,7 +294,7 @@ export class Orchestrator {
               parentStepId: parent.id,
             });
             try {
-              const value = await spec.worker(item, index, child);
+              const value = await runGate.track(runId, () => spec.worker(item, index, child));
               await this.upsertStep(child.id, {
                 status: 'succeeded',
                 output: toJson(value),
@@ -280,9 +348,29 @@ export class Orchestrator {
         await this.patchRun(runId, { status: 'awaiting_approval' });
         await bus.emit(runId, { type: 'approval.requested', approval });
 
-        // Blocks here. The decide endpoint patches the Approval, emits
-        // approval.resolved, and calls settleApproval() to release this promise.
-        const outcome = await waitForApproval(approval.id, signal);
+        // NOT in-flight work while a human reads this: nothing is running,
+        // so a pause can fully drain (reach 'paused') even with an approval
+        // still pending. release()/reacquire() bracket exactly the wait, so
+        // the enclosing ctx.step's own track() -- which is still "in flight"
+        // for as long as this whole requireApproval call takes -- ends up
+        // balanced regardless of how long the human takes to answer.
+        runGate.release(runId);
+        let outcome: ApprovalOutcome;
+        try {
+          // Blocks here. The decide endpoint patches the Approval, emits
+          // approval.resolved, and calls settleApproval() to release this promise.
+          outcome = await waitForApproval(approval.id, signal);
+        } finally {
+          runGate.reacquire(runId);
+        }
+
+        // Approved: before resuming, honour a pause requested while we were
+        // waiting on the human. Not checked on rejection -- that unwinds the
+        // whole run via the throw below regardless of pause state, so there
+        // is nothing left to hold open for.
+        if (outcome !== 'rejected') {
+          await runGate.checkpoint(runId, signal);
+        }
 
         await this.patchRun(runId, { status: 'running' });
         await this.upsertStep(stepId, { status: 'running' });
@@ -340,6 +428,7 @@ export class Orchestrator {
       callContext: buildCallContext,
 
       runAgentTask: async (spec: AgentTaskSpec): Promise<AgentTaskResult> => {
+        await runGate.checkpoint(runId, signal);
         const step = await createStep({
           label: spec.label,
           kind: 'agent_task',
@@ -422,6 +511,12 @@ export class Orchestrator {
          */
         let toolCalls: HarnessToolCall[] = [];
 
+        // The WHOLE task -- routing through the poll loop through the audit --
+        // is one unit of in-flight work. A pause waits for it to finish
+        // rather than cutting it off mid-turn; see this file's header for
+        // why (a Hermes cancel cannot resume the same turn, and the wait is
+        // already bounded by this task's own time/failure budgets).
+        return runGate.track(runId, async () => {
         try {
           // 1. Route BEFORE starting the task. This is where tool/model
           //    optimization actually happens — see AgentTaskSpec's doc comment
@@ -657,6 +752,7 @@ export class Orchestrator {
           });
           throw err;
         }
+        });
       },
     };
 

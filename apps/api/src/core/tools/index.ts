@@ -60,6 +60,9 @@ export interface ToolPlaneOptions {
   selectedTools?: (stepId: string) => readonly string[] | undefined;
   /** Absolute path to config/plugins/. Omitted means "do not load manifests". */
   pluginDirectory?: string;
+  /** Forwarded to the browser executor. See BrowserExecutorDeps. */
+  onSessionOpened?: BrowserExecutorDeps['onSessionOpened'];
+  onSessionClosed?: BrowserExecutorDeps['onSessionClosed'];
 }
 
 export interface ToolPlane {
@@ -103,6 +106,8 @@ export async function createToolPlane(options: ToolPlaneOptions): Promise<ToolPl
     decide: decider,
     callContext: options.callContext,
     ...(options.composeText ? { composeText: options.composeText } : {}),
+    ...(options.onSessionOpened ? { onSessionOpened: options.onSessionOpened } : {}),
+    ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}),
   });
 
   return {

@@ -61,6 +61,29 @@ export interface BrowserExecutorDeps {
    * on one synthetic run and never reaches the real run's ledger or analytics.
    */
   callContext(args: { runId?: string; stepId?: string; policyRule: string }): ProviderCallContext;
+  /**
+   * Announce a session the moment it opens, so the UI can offer a live view.
+   *
+   * WHY A CALLBACK AND NOT A RETURN VALUE: the live-view URL is only obtainable
+   * at open time (Browserbase 410s afterwards), but most sessions are opened
+   * implicitly, deep inside an operation whose result has no room for it and
+   * whose caller never asked for a session at all. A callback catches every
+   * open on one line; threading it out through every return shape would not.
+   *
+   * Optional, and never awaited on the hot path -- a UI concern must not be
+   * able to fail a browser action.
+   */
+  onSessionOpened?(session: {
+    runId?: string;
+    stepId?: string;
+    sessionId: string;
+    providerId: ProviderId;
+    liveViewUrl?: string;
+    interactive: boolean;
+    startUrl?: string;
+  }): void;
+  /** Symmetric: the live view is dead from here (410 Gone on Browserbase). */
+  onSessionClosed?(session: { runId?: string; sessionId: string }): void;
 }
 
 interface Backend {
@@ -179,9 +202,22 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): ToolExecutor {
     if (operation === 'close') {
       const sessionId = String(args.sessionId ?? '');
       const res = await backend.adapter.closeSession(sessionId, ctx);
+      if (res.ok) notifyClosed(sessionId);
       return res.ok
         ? succeed(action, started, res.meta.destination ?? destination, { closed: sessionId })
         : fail(action, started, destination, 'UPSTREAM', res.error.message);
+    }
+
+    /** Same never-throw contract as onSessionOpened. */
+    function notifyClosed(closed: string): void {
+      try {
+        deps.onSessionClosed?.({
+          ...(action.runId ? { runId: action.runId } : {}),
+          sessionId: closed,
+        });
+      } catch (err) {
+        console.error('[browser] onSessionClosed threw:', err);
+      }
     }
 
     /* -- Everything else needs a session. Open it, ALWAYS release it. ----- */
@@ -207,6 +243,22 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): ToolExecutor {
         }
         sessionId = opened.data.sessionId;
         ownsSession = true;
+
+        // Every open lands here, explicit or implicit. Never awaited and never
+        // allowed to throw: a UI notification must not fail a browser action.
+        try {
+          deps.onSessionOpened?.({
+            ...(action.runId ? { runId: action.runId } : {}),
+            ...(action.stepId ? { stepId: action.stepId } : {}),
+            sessionId,
+            providerId: backend.providerId,
+            ...(opened.data.liveViewUrl ? { liveViewUrl: opened.data.liveViewUrl } : {}),
+            interactive: opened.data.interactive === true,
+            ...(typeof args.url === 'string' ? { startUrl: args.url } : {}),
+          });
+        } catch (err) {
+          console.error('[browser] onSessionOpened threw:', err);
+        }
 
         // `browser.open` is the operation whose whole job is to open one, so it
         // hands the id back and the caller owns it from here.
@@ -410,6 +462,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): ToolExecutor {
               policyRule: 'session-release',
             }),
           )
+          .then(() => notifyClosed(sessionId as string))
           .catch((err: unknown) => {
             // Never let cleanup mask the real error that sent us here.
             console.error('[browser] failed to release session ' + sessionId + ':', err);

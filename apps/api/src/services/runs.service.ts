@@ -20,7 +20,7 @@ import { isTerminal, stripPiiValue } from '@htn/shared';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
 import { forkGraph, GraphNotFoundError } from './graphs.service.js';
 import { newId, nowIso } from '../lib/ids.js';
-import type { ListRunsFilter } from '../store/types.js';
+import { NotFoundError, type ListRunsFilter } from '../store/types.js';
 import { bus, orchestrator, store } from './runtime.js';
 
 export class ValidationError extends Error {
@@ -31,6 +31,27 @@ export class ValidationError extends Error {
   ) {
     super(message);
     this.name = 'ValidationError';
+  }
+}
+
+/**
+ * Thrown by pauseRun/resumeRun when the run exists but this process is not
+ * the one executing it -- already terminal, or started before a restart (see
+ * runs.service.ts's own probeStaleRuns for why that leaves debris rather than
+ * a run this process could still drive). Distinct from "not found": the run
+ * row is real, there is just nothing here to pause or resume.
+ */
+export class RunNotActiveError extends Error {
+  readonly code = 'RUN_NOT_ACTIVE';
+  constructor(id: string, verb: 'paused' | 'resumed') {
+    super(
+      'Run ' +
+        id +
+        ' is not currently executing in this process, so it cannot be ' +
+        verb +
+        ' -- it may already be finished, or this process restarted since it started.',
+    );
+    this.name = 'RunNotActiveError';
   }
 }
 
@@ -159,6 +180,28 @@ export async function cancelRun(id: string): Promise<Run | null> {
     return patched;
   }
   // The orchestrator's abort path writes the terminal status and emits.
+  return run;
+}
+
+/**
+ * Pause a run: block new work from starting, let whatever is already in
+ * flight finish on its own -- see core/runGate.ts for the full model and why
+ * it waits rather than interrupting Hermes mid-turn.
+ */
+export async function pauseRun(id: string): Promise<Run> {
+  const existing = await store.getRun(id);
+  if (!existing) throw new NotFoundError('Run', id);
+  const run = await orchestrator.pause(id);
+  if (!run) throw new RunNotActiveError(id, 'paused');
+  return run;
+}
+
+/** Resume a paused (or still-draining) run. */
+export async function resumeRun(id: string): Promise<Run> {
+  const existing = await store.getRun(id);
+  if (!existing) throw new NotFoundError('Run', id);
+  const run = await orchestrator.resumeRun(id);
+  if (!run) throw new RunNotActiveError(id, 'resumed');
   return run;
 }
 

@@ -77,6 +77,45 @@ export const toolPlaneRoute: ToolRoute = {
   },
 };
 
+/**
+ * The browser family's SESSION LIFECYCLE, and nothing else.
+ *
+ * `toolPlaneRoute` above excludes the whole browser family because "a graph has
+ * no run-scoped cleanup", so an opened session would leak on any failure or
+ * cancel. That was true. It no longer is for these two operations: the graph
+ * interpreter now holds a per-run lease and drains it in a `finally`
+ * (core/graph/interpreter.ts, `releaseHeldSessions`), which is the missing
+ * scope that objection was about.
+ *
+ * SO THE EXEMPTION IS EXACTLY AS WIDE AS THE NEW GUARANTEE, and no wider:
+ * open and close only. `click`, `type` and `submit` stay excluded, because
+ * nothing here has changed about them -- they remain the tool plane's own
+ * business, reached through `web.*` or the harness.
+ *
+ * `gatesItself` is true because the plane's executor runs `authorize_action`
+ * on the concrete action, exactly as it does for every other plane tool.
+ */
+const BROWSER_SESSION_OPERATIONS = ['open', 'close'] as const;
+
+export const browserSessionRoute: ToolRoute = {
+  id: 'browser-session',
+  gatesItself: true,
+
+  async handles(tool) {
+    const descriptor = (await toolPlane()).registry.get(tool);
+    if (descriptor === undefined || descriptor.family !== BROWSER_FAMILY) return false;
+    const operation = tool.slice(tool.lastIndexOf('.') + 1);
+    return (BROWSER_SESSION_OPERATIONS as readonly string[]).includes(operation);
+  },
+
+  providerFor: (ctx) => ctx.providerFor('browser'),
+
+  call: (ctx, request) => toolPlaneRoute.call(ctx, request),
+};
+
 export function registerToolRoutes(): void {
+  // Order matters: routes are asked in registration order and the first match
+  // wins. This one is narrower, so it is asked first.
+  registerToolRoute(browserSessionRoute);
   registerToolRoute(toolPlaneRoute);
 }

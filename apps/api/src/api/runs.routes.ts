@@ -12,7 +12,9 @@ import {
   createRun,
   getRunDetail,
   listRuns,
+  pauseRun,
   probeStaleRuns,
+  resumeRun,
   saveRunAsGraph,
 } from '../services/runs.service.js';
 import { listEgress } from '../services/egress.service.js';
@@ -47,6 +49,22 @@ runsRouter.get('/runs/:id', async (req, res) => {
 runsRouter.post('/runs/:id/cancel', async (req, res) => {
   const run = await cancelRun(param(req, 'id'));
   if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json({ run });
+});
+
+/**
+ * Pause: block new work, let whatever is already running finish -- a wait,
+ * not an interrupt. See core/runGate.ts. 409 (via RunNotActiveError) when the
+ * run exists but this process isn't executing it.
+ */
+runsRouter.post('/runs/:id/pause', async (req, res) => {
+  const run = await pauseRun(param(req, 'id'));
+  res.json({ run });
+});
+
+/** Resume a paused (or still-draining) run. */
+runsRouter.post('/runs/:id/resume', async (req, res) => {
+  const run = await resumeRun(param(req, 'id'));
   res.json({ run });
 });
 

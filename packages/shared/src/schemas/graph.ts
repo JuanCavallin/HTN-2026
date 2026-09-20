@@ -52,6 +52,7 @@ const modelTierSchema = z.enum(['cheap', 'standard', 'frontier']);
  *   judge      yes     decision provider adjudicates
  *   submit     no      tool call BEHIND an approval gate (irreversible)
  *   approval   no      standalone human gate
+ *   handoff    NO      a human acts DIRECTLY in the browser; the agent waits
  *
  * There is a deliberate THREE-RUNG LADDER of delegation here, and the middle
  * rung is the point:
@@ -74,6 +75,7 @@ export const GRAPH_NODE_TYPES = [
   'judge',
   'submit',
   'approval',
+  'handoff',
 ] as const;
 
 export type GraphNodeType = (typeof GRAPH_NODE_TYPES)[number];
@@ -273,6 +275,66 @@ export const approvalNodeSchema = nodeVariant(
   }),
 );
 
+/**
+ * THE HUMAN DOES IT. Not "may the agent do this?" — "the agent must not".
+ *
+ * `approval` asks permission for an action the agent then performs. `submit`
+ * asks permission for a payload the agent then sends. Neither expresses the
+ * case this node exists for: a step that the agent must NEVER perform, because
+ * performing it would mean the value passing through our process.
+ *
+ * Passwords, MFA codes, card numbers, a signature. For these the correct policy
+ * is not a stricter gate — it is that a person acts directly on the page, in an
+ * interactive live view, and the agent resumes afterwards on the same session.
+ *
+ * WHY NOTHING SENSITIVE CAN LEAK THROUGH THIS NODE, structurally:
+ *   - there is no field here to put a secret IN. No `text`, no `args`.
+ *   - the value goes keyboard -> remote page. It is never a {{ref}}, never a
+ *     prompt, never a `Step.output` (which is streamed AND stored), and so it
+ *     never reaches the egress ledger.
+ *   - the ledger row for this span records that a HUMAN acted. "The model never
+ *     saw the credential" becomes a fact you can read off the trace.
+ *
+ * THE RULE THAT MUST NOT BE RELAXED: a handoff is never satisfiable by the
+ * agent. If a timeout here ever falls through to "let the agent try", this node
+ * has become a security hole with a friendly name. `timeoutMs` FAILS the run.
+ */
+export const handoffNodeSchema = nodeVariant(
+  'handoff',
+  z.object({
+    /**
+     * Shown VERBATIM to the person, like an approval's description. Say what
+     * to do and say that we cannot see it — the reassurance is the point.
+     */
+    instruction: z.string().min(1),
+    /**
+     * Where to park the browser. Omit and pass `sessionId` instead to take over
+     * a session an upstream node already opened.
+     */
+    url: z.string().optional(),
+    /**
+     * Reuse an existing session, normally "{{open_portal.sessionId}}". When set,
+     * this node does NOT open (or close) the session — whoever opened it owns it.
+     */
+    sessionId: z.string().optional(),
+    /**
+     * 'human_confirms' blocks until someone clicks Done — always available, and
+     * the only mode that works without a live view. 'url_matches' additionally
+     * resumes on its own once the page reaches `expectUrl`, so the happy path
+     * costs no click.
+     */
+    resumeWhen: z.enum(['human_confirms', 'url_matches']).default('human_confirms'),
+    /** Required by `resumeWhen: 'url_matches'`. Matched as a prefix. */
+    expectUrl: z.string().optional(),
+    /**
+     * Give up waiting and FAIL the run. Never a fall-through to the agent —
+     * see the rule above. Default 600_000 (10 minutes), which is a person
+     * walking away, not a person reading.
+     */
+    timeoutMs: z.number().int().min(5_000).max(1_800_000).optional(),
+  }),
+);
+
 export const graphNodeSchema = z.discriminatedUnion('type', [
   fetchNodeSchema,
   toolNodeSchema,
@@ -284,6 +346,7 @@ export const graphNodeSchema = z.discriminatedUnion('type', [
   judgeNodeSchema,
   submitNodeSchema,
   approvalNodeSchema,
+  handoffNodeSchema,
 ]);
 
 export type GraphNode = z.infer<typeof graphNodeSchema>;

@@ -22,6 +22,7 @@ const TYPE_LABEL: Record<GraphNodeType, string> = {
   judge: 'Judge',
   submit: 'Submit (approval)',
   approval: 'Approval gate',
+  handoff: 'Human takes over',
 };
 
 export function defaultLabelFor(type: GraphNodeType): string {
@@ -82,5 +83,16 @@ export function buildDefaultNode(
       };
     case 'approval':
       return { ...base, type, config: { description: 'Describe what requires approval' } };
+    case 'handoff':
+      return {
+        ...base,
+        type,
+        config: {
+          // Phrased as the reassurance it needs to be: the person is about to
+          // type something we are promising never to see.
+          instruction: 'Sign in with your own credentials. We never see them.',
+          resumeWhen: 'human_confirms',
+        },
+      };
   }
 }

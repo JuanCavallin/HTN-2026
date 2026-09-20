@@ -111,6 +111,48 @@ export function toolPlane(): Promise<ToolPlane> {
       // state — the deterministic fallback then takes every decision, and
       // `decisionSource` reports that truthfully to the UI.
       jevDecider: createJevBrowserDecider(),
+      /**
+       * The browser plane announces its sessions; the run stream carries them
+       * to the UI. `void` on purpose -- bus.emit persists, and a slow write
+       * must not hold up a browser action that has already happened. A session
+       * with no run id belongs to no run and is simply not announced.
+       */
+      onSessionOpened: (session) => {
+        const runId = session.runId;
+        if (!runId) return;
+        void (async () => {
+          // The canvas pins a session to a node, and only the STEP knows which
+          // node it belongs to. Looked up rather than threaded through the
+          // executor, which has no reason to know about graphs at all.
+          const step = session.stepId ? await store.getStep(session.stepId) : null;
+          await bus.emit(runId, {
+            type: 'browser.session.opened',
+            session: {
+              runId,
+              sessionId: session.sessionId,
+              ...(session.stepId ? { stepId: session.stepId } : {}),
+              ...(step?.nodeId ? { nodeId: step.nodeId } : {}),
+              providerId: session.providerId,
+              ...(session.liveViewUrl ? { liveViewUrl: session.liveViewUrl } : {}),
+              interactive: session.interactive,
+              ...(session.startUrl ? { startUrl: session.startUrl } : {}),
+              openedAt: nowIso(),
+            },
+          });
+        })().catch((err: unknown) => console.error('[browser] session.opened emit failed:', err));
+      },
+      onSessionClosed: (session) => {
+        const runId = session.runId;
+        if (!runId) return;
+        void bus
+          .emit(runId, {
+            type: 'browser.session.closed',
+            runId,
+            sessionId: session.sessionId,
+            at: nowIso(),
+          })
+          .catch((err: unknown) => console.error('[browser] session.closed emit failed:', err));
+      },
       descriptors: {
         localAvailable: config.providers.localbrowser.mode !== 'disabled',
         browserbaseAvailable: Boolean(config.providers.browserbase.apiKey),

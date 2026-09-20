@@ -5,6 +5,7 @@
  * anything it doesn't recognise, so an older tab never breaks on a newer server.
  */
 
+import type { BrowserSessionRecord } from './browser.js';
 import type { Approval, EgressEvent, Iso, PiiSpan, Run, Step } from './domain.js';
 import type { ScheduleDecision } from './scheduling.js';
 
@@ -16,6 +17,18 @@ export type RunEvent =
   | { type: 'egress.logged'; egress: EgressEvent }
   | { type: 'pii.detected'; span: PiiSpan }
   | { type: 'schedule.decided'; decision: ScheduleDecision }
+  /**
+   * A browser session became watchable. Announced on the stream rather than
+   * carried on a step because the opening node is often not the node you want
+   * to watch — see BrowserSessionRecord for the full reasoning.
+   */
+  | { type: 'browser.session.opened'; session: BrowserSessionRecord }
+  /**
+   * The session was released. The UI must stop showing its live view as live:
+   * Browserbase's debug URL returns 410 Gone from this moment, so an iframe
+   * left pointed at it renders an error rather than a page.
+   */
+  | { type: 'browser.session.closed'; runId: string; sessionId: string; at: Iso }
   | { type: 'log'; runId: string; level: 'info' | 'warn' | 'error'; message: string; at: Iso };
 
 export type RunEventType = RunEvent['type'];
@@ -39,6 +52,12 @@ export interface RunView {
   egress: EgressEvent[];
   piiSpans: PiiSpan[];
   scheduleDecisions: ScheduleDecision[];
+  /**
+   * Browser sessions this run opened, newest last. `closedAt` is set in place
+   * when the matching close event arrives, so a finished run still lists every
+   * session it used — the panel needs that to show a decision replay.
+   */
+  browserSessions: (BrowserSessionRecord & { closedAt?: Iso })[];
   logs: { level: 'info' | 'warn' | 'error'; message: string; at: Iso }[];
   /** Highest `seq` applied. Used as the replay cursor on reconnect. */
   lastSeq: number;
@@ -51,6 +70,7 @@ export const emptyRunView: RunView = {
   egress: [],
   piiSpans: [],
   scheduleDecisions: [],
+  browserSessions: [],
   logs: [],
   lastSeq: 0,
 };

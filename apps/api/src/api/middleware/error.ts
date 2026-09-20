@@ -12,7 +12,7 @@ import {
   GraphNotFoundError,
   GraphValidationError,
 } from '../../services/graphs.service.js';
-import { ValidationError } from '../../services/runs.service.js';
+import { RunNotActiveError, ValidationError } from '../../services/runs.service.js';
 import { SynthesisError } from '../../services/synthesis.service.js';
 import { NotFoundError } from '../../store/types.js';
 import { HttpError } from './validate.js';
@@ -70,6 +70,14 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
   if (err instanceof NotFoundError) {
     res.status(404).json({ error: { code: err.code, message: err.message } });
+    return;
+  }
+
+  // The run exists but this process isn't executing it -- already terminal,
+  // or orphaned by a restart. A retry against a different process won't fix
+  // this either, but it's the caller's state to know about, not a server bug.
+  if (err instanceof RunNotActiveError) {
+    res.status(409).json({ error: { code: err.code, message: err.message } });
     return;
   }
 

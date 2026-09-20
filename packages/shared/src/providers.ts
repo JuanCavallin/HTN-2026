@@ -219,7 +219,20 @@ export interface BrowserAdapter extends ProviderAdapter {
   openSession(
     input: { startUrl?: string },
     ctx: ProviderCallContext,
-  ): Promise<ProviderResult<{ sessionId: string; liveViewUrl?: string }>>;
+  ): Promise<
+    ProviderResult<{
+      sessionId: string;
+      liveViewUrl?: string;
+      /**
+       * True ONLY when a human can type into `liveViewUrl`. A `handoff` node
+       * refuses to run without it, so it must be a promise the adapter can
+       * actually keep — never inferred from the URL merely existing. An
+       * adapter that serves a recording, a screenshot strip or a read-only
+       * stream leaves this false.
+       */
+      interactive?: boolean;
+    }>
+  >;
   act(
     input: { sessionId: string; instruction: string },
     ctx: ProviderCallContext,

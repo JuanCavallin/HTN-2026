@@ -17,7 +17,7 @@
  * the bug is upstream in a provider adapter's `meta`, not in this file.
  */
 
-import type { Approval, EgressEvent, Run, Step, StepStatus } from './domain.js';
+import type { Approval, EgressEvent, PauseSpan, Run, Step, StepStatus } from './domain.js';
 import type { ModelTier } from './providers.js';
 import type { GraphAssertion } from './schemas/graph.js';
 import type { ScheduleDecision } from './scheduling.js';
@@ -177,8 +177,8 @@ function ms(iso?: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-/** Elapsed across a set of steps: last end (or `now` if still open) minus first start. */
-function spanMs(steps: Step[], now: number): number {
+/** First start and last end (or `now` if still open) across a set of steps. */
+function spanBounds(steps: Step[], now: number): { first: number; last: number } | null {
   let first = Number.POSITIVE_INFINITY;
   let last = Number.NEGATIVE_INFINITY;
 
@@ -190,8 +190,38 @@ function spanMs(steps: Step[], now: number): number {
     if (ended !== null && ended > last) last = ended;
   }
 
-  if (!Number.isFinite(first) || !Number.isFinite(last)) return 0;
-  return Math.max(0, last - first);
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+  return { first, last };
+}
+
+/** Elapsed across a set of steps: last end (or `now` if still open) minus first start. */
+function spanMs(steps: Step[], now: number): number {
+  const bounds = spanBounds(steps, now);
+  return bounds ? Math.max(0, bounds.last - bounds.first) : 0;
+}
+
+/**
+ * How much of [from, to] a run spent paused.
+ *
+ * Only the OVERLAP counts. A pause before the first step or after the last one
+ * lies outside the span the steps cover, and subtracting it would understate
+ * the run. An open pause runs up to `now`.
+ */
+export function pausedOverlapMs(
+  pauses: PauseSpan[] | undefined,
+  from: number,
+  to: number,
+  now: number,
+): number {
+  if (!pauses || pauses.length === 0) return 0;
+  let total = 0;
+  for (const pause of pauses) {
+    const start = ms(pause.at);
+    if (start === null) continue;
+    const end = ms(pause.resumedAt) ?? now;
+    total += Math.max(0, Math.min(end, to) - Math.max(start, from));
+  }
+  return total;
 }
 
 /** The agent runtime writes { toolCallCount } onto its step's output. */
@@ -301,8 +331,15 @@ export function rollup(input: RollupInput, now: number = Date.now()): RunAnalyti
   const unattributed = orphans.length > 0 ? metricsFor('', orphans, egress, decisions, now) : null;
 
   const egressSummary = summarise(egress);
+  // Paused time is excluded: a run left paused for an hour did not take an hour,
+  // and counting it would wreck the parallelism factor (provider time / wall time),
+  // which is a headline number.
+  const bounds = spanBounds(steps, now);
+  const activeSpan = bounds
+    ? Math.max(0, bounds.last - bounds.first - pausedOverlapMs(run.pauses, bounds.first, bounds.last, now))
+    : 0;
   const wallMs =
-    spanMs(steps, now) || Math.max(0, (ms(run.updatedAt) ?? now) - (ms(run.createdAt) ?? now));
+    activeSpan || Math.max(0, (ms(run.updatedAt) ?? now) - (ms(run.createdAt) ?? now));
   const providerLatencyMs = egress.reduce((sum, e) => sum + (e.latencyMs ?? 0), 0);
 
   const toolsAvailable = decisions.reduce((sum, d) => sum + d.availableTools.length, 0);

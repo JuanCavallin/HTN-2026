@@ -188,6 +188,11 @@ export const api = {
 
   cancelRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/cancel', { method: 'POST' }),
 
+  /** Blocks new work; whatever is already running finishes on its own. */
+  pauseRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/pause', { method: 'POST' }),
+
+  resumeRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/resume', { method: 'POST' }),
+
   /** "Save as a new task": fork the graph THIS run executed into a new document. */
   saveRunAsGraph: (id: string) =>
     request<{ graph: AgentGraph }>('/runs/' + id + '/save-as-graph', { method: 'POST' }),

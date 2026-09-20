@@ -37,11 +37,13 @@ import '@xyflow/react/dist/style.css';
 import {
   executorOf,
   type AgentGraph,
+  type Approval,
   type RunAnalytics,
   type Step,
   type StepStatus,
 } from '@htn/shared';
 import { NodeCard, type NodeCardData } from './NodeCard';
+import { BrowserPanel, type PanelSession } from './BrowserPanel';
 import { EXECUTOR_CLASSES } from './palette';
 
 const NODE_TYPES = { agentNode: NodeCard };
@@ -59,6 +61,16 @@ const RANK: Record<StepStatus, number> = {
   succeeded: 1,
   skipped: 0,
 };
+
+/** Just the host, for the node's one-line mark. A full URL never fits. */
+function hostOf(url?: string): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
 
 function statusByNode(steps: Step[]): Map<string, StepStatus> {
   const out = new Map<string, StepStatus>();
@@ -86,6 +98,12 @@ export interface GraphCanvasProps {
   onConnectNodes?: (source: string, target: string) => void;
   onDeleteNode?: (nodeId: string) => void;
   onDeleteEdge?: (edgeId: string) => void;
+  /** Browser sessions this run opened. Omit in the editor. */
+  browserSessions?: PanelSession[];
+  /** Pending approvals, so a handoff can be resumed from inside the panel. */
+  approvals?: Approval[];
+  onResumeHandoff?: (approvalId: string) => void;
+  resumeBusy?: boolean;
 }
 
 export function GraphCanvas({
@@ -100,8 +118,64 @@ export function GraphCanvas({
   onConnectNodes,
   onDeleteNode,
   onDeleteEdge,
+  browserSessions,
+  approvals,
+  onResumeHandoff,
+  resumeBusy,
 }: GraphCanvasProps) {
   const statuses = useMemo(() => statusByNode(steps ?? []), [steps]);
+
+  /** Which session's panel is open. null = none, and that is the default. */
+  const [watching, setWatching] = useState<string | null>(null);
+
+  /**
+   * A handoff parks a session and waits for a person. That pending approval is
+   * matched to its session through the payload the handoff node wrote
+   * (interpreter.ts), so the node can shout "your turn" rather than the person
+   * having to find the approval panel further down the page.
+   */
+  const handoffBySession = useMemo(() => {
+    const map = new Map<string, Approval>();
+    for (const approval of approvals ?? []) {
+      if (approval.status !== 'pending') continue;
+      const action = approval.proposedAction;
+      if (!action || typeof action !== 'object' || Array.isArray(action)) continue;
+      const sessionId = (action as Record<string, unknown>).sessionId;
+      if (typeof sessionId === 'string') map.set(sessionId, approval);
+    }
+    return map;
+  }, [approvals]);
+
+  /** One session per node -- the most recent, when a node opened several. */
+  const browserByNode = useMemo(() => {
+    const map = new Map<string, NonNullable<NodeCardData['browser']>>();
+    for (const session of browserSessions ?? []) {
+      if (!session.nodeId) continue;
+      map.set(session.nodeId, {
+        sessionId: session.sessionId,
+        host: hostOf(session.startUrl),
+        live: !session.closedAt,
+        awaitingHuman: handoffBySession.has(session.sessionId),
+      });
+    }
+    return map;
+  }, [browserSessions, handoffBySession]);
+
+  const openSession = useMemo(
+    () => (browserSessions ?? []).find((s) => s.sessionId === watching) ?? null,
+    [browserSessions, watching],
+  );
+
+  /**
+   * Open the panel on its own when a handoff starts waiting. The alternative is
+   * a run that has silently stopped with the reason hidden one click away,
+   * which is the single worst state this page can be in.
+   */
+  useEffect(() => {
+    if (watching !== null) return;
+    const waiting = (browserSessions ?? []).find((s) => handoffBySession.has(s.sessionId));
+    if (waiting) setWatching(waiting.sessionId);
+  }, [browserSessions, handoffBySession, watching]);
 
   const metricsByNode = useMemo(() => {
     const map = new Map<string, RunAnalytics['nodes'][number]>();
@@ -125,9 +199,20 @@ export function GraphCanvas({
           onOpen: onSelectNode,
           editable,
           onDelete: onDeleteNode,
+          ...(browserByNode.get(node.id) ? { browser: browserByNode.get(node.id) } : {}),
+          onWatchBrowser: setWatching,
         },
       })),
-    [graph.nodes, statuses, metricsByNode, selectedNodeId, onSelectNode, editable, onDeleteNode],
+    [
+      graph.nodes,
+      statuses,
+      metricsByNode,
+      selectedNodeId,
+      onSelectNode,
+      editable,
+      onDeleteNode,
+      browserByNode,
+    ],
   );
 
   // Local copy so a drag feels instant. Resynced whenever the graph document
@@ -138,7 +223,7 @@ export function GraphCanvas({
   useEffect(() => {
     setRfNodes(buildNodes());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, statuses, metricsByNode, selectedNodeId, editable]);
+  }, [graph, statuses, metricsByNode, selectedNodeId, editable, browserByNode]);
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<Node<NodeCardData>>[]) => {
@@ -222,7 +307,9 @@ export function GraphCanvas({
   );
 
   return (
-    <div className={'w-full overflow-hidden rounded-lg border border-slate-800 ' + className}>
+    <div
+      className={'relative w-full overflow-hidden rounded-lg border border-slate-800 ' + className}
+    >
       <ReactFlow
         nodes={rfNodes}
         edges={edges}
@@ -258,6 +345,21 @@ export function GraphCanvas({
           }}
         />
       </ReactFlow>
+
+      {/* Docked, not modal: the graph dims but stays on screen, so you never
+          lose track of WHICH node this browser belongs to. See BrowserPanel. */}
+      {openSession && (
+        <BrowserPanel
+          session={openSession}
+          steps={(steps ?? []).filter((step) => step.nodeId === openSession.nodeId)}
+          {...(handoffBySession.get(openSession.sessionId)
+            ? { handoff: handoffBySession.get(openSession.sessionId) }
+            : {})}
+          {...(onResumeHandoff ? { onResume: onResumeHandoff } : {})}
+          {...(resumeBusy !== undefined ? { busy: resumeBusy } : {})}
+          onClose={() => setWatching(null)}
+        />
+      )}
     </div>
   );
 }

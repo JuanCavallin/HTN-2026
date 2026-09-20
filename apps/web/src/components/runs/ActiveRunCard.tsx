@@ -40,11 +40,18 @@ export function ActiveRunCard({ runId }: { runId: string }) {
       <div className="flex items-center gap-2">
         <span className="truncate text-sm font-medium text-slate-200">{run.title}</span>
         <Badge tone={RUN_STATUS_TONE[run.status]}>{humanStatus(run.status)}</Badge>
+        {/* Operator pause is a separate axis from run.status -- see
+            core/runGate.ts -- so it needs its own mark even on a run that
+            still reads "running" underneath. */}
+        {run.control === 'pausing' && <Badge tone="warn">pausing</Badge>}
+        {run.control === 'paused' && <Badge tone="muted">paused</Badge>}
         <span className="ml-auto shrink-0 text-xs text-slate-600">{duration(run.createdAt)}</span>
       </div>
 
       <div className="mt-1.5 flex items-center gap-2 text-xs text-slate-400">
-        {run.status === 'running' && <Spinner className="h-3 w-3 shrink-0" />}
+        {run.status === 'running' && run.control !== 'paused' && (
+          <Spinner className="h-3 w-3 shrink-0" />
+        )}
         {pendingApproval ? (
           <span className="truncate text-amber-300">waiting on: {pendingApproval.question}</span>
         ) : active ? (

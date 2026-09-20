@@ -19,8 +19,32 @@ import { Spinner } from '../components/ui/Spinner';
 
 export function RunDetail() {
   const { id } = useParams<{ id: string }>();
-  const { run, steps, approvals, egress, piiSpans, scheduleDecisions, logs, connected } =
-    useRunStream(id);
+  const {
+    run,
+    steps,
+    approvals,
+    egress,
+    piiSpans,
+    scheduleDecisions,
+    browserSessions,
+    logs,
+    connected,
+  } = useRunStream(id);
+
+  // Resuming a handoff is the same POST an approval decision uses -- a handoff
+  // IS an approval, with a browser attached. See interpreter.ts's runHandoff.
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const resumeHandoff = async (approvalId: string) => {
+    setResumeBusy(true);
+    try {
+      await api.decide(approvalId, { decision: 'approved' });
+    } catch {
+      // The approval panel below is still on screen and shows the same
+      // action, so a failure here is recoverable without a second error path.
+    } finally {
+      setResumeBusy(false);
+    }
+  };
 
   // Sticky across runs and reloads: someone debugging a harness wants every
   // run they open to come up expanded, not to re-flip the switch each time.
@@ -70,6 +94,15 @@ export function RunDetail() {
   const pending = approvals.filter((a) => a.status === 'pending');
   const running = !isTerminal(run.status);
 
+  // A pause is a WAIT, not an interrupt: nothing new starts, but whatever is
+  // already in flight finishes on its own (see core/runGate.ts). `pausing`
+  // vs `paused` is the difference between "draining" and "fully stopped" --
+  // shown separately because a Hermes agent_task can hold the drain open for
+  // a while, and that is expected, not stuck.
+  const pausing = run.control === 'pausing';
+  const paused = run.control === 'paused';
+  const waitingOn = steps.filter((s) => s.status === 'running').map((s) => s.label);
+
   return (
     <div className="space-y-5">
       <div>
@@ -80,6 +113,15 @@ export function RunDetail() {
         <div className="mt-1 flex flex-wrap items-center gap-2">
           <h1 className="text-lg font-semibold text-slate-100">{run.title}</h1>
           <Badge tone={RUN_STATUS_TONE[run.status]}>{humanStatus(run.status)}</Badge>
+          {pausing && (
+            <Badge tone="warn">
+              <span className="flex items-center gap-1.5">
+                <Spinner className="h-2 w-2" />
+                pausing
+              </span>
+            </Badge>
+          )}
+          {paused && <Badge tone="muted">paused</Badge>}
           {connected && running && (
             <span className="flex items-center gap-1.5 text-xs text-slate-500">
               <Spinner className="h-2 w-2" />
@@ -87,15 +129,39 @@ export function RunDetail() {
             </span>
           )}
           {running && (
-            <Button
-              variant="ghost"
-              className="ml-auto"
-              onClick={() => void api.cancelRun(run.id).catch(() => undefined)}
-            >
-              Cancel
-            </Button>
+            <div className="ml-auto flex items-center gap-2">
+              {pausing || paused ? (
+                <Button
+                  variant="ghost"
+                  onClick={() => void api.resumeRun(run.id).catch(() => undefined)}
+                >
+                  Resume
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  onClick={() => void api.pauseRun(run.id).catch(() => undefined)}
+                >
+                  Pause
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                onClick={() => void api.cancelRun(run.id).catch(() => undefined)}
+              >
+                Cancel
+              </Button>
+            </div>
           )}
         </div>
+
+        {pausing && (
+          <p className="mt-1 text-xs text-amber-300">
+            {waitingOn.length > 0
+              ? 'Pausing — nothing new will start. Waiting on: ' + waitingOn.join(', ')
+              : 'Pausing — nothing new will start. Finishing up…'}
+          </p>
+        )}
 
         <p className="mt-1 text-xs text-slate-600">
           {run.kind} · {run.id} · started {relativeTime(run.createdAt)}
@@ -125,7 +191,16 @@ export function RunDetail() {
             )
           }
         >
-          <GraphCanvas graph={graph} steps={steps} analytics={analytics} className="h-[460px]" />
+          <GraphCanvas
+            graph={graph}
+            steps={steps}
+            analytics={analytics}
+            browserSessions={browserSessions}
+            approvals={approvals}
+            onResumeHandoff={(approvalId) => void resumeHandoff(approvalId)}
+            resumeBusy={resumeBusy}
+            className="h-[460px]"
+          />
           <div className="mt-3">
             <Legend compact />
           </div>
