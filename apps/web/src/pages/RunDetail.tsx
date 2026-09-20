@@ -1,10 +1,14 @@
+import { useMemo } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { isTerminal } from '@htn/shared';
+import { isTerminal, rollup } from '@htn/shared';
 import { useRunStream } from '../hooks/useRunStream';
+import { useRunGraph } from '../hooks/useGraph';
 import { api } from '../lib/api';
 import { humanStatus, relativeTime, RUN_STATUS_TONE } from '../lib/format';
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel';
 import { EgressLedger } from '../components/egress/EgressLedger';
+import { GraphCanvas } from '../components/graph/GraphCanvas';
+import { Legend } from '../components/graph/Legend';
 import { StepTimeline } from '../components/runs/StepTimeline';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -13,7 +17,19 @@ import { Spinner } from '../components/ui/Spinner';
 
 export function RunDetail() {
   const { id } = useParams<{ id: string }>();
-  const { run, steps, approvals, egress, piiSpans, logs, connected } = useRunStream(id);
+  const { run, steps, approvals, egress, piiSpans, scheduleDecisions, logs, connected } =
+    useRunStream(id);
+
+  // The graph this run executed. Uses the run's own snapshot, so editing the
+  // graph afterwards never changes what this page shows.
+  const graph = useRunGraph(run?.input ?? null);
+
+  // THE SAME rollup() the API serves at /runs/:id/analytics, run client-side
+  // over the stream. No request, and the numbers update live as steps arrive.
+  const analytics = useMemo(
+    () => (run ? rollup({ run, steps, egress, scheduleDecisions, approvals }) : null),
+    [run, steps, egress, scheduleDecisions, approvals],
+  );
 
   if (!run) {
     return (
@@ -65,6 +81,29 @@ export function RunDetail() {
         <ApprovalPanel key={approval.id} approval={approval} />
       ))}
 
+      {graph && (
+        <Card
+          title="Graph"
+          actions={
+            analytics && (
+              <span className="text-xs text-slate-500">
+                {analytics.totals.tokensIn + analytics.totals.tokensOut} tokens ·{' '}
+                {analytics.totals.llmCalls} model calls ·{' '}
+                {analytics.totals.estimatedCostCents.toFixed(4)}¢
+              </span>
+            )
+          }
+        >
+          <GraphCanvas graph={graph} steps={steps} analytics={analytics} className="h-[460px]" />
+          <div className="mt-3">
+            <Legend compact />
+          </div>
+        </Card>
+      )}
+
+      {/* Kept alongside the canvas on purpose: the timeline is the fallback
+          that works for every run, including hand-written playbooks with no
+          graph behind them. */}
       <Card title="Steps">
         <StepTimeline steps={steps} />
       </Card>

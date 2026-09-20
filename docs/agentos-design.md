@@ -11,9 +11,11 @@ context scope, action risk, and whether the overall task is complete. Determinis
 AgentOS policy remains the final authority for privacy, permissions, verification, and
 external side effects.
 
-AgentOS does not replace or fork the agent loop. The reusable product is the control
-plane; harness-specific plugins/adapters translate model and tool boundaries into its
-contracts.
+The user starts and supervises a run from the AgentOS dashboard. AgentOS owns the outer
+control loop and canonical session state; its Hermes adapter starts and resumes Hermes's
+inner agent loop over ACP. AgentOS does not fork or reimplement the harness. Reusing the
+product with another harness means translating that harness's model, tool, and lifecycle
+boundaries into the same contracts.
 
 ## MVP Boundary
 
@@ -25,45 +27,58 @@ Included: one Hermes adapter, Jev with a deterministic fallback, local/private a
 model routes, 2–3 live providers, a 50+ tool catalog containing clearly labeled fixtures,
 one complete demo playbook, real-time intervention, and measured evaluation.
 
-Excluded: a custom agent loop, multiple production harness adapters, a plugin
+Excluded: a replacement inner agent loop, multiple production harness adapters, a plugin
 marketplace, enterprise RBAC, production secret management, learned policies,
 distributed execution, and cloud deployment.
 
 ## Architecture
 
 ```text
-Dashboard ↔ AgentOS API ↔ Canonical Session State ↔ Trace/Metrics
-                         │
-                         ├─ Jev Scheduler + Completion Judge
-                         ├─ Model Gateway + Context Builder
-                         ├─ Tool Registry + Policy Gate
-                         └─ Harness Adapter ↔ Agent Loop
-                                  (Hermes MVP)
+Dashboard (start, observe, intervene)
+        ↕ HTTP + SSE
+AgentOS API + Outer Run Controller ↔ Canonical Session State ↔ Trace/Metrics
+        │                                      ↑
+        └─ Hermes ACP Adapter ↔ Hermes Inner Agent Loop
+                                  │
+                                  ├─ model request → AgentOS Model Gateway
+                                  │                   ├─ local privacy/policy eligibility
+                                  │                   ├─ Jev model + tool selection
+                                  │                   └─ OpenRouter or local model
+                                  │
+                                  └─ tool call → AgentOS MCP Tool Gateway
+                                                      ├─ exact-action policy/approval
+                                                      └─ Composio or local executor
 ```
 
-| Component | Responsibility |
-| --- | --- |
-| API | Runs, pause/resume, cancellation, approvals, revisions, and SSE events |
-| Session state | Objective, plan, messages, artifacts, tool results, labels, decisions, and progress |
-| Jev | Recommends routing, risk, next-step intent, and task completion |
-| Model gateway | Maps approved routes to providers and records usage, cost, latency, and errors |
-| Context builder | Produces minimal context while preserving provenance and sensitivity labels |
-| Tool registry | Normalizes tools and exposes only eligible metadata, schemas, and executors |
-| Policy gate | Enforces privacy, permissions, risk, approval, and exact-action authorization |
-| Harness adapter | Connects model/tool boundaries without leaking harness types into AgentOS core |
-| Dashboard | Shows the live trace and supports user intervention |
+| Component                | Responsibility                                                                                                                                             |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API and outer controller | Starts Hermes runs from the dashboard; handles continuation, completion, pause/resume, cancellation, approvals, revisions, and SSE events                  |
+| Session state            | Objective, plan, messages, artifacts, tool results, labels, decisions, and progress                                                                        |
+| Jev                      | Recommends routing, risk, next-step intent, and task completion                                                                                            |
+| Model gateway            | Accepts Hermes's OpenAI-compatible wire format, filters the per-call tool schemas, selects an approved model, and records usage, cost, latency, and errors |
+| Context builder          | Produces minimal context while preserving provenance and sensitivity labels                                                                                |
+| Tool registry            | Normalizes tools and exposes only eligible metadata, schemas, and executors                                                                                |
+| Policy gate              | Enforces privacy, permissions, risk, approval, and exact-action authorization                                                                              |
+| Harness adapter          | Starts/resumes the Hermes inner loop and translates lifecycle events without leaking harness types into AgentOS core                                       |
+| Dashboard                | Collects the user's task, starts the wrapped Hermes run, shows the entire live trace, and supports intervention                                            |
 
 ## Step Lifecycle
 
-1. Build the smallest useful context packet from canonical session state.
-2. Filter ineligible models and tools using hard privacy and permission rules.
+1. The user submits a task in the dashboard; AgentOS creates the canonical session and
+   starts a Hermes ACP session.
+2. Before each Hermes model call, build the smallest useful context packet and locally
+   filter ineligible models and tools using hard privacy and permission rules.
 3. Ask Jev for a model route, tool subset, context scope, and provisional action policy.
-4. Constrain Jev’s recommendation with deterministic policy and budget limits.
-5. Let the harness reason with only the approved context and tool schemas.
-6. Authorize the exact proposed tool call before execution.
-7. Record the route, context, policy, tools, latency, tokens, cost, and outcome.
-8. Verify the result, escalate if necessary, and ask Jev whether the task is done.
-9. Continue, pause, or finish; stream every decision to the dashboard.
+4. Constrain Jev's recommendation with deterministic policy and budget limits, then send
+   only approved context and tool schemas to the selected model.
+5. If the model proposes a tool, authorize its exact arguments, destination, and data
+   before the AgentOS MCP gateway executes it through Composio or a local executor.
+6. Record the route, context, policy, tools, latency, tokens, cost, and outcome.
+7. When the Hermes inner turn is quiescent, verify the result and ask Jev for
+   `done`, `continue`, or `blocked` from the sanitized session state.
+8. On verified `done`, close the run. On `continue`, send the unmet-requirement packet
+   into the same Hermes session for another bounded turn. On `blocked`, pause for the
+   user. Stream every decision to the dashboard.
 
 ## Core Contracts
 
@@ -71,15 +86,22 @@ Dashboard ↔ AgentOS API ↔ Canonical Session State ↔ Trace/Metrics
 
 Cost and privacy are separate. A `ModelRoute` identifies:
 
-| Field | Values |
-| --- | --- |
-| `costTier` | `cheap` or `frontier` |
-| `deployment` | `local` or `cloud` |
+| Field          | Values                               |
+| -------------- | ------------------------------------ |
+| `costTier`     | `cheap` or `frontier`                |
+| `deployment`   | `local` or `cloud`                   |
 | `contextScope` | `public`, `private`, or `local_only` |
-| Identity | `providerId` and `modelId` |
+| Identity       | `providerId` and `modelId`           |
 
-The demo therefore supports local/private, cloud/cheap, and cloud/frontier routes. A
-`local_only` step may never silently escalate to cloud.
+The demo therefore supports local/private, privacy-constrained cloud, cloud/cheap, and
+cloud/frontier routes. OpenRouter is the cloud model catalog and gateway; it supplies a
+mixture of vendors and model families rather than implying use of OpenAI models. Hermes
+speaks an OpenAI-compatible request format to AgentOS only as a wire protocol.
+
+Truly local/private inference goes directly to an approved local endpoint such as
+Ollama or vLLM. An OpenRouter route may require zero-data-retention, no-training, or a
+provider allowlist, but it is still cloud egress and must never be labeled local. A
+`local_only` step may never silently escalate to OpenRouter or another cloud provider.
 
 A `ScheduleDecision` contains the selected route, selected tool IDs, context scope,
 provisional action policy (`auto`, `verify`, `ask_user`, or `deny`), confidence, and
@@ -88,7 +110,7 @@ not credential values, raw secrets, or every full schema.
 
 ### What Jev is
 
-Jev is TypeSafe AI's *System One* decision model, reached through the `typesafe-sdk`
+Jev is TypeSafe AI's _System One_ decision model, reached through the `typesafe-sdk`
 package or `POST https://api.typesafe.ai/v1/systemone` with model id `jev-latest`.
 
 It answers **typed questions against state** and returns a `Choice` (one key from a
@@ -112,8 +134,9 @@ Operational detail, browser usage and anti-patterns: [jev.md](./jev.md).
 
 ### Jev completion decision
 
-After each meaningful step, AgentOS may ask Jev whether the objective has been
-satisfied. The request contains a policy-eligible view of session state:
+After each quiescent Hermes inner turn and any other meaningful checkpoint, AgentOS asks
+Jev whether the objective has been satisfied. The request contains a policy-eligible
+view of session state:
 
 - Objective, plan, and completed or failed steps.
 - Structured artifact and tool-result summaries.
@@ -123,11 +146,14 @@ satisfied. The request contains a policy-eligible view of session state:
 Jev returns `done`, `continue`, or `blocked`, plus confidence, reason codes, missing
 requirements, and an optional suggested next step.
 
-This decision is advisory. AgentOS accepts `done` only when required output schemas and
-task-specific checks pass, no required approval or verification remains, policy permits
-the result, and Jev clears the configured confidence threshold. Low confidence or
-failed verification causes a bounded continuation or escalation. Step and budget limits
-prevent endless loops. `blocked` pauses for a user or records a terminal explanation.
+This decision controls the outer loop but is not the sole proof of completion. AgentOS
+accepts `done` only when required output schemas and task-specific checks pass, no
+required tool call, approval, or verification remains, policy permits the result, and
+Jev clears the configured confidence threshold. AgentOS then closes/cancels the Hermes
+session as appropriate and emits `task.completed`. Low confidence or failed verification
+causes a bounded continuation or escalation in the same Hermes session. Step and budget
+limits prevent endless loops. `blocked` pauses for a user or records a terminal
+explanation.
 
 If Jev is remote, local-only state is never sent to it; AgentOS uses a sanitized summary
 or a deterministic/local completion check instead.
@@ -135,12 +161,22 @@ or a deterministic/local completion check instead.
 ### Tools, actions, and events
 
 `ToolDescriptor` records a stable ID, provider, family, description, schema reference,
-transport, risk class, required scopes, allowed data labels, credential reference,
-availability, and executor reference. Credentials and full schemas remain local.
+transport, baseline effect (`read`, `write`, `destructive`, or `unknown`),
+reversibility, required scopes, allowed data labels, credential reference, availability,
+and executor reference. Credentials and full schemas remain local. Provider metadata and
+mapping rules may populate these fields; the team does not need to hand-label every
+imported tool, but an unknown classification fails closed and demo tools are reviewed.
 
 `ToolAction` records the run, step, action, tool, exact arguments, destination, data
 labels, and descriptor version. Schema hiding is an optimization, not authorization:
 AgentOS rechecks the actual action immediately before execution.
+
+Jev may recommend the action policy (`auto`, `verify`, `ask_user`, or `deny`) and flag
+semantic risk that static metadata missed. It cannot be the sole permission authority or
+downgrade the descriptor/policy baseline: its output is probabilistic, and the risk of a
+tool changes with its exact arguments and destination. Deterministic rules combine the
+descriptor baseline, exact action, data labels, scopes, reversibility, user policy, and
+Jev recommendation. The strictest applicable result wins.
 
 Every boundary emits a typed event containing route and Jev reasoning, tools considered,
 exposed and called, context labels, policy and verification results, completion status,
@@ -169,7 +205,9 @@ the proposed and final action.
 
 ## Dashboard
 
-The UI shows the connected harness and provider health; current plan and step; candidate,
+The UI is the user's entry point and wrapper around the Hermes run. It shows the task
+composer, start/pause/resume/cancel controls, connected harness and provider health;
+current plan and step; candidate,
 exposed, and called tools; model route and escalation history; Jev scheduling and
 completion decisions; context labels and egress; pending approvals/revisions; and
 latency, tokens, cost, frontier calls, schema-token savings, and success. Live providers,
@@ -191,16 +229,16 @@ approval before outreach.
 
 ## Acceptance Criteria
 
-| Capability | Requirement |
-| --- | --- |
-| Harness | One Hermes run completes without modifying Hermes core |
-| Tools | 50+ registered/simulated schemas reduce to 3–8; unknown or unselected calls are blocked |
-| Models | One run uses at least two eligible routes and one verification-driven escalation |
-| Context | One canonical state supports model switching while preserving labels and provenance |
-| Completion | Jev returns `done`, `continue`, or `blocked`; verification must pass before `done` is accepted |
-| Safety | One side effect demonstrates approve, reject, and revised-payload paths with reauthorization |
-| Observability | The live UI shows routes, Jev reasoning, completion, tools, privacy, risk, latency, tokens, and cost |
-| Evaluation | The same task runs against a frontier-model/all-tools baseline; savings count only when both succeed |
+| Capability    | Requirement                                                                                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Harness       | A task submitted in the AgentOS UI starts and completes one Hermes run without modifying Hermes core                                                        |
+| Tools         | 50+ registered/simulated schemas reduce to 3–8; unknown or unselected calls are blocked                                                                     |
+| Models        | OpenRouter supplies multiple cloud model families, a separate true local route remains available, and one run demonstrates a verification-driven escalation |
+| Context       | One canonical state supports model switching while preserving labels and provenance                                                                         |
+| Completion    | At each outer-loop checkpoint Jev returns `done`, `continue`, or `blocked`; verified `done` stops the Hermes run and failed verification continues it       |
+| Safety        | One side effect demonstrates approve, reject, and revised-payload paths with reauthorization                                                                |
+| Observability | The live UI shows routes, Jev reasoning, completion, tools, privacy, risk, latency, tokens, and cost                                                        |
+| Evaluation    | The same task runs against a frontier-model/all-tools baseline; savings count only when both succeed                                                        |
 
 Required tests cover fail-closed routing, unavailable/unselected tools, exact-action
 approval, revised-action authorization, secret leakage, policy injection through tool
@@ -212,16 +250,16 @@ Agree `ScheduleDecision`, `ToolDescriptor`, `ToolAction`, the event schema, and 
 responses first. Each owner then builds against those contracts so all four tracks
 progress in parallel.
 
-| Owner | Scope | Components owned | Deliverables | Integration contract |
-| --- | --- | --- | --- | --- |
-| Person 1 | Core runtime and harness | API, session state, harness adapter | Run API; Hermes adapter and compatibility spike; model/tool interception; SSE; pause/resume/cancel; approval and revision endpoints; context persistence plumbing | Consumes `ScheduleDecision`; emits events and proposed `ToolAction` |
-| Person 2 | Jev, model routing, safety and privacy | Jev scheduler and completion judge, model gateway, context builder, policy gate | Jev schemas and deterministic fallback; hierarchical selection; tier and route selection; context ranking; bounded escalation; completion decision and verification gating; baseline evaluation; privacy labeling and secret handling; hard risk rules; exact-action authorization, revision reauthorization and approval enforcement; leakage and permission-bypass tests | Implements `schedule(state)` with a deterministic mock fallback, `build_context`, and `authorize_action` |
-| Person 3 | Tools and browser | Tool registry, executors, browser | MCP setup; `ToolDescriptor` registry; plugin manifests; tool metadata search; browser adapter and Browserbase integration, including a local-browser path; tool execution; simulated tool fixtures, clearly labeled non-executable | Implements `select_tool_metadata`; executes tools through each descriptor's executor reference |
+| Owner    | Scope                                  | Components owned                                                         | Deliverables                                                                                                                                                                                                                                                                                                                                                               | Integration contract                                                                                     |
+| -------- | -------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Person 1 | Core runtime and harness               | API, session state, outer controller, harness adapter, gateway transport | Run API; Hermes adapter and compatibility spike; model/tool interception transport; SSE; pause/resume/cancel; approval and revision endpoints; context persistence plumbing                                                                                                                                                                                                | Consumes `ScheduleDecision`; emits events and proposed `ToolAction`                                      |
+| Person 2 | Jev, model routing, safety and privacy | Jev scheduler and completion judge, context builder, policy gate         | Jev schemas and deterministic fallback; hierarchical selection; tier and route selection; context ranking; bounded escalation; completion decision and verification gating; baseline evaluation; privacy labeling and secret handling; hard risk rules; exact-action authorization, revision reauthorization and approval enforcement; leakage and permission-bypass tests | Implements `schedule(state)` with a deterministic mock fallback, `build_context`, and `authorize_action` |
+| Person 3 | Tools and browser                      | Tool registry, MCP gateway, executors, browser                           | MCP setup; `ToolDescriptor` registry; plugin manifests; tool metadata search; browser adapter and Browserbase integration, including a local-browser path; tool execution; simulated tool fixtures, clearly labeled non-executable                                                                                                                                         | Implements `select_tool_metadata`; executes tools through each descriptor's executor reference           |
+| Person 4 | Dashboard, metrics and demo            | Dashboard                                                                | UI task entry and Hermes-run wrapper; live trace; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation                                                                                                                                                | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints                     |
 
 Person 3's scope is split across two people — **3A (tool registry and MCP)** and
 **3B (browser and Browserbase)**. See [person-3.md](./person-3.md) for that breakdown,
 the seam between the two tracks, and the files each one owns.
-| Person 4 | Dashboard, metrics and demo | Dashboard | Live trace UI; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints |
 
 ### Handoffs
 
@@ -240,12 +278,12 @@ the seam between the two tracks, and the files each one owns.
 
 ### Required test ownership
 
-| Owner | Tests |
-| --- | --- |
-| Person 1 | Run reliability; pause/resume and cancellation |
+| Owner    | Tests                                                                                                                                                             |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Person 1 | Run reliability; pause/resume and cancellation                                                                                                                    |
 | Person 2 | Fail-closed routing; exact-action approval; revised-action authorization; secret leakage; policy injection through tool output; verification-protected completion |
-| Person 3 | Unavailable and unselected tools blocked; task success after schema filtering; browser and tool reliability |
-| Person 4 | Metrics accuracy; error and empty states; truthful live/mock/replay labels |
+| Person 3 | Unavailable and unselected tools blocked; task success after schema filtering; browser and tool reliability                                                       |
+| Person 4 | Metrics accuracy; error and empty states; truthful live/mock/replay labels                                                                                        |
 
 ## Pitch
 

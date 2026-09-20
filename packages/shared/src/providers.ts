@@ -35,7 +35,9 @@ export type ProviderMode = 'mock' | 'live' | 'disabled';
  * for now it is recorded on every ScheduleDecision so the UI and benchmark
  * script have something real to show before it is functionally enforced.
  */
-export type ModelTier = 'cheap' | 'standard' | 'frontier';
+export type ModelTier = 'local' | 'cheap' | 'standard' | 'frontier';
+export type PrivacyRoute = 'private' | 'cloud';
+export type IntelligenceLevel = 'low' | 'high';
 
 /**
  * What a provider can do, in our terms. Playbooks ask for a CAPABILITY, never a
@@ -171,6 +173,10 @@ export interface DecisionAdapter extends ProviderAdapter {
     ctx: ProviderCallContext,
   ): Promise<
     ProviderResult<{
+      privacy: PrivacyRoute;
+      intelligence: IntelligenceLevel;
+      privacyConfidence: number;
+      intelligenceConfidence: number;
       modelTier: ModelTier;
       exposedTools: string[];
       confidence: number;

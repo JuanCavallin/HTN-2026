@@ -8,11 +8,14 @@
 
 import type { ZodType } from 'zod';
 import { demoInputSchema } from './demo.js';
+import { graphRunInputSchema } from './graph.js';
 
 export * from './demo.js';
+export * from './graph.js';
 
 export const PLAYBOOK_INPUT_SCHEMAS = {
   demo: demoInputSchema,
+  graph: graphRunInputSchema,
 } as const satisfies Record<string, ZodType>;
 
 export type PlaybookKind = keyof typeof PLAYBOOK_INPUT_SCHEMAS;

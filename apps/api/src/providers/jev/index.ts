@@ -1,4 +1,4 @@
-import type { Capability, DecisionAdapter, ModelTier } from '@htn/shared';
+import type { Capability, DecisionAdapter, IntelligenceLevel, PrivacyRoute } from '@htn/shared';
 import type { ProviderConfig } from '../../config.js';
 import { mockBase, mockCall } from '../_mock.js';
 import { createLiveJev } from './live.js';
@@ -10,15 +10,16 @@ export function create(cfg: ProviderConfig): DecisionAdapter {
   return createMock(cfg);
 }
 
-/**
- * Picks a tier by task length. A real classifier will look at actual task
- * difficulty; this is deliberately simple and DETERMINISTIC so a rehearsed
- * demo shows the same tier every time.
- */
-function pickTier(task: string): ModelTier {
-  if (task.length < 60) return 'cheap';
-  if (task.length < 160) return 'standard';
-  return 'frontier';
+function pickPrivacy(task: string, context?: string): PrivacyRoute {
+  return /resume|résumé|\bcv\b|private|secret|patient|medical|financial|credential|local.only/i.test(
+    task + ' ' + (context ?? ''),
+  )
+    ? 'private'
+    : 'cloud';
+}
+
+function pickIntelligence(task: string): IntelligenceLevel {
+  return task.length < 160 ? 'low' : 'high';
 }
 
 /** ~4 chars per token. Good enough for a mock; live Jev would report real counts. */
@@ -60,7 +61,10 @@ function createMock(cfg: ProviderConfig): DecisionAdapter {
         cfg.mode,
         ctx,
         () => {
-          const modelTier = pickTier(input.task);
+          const privacy = pickPrivacy(input.task, input.context);
+          const intelligence = pickIntelligence(input.task);
+          const modelTier =
+            privacy === 'private' ? 'local' : intelligence === 'low' ? 'cheap' : 'frontier';
           // Deterministic slice, not random, so a rehearsed demo shows the same
           // reduction every time — this is the M2 headline number (50+ -> 3-8).
           const exposedTools = input.availableTools.slice(
@@ -68,6 +72,10 @@ function createMock(cfg: ProviderConfig): DecisionAdapter {
             Math.min(3, input.availableTools.length),
           );
           return {
+            privacy,
+            intelligence,
+            privacyConfidence: 0.8,
+            intelligenceConfidence: 0.8,
             modelTier,
             exposedTools,
             confidence: 0.78,

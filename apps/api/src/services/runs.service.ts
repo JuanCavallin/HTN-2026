@@ -6,9 +6,18 @@
  * never await a run.
  */
 
-import type { Approval, EgressEvent, Json, PiiSpan, Run, ScheduleDecision, Step } from '@htn/shared';
+import type {
+  Approval,
+  EgressEvent,
+  Json,
+  PiiSpan,
+  Run,
+  ScheduleDecision,
+  Step,
+} from '@htn/shared';
 import { stripPiiValue } from '@htn/shared';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
+import { GraphNotFoundError } from './graphs.service.js';
 import { newId, nowIso } from '../lib/ids.js';
 import type { ListRunsFilter } from '../store/types.js';
 import { bus, orchestrator, store } from './runtime.js';
@@ -59,13 +68,24 @@ export async function createRun(args: {
     });
   }
 
+  // A graph run SNAPSHOTS the document it is about to execute. Without this,
+  // editing a graph would retroactively change what an already-finished run
+  // page shows -- the steps would no longer line up with the nodes.
+  let input = parsed.data as Json;
+  if (args.kind === 'graph') {
+    const requested = input as { graphId: string; graphSnapshot?: unknown };
+    const graph = await store.getGraph(requested.graphId);
+    if (!graph) throw new GraphNotFoundError(requested.graphId);
+    input = { ...requested, graphSnapshot: graph } as Json;
+  }
+
   const at = nowIso();
   const run: Run = {
     id: newId('run'),
     kind: args.kind,
-    title: args.title ?? playbook.title,
+    title: args.title ?? (args.kind === 'graph' ? playbookTitleFor(input) : playbook.title),
     status: 'pending',
-    input: parsed.data as Json,
+    input,
     createdAt: at,
     updatedAt: at,
   };
@@ -77,6 +97,12 @@ export async function createRun(args: {
   orchestrator.start(run);
 
   return run;
+}
+
+/** A graph run is more useful named after its graph than after the playbook. */
+function playbookTitleFor(input: Json): string {
+  const snapshot = (input as { graphSnapshot?: { name?: string } }).graphSnapshot;
+  return snapshot?.name ?? 'Run an agent graph';
 }
 
 export async function listRuns(filter: ListRunsFilter): Promise<Run[]> {

@@ -14,7 +14,15 @@
  * per node.
  */
 
-import { agentGraphSchema, findGraphCycle, GRAPH_NODE_TYPES } from '@htn/shared';
+import {
+  agentGraphSchema,
+  EXECUTOR_BY_NODE_TYPE,
+  executorOf,
+  findGraphCycle,
+  GRAPH_NODE_TYPES,
+  NODE_TYPE_ICON,
+  styleOf,
+} from '@htn/shared';
 
 let failures = 0;
 
@@ -55,19 +63,79 @@ console.log('1. A valid graph parses');
   );
 }
 
-console.log('\n2. A no-LLM tool node is first class');
+console.log('\n2. The three rungs of delegation are all expressible');
 {
   const result = agentGraphSchema.safeParse(graph([toolNode('a')], []));
-  check('a lone `tool` node is a complete graph', result.success);
-  check('`tool` is in the node palette', GRAPH_NODE_TYPES.includes('tool'));
-  check(
-    'every node type is covered by the palette',
-    GRAPH_NODE_TYPES.length === 9,
-    String(GRAPH_NODE_TYPES.length),
+  check('a lone `tool` node is a complete graph (0 model calls)', result.success);
+
+  const dispatch = agentGraphSchema.safeParse(
+    graph(
+      [
+        {
+          id: 'd',
+          type: 'dispatch',
+          label: 'Pick a tool',
+          position: { x: 0, y: 0 },
+          config: {
+            goal: 'Record the result somewhere',
+            candidateTools: ['sheets.append', 'mail.send'],
+            args: { 'sheets.append': { row: 'x' } },
+          },
+        },
+      ],
+      [],
+    ),
   );
+  check(
+    'a `dispatch` node is valid (1 cheap call, no harness)',
+    dispatch.success,
+    dispatch.success ? '' : dispatch.error.message,
+  );
+
+  const oneCandidate = agentGraphSchema.safeParse(
+    graph(
+      [
+        {
+          id: 'd',
+          type: 'dispatch',
+          label: 'Pick a tool',
+          position: { x: 0, y: 0 },
+          config: { goal: 'g', candidateTools: ['only.one'] },
+        },
+      ],
+      [],
+    ),
+  );
+  // One candidate is not a choice - that is a `tool` node, and it should be
+  // written as one so it costs nothing.
+  check('a dispatch with a single candidate is rejected', !oneCandidate.success);
 }
 
-console.log('\n3. The three refinements the interpreter depends on');
+console.log('\n3. The executor axis stays in sync with the node types');
+{
+  const missing = GRAPH_NODE_TYPES.filter((t) => !(t in EXECUTOR_BY_NODE_TYPE));
+  check('every node type maps to an executor', missing.length === 0, missing.join(', '));
+
+  const noIcon = GRAPH_NODE_TYPES.filter((t) => !NODE_TYPE_ICON[t]);
+  check('every node type has an icon', noIcon.length === 0, noIcon.join(', '));
+
+  // The one mark that must never be wrong: dashed means we cannot see inside.
+  const opaque = GRAPH_NODE_TYPES.filter((t) => styleOf(t).opaque);
+  check(
+    'exactly one node type is opaque, and it is the agent harness',
+    opaque.length === 1 && opaque[0] === 'agent_task',
+    opaque.join(', '),
+  );
+
+  check(
+    'dispatch is priced as a decision, not as a free tool',
+    executorOf('dispatch') === 'decision',
+  );
+  check('a plain tool call is free', styleOf('tool').cost === 'none');
+  check('the agent harness is the expensive one', styleOf('agent_task').cost === 'high');
+}
+
+console.log('\n4. The three refinements the interpreter depends on');
 {
   const dup = agentGraphSchema.safeParse(graph([toolNode('a'), toolNode('a')], []));
   check(
@@ -96,7 +164,7 @@ console.log('\n3. The three refinements the interpreter depends on');
   check('a self-loop counts as a cycle', !selfLoop.success);
 }
 
-console.log('\n4. findGraphCycle is usable on its own');
+console.log('\n5. findGraphCycle is usable on its own');
 {
   const cycle = findGraphCycle(
     [{ id: 'a' }, { id: 'b' }],
@@ -121,7 +189,7 @@ console.log('\n4. findGraphCycle is usable on its own');
   check('a diamond (shared descendant) is NOT a cycle', diamond === null, String(diamond));
 }
 
-console.log('\n5. Config is validated per node type');
+console.log('\n6. Config is validated per node type');
 {
   const badTool = agentGraphSchema.safeParse(
     graph([{ ...toolNode('a'), config: { args: {} } }], []),

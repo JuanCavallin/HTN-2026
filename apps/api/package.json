@@ -8,14 +8,18 @@
     "start": "tsx --env-file-if-exists=../../.env src/index.ts",
     "typecheck": "tsc --noEmit",
     "check:graph": "tsx scripts/graph-schema.check.ts",
+    "check:analytics": "tsx scripts/analytics-parity.check.ts",
     "check:browser": "tsx --env-file-if-exists=../../.env scripts/browser.check.ts",
-    "check:browser:live": "tsx --env-file-if-exists=../../.env scripts/browser.live.ts"
+    "check:browser:live": "tsx --env-file-if-exists=../../.env scripts/browser.live.ts",
+    "test:jev": "tsx --env-file-if-exists=../../.env scripts/test-jev.ts",
+    "test:jev:routing": "tsx --env-file-if-exists=../../.env scripts/test-jev-routing.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
     "@anthropic-ai/sdk": "^0.127.0",
     "@browserbasehq/stagehand": "^4.1.0",
     "@htn/shared": "workspace:*",
+    "ai": "^7.0.107",
     "express": "^5.2.1",
     "playwright-core": "^1.63.0",
     "zod": "^4.6.5"

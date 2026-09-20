@@ -1,5 +1,6 @@
 import { createApp } from './app.js';
 import { config, logConfigSummary } from './config.js';
+import { seedGraphs } from './services/graphs.service.js';
 import { store } from './store/index.js';
 
 async function main(): Promise<void> {
@@ -7,6 +8,9 @@ async function main(): Promise<void> {
 
   // No-op unless PERSIST_TO_DISK=true.
   await store.hydrate();
+
+  // So the canvas is never empty on a cold start. Never overwrites an edit.
+  await seedGraphs();
 
   const app = createApp();
   const server = app.listen(config.port, () => {

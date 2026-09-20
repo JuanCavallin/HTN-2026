@@ -13,6 +13,7 @@ import type {
   Json,
   ProposedAction,
   ProviderCallContext,
+  ProviderId,
   Run,
   ScheduleDecision,
   Step,
@@ -44,6 +45,8 @@ export interface OrchestratorDeps {
   store: Store;
   bus: RunBus;
   provider: <C extends Capability>(capability: C) => CapabilityMap[C];
+  /** Reads the registry's live BINDINGS, so a re-point is reflected everywhere. */
+  providerFor: (capability: Capability) => ProviderId;
 }
 
 export class Orchestrator {
@@ -143,7 +146,7 @@ export class Orchestrator {
   /* ------------------------------------------------------------------ */
 
   private createContext(runId: string, signal: AbortSignal): PlaybookContext {
-    const { store, bus, provider } = this.deps;
+    const { store, bus, provider, providerFor } = this.deps;
     /** Keeps placeholder numbering unique across every field in this run. */
     let piiCounter = 0;
 
@@ -284,6 +287,7 @@ export class Orchestrator {
       },
 
       provider,
+      providerFor,
 
       redact: async (text: string, field: string): Promise<RedactionOutput> => {
         const { redacted, spans } = detectPii(text, piiCounter);
@@ -312,6 +316,23 @@ export class Orchestrator {
         };
       },
 
+      recordSchedule: async (input) => {
+        const decision: ScheduleDecision = {
+          id: newId('sch'),
+          runId,
+          privacy: input.privacy ?? 'cloud',
+          intelligence: input.intelligence ?? 'low',
+          privacyConfidence: input.privacyConfidence ?? input.confidence,
+          intelligenceConfidence: input.intelligenceConfidence ?? input.confidence,
+          escalated: false,
+          at: nowIso(),
+          ...input,
+        };
+        await store.createScheduleDecision(decision);
+        await bus.emit(runId, { type: 'schedule.decided', decision });
+        return decision;
+      },
+
       callContext: buildCallContext,
 
       runAgentTask: async (spec: AgentTaskSpec): Promise<AgentTaskResult> => {
@@ -320,10 +341,9 @@ export class Orchestrator {
           kind: 'agent_task',
           nodeId: spec.nodeId,
           parentStepId: spec.parentStepId ?? null,
-          // Hardcoded rather than read from the registry's actual binding —
-          // correct today ('agent.runtime' -> hermes) but worth revisiting if
-          // that binding ever becomes dynamic per call.
-          providerId: 'hermes',
+          // Read from the registry rather than hardcoded, so re-pointing
+          // 'agent.runtime' in BINDINGS relabels the step too.
+          providerId: providerFor('agent.runtime'),
         });
 
         // 1.5s x 40 = 60s total budget. A real Hermes turn commonly takes
@@ -353,11 +373,17 @@ export class Orchestrator {
           const routeResult = routed.ok
             ? routed.data
             : {
-                modelTier: 'standard' as const,
-                exposedTools: [] as string[],
+                privacy: 'private' as const,
+                intelligence: 'high' as const,
+                privacyConfidence: 0,
+                intelligenceConfidence: 0,
+                modelTier: 'local' as const,
+                exposedTools: [],
                 confidence: 0,
                 rationale:
-                  'Routing failed (' + routed.error.code + '); exposing no tools (fail closed).',
+                  'Routing failed (' +
+                  routed.error.code +
+                  '); using safe local execution with no tools.',
               };
 
           const decision: ScheduleDecision = {
@@ -365,13 +391,17 @@ export class Orchestrator {
             runId,
             stepId: step.id,
             requestedCapability: 'agent.runtime',
-            selectedProvider: 'hermes',
+            selectedProvider: providerFor('agent.runtime'),
+            privacy: routeResult.privacy,
+            intelligence: routeResult.intelligence,
+            privacyConfidence: routeResult.privacyConfidence,
+            intelligenceConfidence: routeResult.intelligenceConfidence,
             modelTier: routeResult.modelTier,
             availableTools: spec.availableTools,
             exposedTools: routeResult.exposedTools,
             confidence: routeResult.confidence,
             escalated: false,
-            rule: routed.ok ? 'jev-routed' : 'route-failed-fallback-no-tools',
+            rule: routed.ok ? 'jev-routed' : 'route-failed-safe-local',
             at: nowIso(),
           };
           await store.createScheduleDecision(decision);

@@ -136,8 +136,11 @@ function fakeBrowser(
     async act() {
       return { ok: true, data: { url: 'https://example.test' }, meta: meta('act', destination) };
     },
-    async extract() {
-      return { ok: true, data: { text: 'ok' }, meta: meta('extract', destination) };
+    async extract<T = unknown>() {
+      // Generic, matching BrowserAdapter.extract. The cast is confined to this
+      // fake: a stub cannot know the caller's T, and the executor only reads
+      // the result opaquely.
+      return { ok: true as const, data: { text: 'ok' } as T, meta: meta('extract', destination) };
     },
     async snapshot(input) {
       const table: ElementTable = {

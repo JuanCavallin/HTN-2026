@@ -70,6 +70,37 @@ async function main() {
     );
   }
 
+  // REGRESSION GUARD. Registering the `graph` playbook put it in the launch
+  // dropdown, which posts an empty input -- and a graph run needs a graphId, so
+  // that option could never work. Anything the API advertises as directly
+  // launchable must actually launch with no input.
+  console.log('\n1b. Every directly-launchable playbook really launches');
+  const advertised = (await api('/api/playbooks')).body?.playbooks ?? [];
+  check(
+    'playbooks report directLaunch',
+    advertised.every((p) => typeof p.directLaunch === 'boolean'),
+  );
+  for (const playbook of advertised.filter((p) => p.directLaunch)) {
+    const probe = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({ kind: playbook.kind, input: {} }),
+    });
+    check(
+      '"' + playbook.kind + '" launches with an empty input',
+      probe.status === 201,
+      'status ' + probe.status,
+    );
+    if (probe.body?.run?.id) {
+      await api('/api/runs/' + probe.body.run.id + '/cancel', { method: 'POST' });
+    }
+  }
+  const needsInput = advertised.filter((p) => !p.directLaunch);
+  check(
+    'a playbook needing configuration is flagged rather than offered blindly',
+    needsInput.every((p) => p.kind === 'graph'),
+    needsInput.map((p) => p.kind).join(',') || 'none',
+  );
+
   console.log('\n2. Launch a run');
   const created = await api('/api/runs', {
     method: 'POST',
@@ -95,7 +126,11 @@ async function main() {
   );
 
   const swarmWorkers = blocked.steps.filter((s) => s.parentStepId !== null);
-  check('swarm fanned out as child steps', swarmWorkers.length >= 3, swarmWorkers.length + ' workers');
+  check(
+    'swarm fanned out as child steps',
+    swarmWorkers.length >= 3,
+    swarmWorkers.length + ' workers',
+  );
 
   const agentTaskStep = blocked.steps.find((s) => s.kind === 'agent_task');
   check('agent task step ran', Boolean(agentTaskStep), agentTaskStep?.status ?? 'missing');
@@ -197,11 +232,17 @@ async function main() {
   // anthropic and jev adapters reported usage in `data` but never in `meta`,
   // and withEgress only reads `meta`. If these fail, check the adapter, not
   // the rollup.
-  check('tokens reached the egress ledger', totals.tokensIn > 0 && totals.tokensOut > 0,
-    totals.tokensIn + ' in / ' + totals.tokensOut + ' out');
+  check(
+    'tokens reached the egress ledger',
+    totals.tokensIn > 0 && totals.tokensOut > 0,
+    totals.tokensIn + ' in / ' + totals.tokensOut + ' out',
+  );
   check('model calls were counted', totals.llmCalls > 0, totals.llmCalls + ' calls');
-  check('a cost was estimated', totals.estimatedCostCents > 0,
-    totals.estimatedCostCents + ' cents');
+  check(
+    'a cost was estimated',
+    totals.estimatedCostCents > 0,
+    totals.estimatedCostCents + ' cents',
+  );
 
   check('wall-clock time was measured', totals.wallMs > 0, totals.wallMs + 'ms');
   check(
@@ -220,7 +261,178 @@ async function main() {
     analytics.body?.unattributed?.stepIds?.length + ' of ' + totals.stepCount,
   );
 
-  console.log('\n7. Rejection path');
+  console.log('\n7. Graph CRUD');
+  const seeded = await api('/api/graphs');
+  const demoGraph = (seeded.body?.graphs ?? []).find((g) => g.id === 'graph_demo');
+  check('the demo graph is seeded', Boolean(demoGraph), demoGraph?.name ?? 'missing');
+  check(
+    'it covers every executor family',
+    new Set((demoGraph?.nodes ?? []).map((n) => n.type)).size >= 7,
+    new Set((demoGraph?.nodes ?? []).map((n) => n.type)).size + ' distinct node types',
+  );
+
+  const made = await api('/api/graphs', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'smoke graph' }),
+  });
+  check('POST /api/graphs is 201', made.status === 201, 'status ' + made.status);
+  const gid = made.body?.graph?.id;
+
+  const node = (id) => ({
+    id,
+    type: 'tool',
+    label: 'Tool ' + id,
+    position: { x: 0, y: 0 },
+    config: { tool: 'sheets.append', args: {} },
+  });
+
+  let v = made.body?.graph?.version;
+  const n1 = await api('/api/graphs/' + gid + '/nodes', {
+    method: 'POST',
+    body: JSON.stringify({ node: node('a'), version: v }),
+  });
+  check('add node is 201', n1.status === 201, 'status ' + n1.status);
+  v = n1.body?.graph?.version;
+
+  const n2 = await api('/api/graphs/' + gid + '/nodes', {
+    method: 'POST',
+    body: JSON.stringify({ node: node('b'), version: v }),
+  });
+  v = n2.body?.graph?.version;
+
+  const e1 = await api('/api/graphs/' + gid + '/edges', {
+    method: 'POST',
+    body: JSON.stringify({ edge: { id: 'e1', source: 'a', target: 'b' }, version: v }),
+  });
+  check('add edge is 201', e1.status === 201, 'status ' + e1.status);
+  v = e1.body?.graph?.version;
+
+  // The point of routing every mutation through one whole-graph validate: a
+  // node delete must take its edges with it, or the next save fails on a
+  // dangling reference.
+  const del = await api('/api/graphs/' + gid + '/nodes/b', {
+    method: 'DELETE',
+    body: JSON.stringify({ version: v }),
+  });
+  check('delete node is 200', del.status === 200, 'status ' + del.status);
+  check(
+    'deleting a node cascaded to its edges',
+    (del.body?.graph?.edges ?? []).length === 0,
+    (del.body?.graph?.edges ?? []).length + ' edges left',
+  );
+
+  const stale = await api('/api/graphs/' + gid + '/nodes', {
+    method: 'POST',
+    body: JSON.stringify({ node: node('c'), version: 1 }),
+  });
+  check('a stale version is a 409', stale.status === 409, 'status ' + stale.status);
+
+  const cyclic = await api('/api/graphs/' + gid, {
+    method: 'PUT',
+    body: JSON.stringify({
+      nodes: [node('x'), node('y')],
+      edges: [
+        { id: 'c1', source: 'x', target: 'y' },
+        { id: 'c2', source: 'y', target: 'x' },
+      ],
+    }),
+  });
+  check(
+    'a cycle is rejected with 400, not accepted',
+    cyclic.status === 400,
+    'status ' + cyclic.status,
+  );
+
+  await api('/api/graphs/' + gid, { method: 'DELETE' });
+
+  console.log('\n8. Run the seeded graph');
+  const gRun = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({
+      kind: 'graph',
+      input: { graphId: 'graph_demo', variables: { target: 'SMOKE-1' } },
+    }),
+  });
+  check('POST graph run is 201', gRun.status === 201, 'status ' + gRun.status);
+  const gRunId = gRun.body?.run?.id;
+
+  check(
+    'the run snapshotted the graph it will execute',
+    Boolean(gRun.body?.run?.input?.graphSnapshot),
+  );
+
+  const gBlocked = await waitFor(gRunId, (run) => run.status === 'awaiting_approval', 60_000);
+  check(
+    'the graph run reached its approval gate',
+    Boolean(gBlocked),
+    gBlocked?.run?.status ?? 'timed out',
+  );
+
+  if (gBlocked) {
+    const withNode = gBlocked.steps.filter((s) => s.nodeId);
+    check(
+      'every step is attributed to a graph node',
+      withNode.length === gBlocked.steps.length,
+      withNode.length + ' of ' + gBlocked.steps.length,
+    );
+
+    const swarmSteps = gBlocked.steps.filter((s) => s.nodeId === 'verify');
+    check(
+      'a swarm parent and its workers share one nodeId',
+      swarmSteps.length === 4,
+      swarmSteps.length + ' steps on the swarm node',
+    );
+
+    const dispatched = gBlocked.scheduleDecisions.find(
+      (d) => d.rule === 'dispatch-selected-single-tool',
+    );
+    check(
+      'dispatch narrowed its candidates to exactly one tool, with no harness',
+      Boolean(dispatched) && dispatched.exposedTools.length === 1,
+      dispatched ? dispatched.availableTools.length + ' -> 1' : 'no dispatch decision',
+    );
+
+    const gApproval = gBlocked.approvals.find((a) => a.status === 'pending');
+    await api('/api/approvals/' + gApproval.id + '/decide', {
+      method: 'POST',
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    const gDone = await waitFor(
+      gRunId,
+      (run) => run.status === 'succeeded' || run.status === 'failed',
+      60_000,
+    );
+    check(
+      'the graph run completed',
+      gDone?.run?.status === 'succeeded',
+      gDone?.run?.status ?? 'timed out',
+    );
+
+    const gAnalytics = await api('/api/runs/' + gRunId + '/analytics');
+    check(
+      'analytics attributes every node, nothing unattributed',
+      gAnalytics.body?.unattributed === null && gAnalytics.body?.nodes.length === 8,
+      (gAnalytics.body?.nodes ?? []).length +
+        ' nodes, unattributed=' +
+        gAnalytics.body?.unattributed,
+    );
+
+    // The whole argument for the middle rung, asserted rather than claimed.
+    const nodeById = Object.fromEntries((gAnalytics.body?.nodes ?? []).map((n) => [n.nodeId, n]));
+    const agentTokens = (nodeById.followup?.tokensIn ?? 0) + (nodeById.followup?.tokensOut ?? 0);
+    const dispatchTokens = (nodeById.notify?.tokensIn ?? 0) + (nodeById.notify?.tokensOut ?? 0);
+    check(
+      'dispatch costs far fewer tokens than the agent harness',
+      dispatchTokens > 0 && dispatchTokens * 3 < agentTokens,
+      dispatchTokens + ' vs ' + agentTokens + ' tokens',
+    );
+    check(
+      'deterministic nodes cost nothing',
+      (nodeById.load?.tokensIn ?? 0) === 0 && (nodeById.load?.llmCalls ?? 0) === 0,
+    );
+  }
+
+  console.log('\n9. Rejection path');
   const second = await api('/api/runs', {
     method: 'POST',
     body: JSON.stringify({ kind: 'demo', input: { workerCount: 2 } }),
@@ -237,7 +449,11 @@ async function main() {
       secondId,
       (run) => run.status === 'cancelled' || run.status === 'failed',
     );
-    check('rejecting stops the run', cancelled?.run?.status === 'cancelled', cancelled?.run?.status);
+    check(
+      'rejecting stops the run',
+      cancelled?.run?.status === 'cancelled',
+      cancelled?.run?.status,
+    );
     const conflict = await api('/api/approvals/' + approval2.id + '/decide', {
       method: 'POST',
       body: JSON.stringify({ decision: 'approved' }),

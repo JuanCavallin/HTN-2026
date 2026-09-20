@@ -42,6 +42,7 @@ export const orchestrator = new Orchestrator({
   store,
   bus,
   provider: (capability) => providers.provider(capability),
+  providerFor: (capability) => providers.bindings()[capability],
 });
 
 /* -------------------------------------------------------------------------- */
@@ -77,7 +78,7 @@ export function toolPlane(): Promise<ToolPlane> {
       // null when there is no TYPESAFE_API_KEY or no SDK, which is today's
       // state — the deterministic fallback then takes every decision, and
       // `decisionSource` reports that truthfully to the UI.
-      jevDecider: await createJevBrowserDecider(),
+      jevDecider: createJevBrowserDecider(),
       descriptors: {
         localAvailable: config.providers.localbrowser.mode !== 'disabled',
         browserbaseAvailable: Boolean(config.providers.browserbase.apiKey),

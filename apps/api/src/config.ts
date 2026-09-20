@@ -11,6 +11,10 @@ import { z } from 'zod';
 import { PROVIDER_IDS, type ProviderId, type ProviderMode } from '@htn/shared';
 
 const modeEnum = z.enum(['mock', 'live', 'disabled']);
+const optionalUrl = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  z.string().url().optional(),
+);
 
 /** Accepts 1/true/yes/on, case-insensitive; anything else is false. */
 const boolish = z
@@ -37,9 +41,12 @@ const envSchema = z.object({
   HERMES_API_KEY: z.string().optional(),
   HERMES_BASE_URL: z.string().optional(),
 
+  AI_GATEWAY_API_KEY: z.string().optional(),
+  AI_GATEWAY_BASE_URL: optionalUrl,
   JEV_MODE: modeEnum.default('mock'),
+  /** Legacy aliases retained so existing local setups keep working. */
   JEV_API_KEY: z.string().optional(),
-  JEV_BASE_URL: z.string().optional(),
+  JEV_BASE_URL: optionalUrl,
 
   BROWSERBASE_MODE: modeEnum.default('mock'),
   BROWSERBASE_API_KEY: z.string().optional(),
@@ -56,13 +63,14 @@ const envSchema = z.object({
   // Browserbase's measured project concurrency limit is 25.
   BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
   BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-  /** Per-attempt budget for one Jev browser decision. See docs/jev.md. */
+  /**
+   * Budget for one Jev browser decision, via the AI Gateway. A browser step is
+   * interactive, so this is deliberately short — on timeout the deterministic
+   * fallback takes the step rather than stalling. See docs/jev.md.
+   */
   BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
   /** Cap on element-table rows. The table IS the request state — keep it small. */
   BROWSER_MAX_ELEMENTS: z.coerce.number().int().positive().default(60),
-
-  TYPESAFE_API_KEY: z.string().optional(),
-  TYPESAFE_DEFAULT_MODEL: z.string().default('jev-latest'),
 
   COMPOSIO_MODE: modeEnum.default('mock'),
   COMPOSIO_API_KEY: z.string().optional(),
@@ -138,7 +146,12 @@ function resolveLocalBrowser(): ProviderConfig {
 
 const providers: Record<ProviderId, ProviderConfig> = {
   hermes: resolveHermes(),
-  jev: resolve(env.JEV_MODE, env.JEV_API_KEY, 'JEV_API_KEY', { baseUrl: env.JEV_BASE_URL }),
+  jev: resolve(
+    env.JEV_MODE,
+    env.AI_GATEWAY_API_KEY ?? env.JEV_API_KEY,
+    env.AI_GATEWAY_API_KEY ? 'AI_GATEWAY_API_KEY' : 'JEV_API_KEY',
+    { baseUrl: env.AI_GATEWAY_BASE_URL ?? env.JEV_BASE_URL },
+  ),
   browserbase: resolve(env.BROWSERBASE_MODE, env.BROWSERBASE_API_KEY, 'BROWSERBASE_API_KEY', {
     projectId: env.BROWSERBASE_PROJECT_ID,
   }),
@@ -166,15 +179,9 @@ export const config = Object.freeze({
     decisionTimeoutMs: env.BROWSER_DECISION_TIMEOUT_MS,
     maxElements: env.BROWSER_MAX_ELEMENTS,
   },
-  /**
-   * Jev's real home (TypeSafe AI System One). Separate from `providers.jev`,
-   * which is Person 2's `decision` capability slot — this is the credential the
-   * 3B browser decider reads. Empty today; the deterministic fallback covers it.
-   */
-  typesafe: {
-    apiKey: env.TYPESAFE_API_KEY,
-    defaultModel: env.TYPESAFE_DEFAULT_MODEL,
-  },
+  // NOTE: there is no separate Jev credential. The browser decider reads
+  // `providers.jev` — the same AI Gateway slot Person 2's adapter uses — so
+  // there is one Jev route and one place to configure it.
   providers,
 });
 

@@ -9,7 +9,13 @@
  */
 
 import type { Iso } from './domain.js';
-import type { Capability, ModelTier, ProviderId } from './providers.js';
+import type {
+  Capability,
+  IntelligenceLevel,
+  ModelTier,
+  PrivacyRoute,
+  ProviderId,
+} from './providers.js';
 
 /**
  * One routing decision, recorded BEFORE a subtask runs and never mutated
@@ -27,6 +33,10 @@ export interface ScheduleDecision {
   requestedCapability: Capability;
   /** The provider bound to that capability at decision time. */
   selectedProvider: ProviderId;
+  privacy: PrivacyRoute;
+  intelligence: IntelligenceLevel;
+  privacyConfidence: number;
+  intelligenceConfidence: number;
   modelTier: ModelTier;
   /** The full candidate list Jev was given, before filtering. */
   availableTools: string[];
