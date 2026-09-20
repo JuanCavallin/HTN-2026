@@ -75,7 +75,22 @@ function preview(text: string, n = 100): string {
 interface TaskRecord {
   status: 'running' | 'done' | 'failed';
   log: string[];
+  /**
+   * Derived from `toolCallsById` after every update — see the dedupe note on
+   * that field. This is what pollTask() actually returns.
+   */
   toolCalls: { tool: string; args?: unknown; at: string }[];
+  /**
+   * ONE ACP tool call arrives as a `tool_call` (pending, carries a title) plus
+   * one or more `tool_call_update`s (status only, no title -- see the ACP SDK
+   * type: ToolCallUpdate.title is "update the title", so an update that
+   * doesn't change it omits the field entirely). Keying by toolCallId is what
+   * stops "web_search" (the tool_call) and "tc-a6594ec2" (its completion
+   * update, same call, no title to repeat) from being recorded as two
+   * different tool calls -- which is exactly the duplicate pattern a real
+   * ledger showed: every titled call followed by an untitled twin.
+   */
+  toolCallsById: Map<string, { tool: string; at: string }>;
   result?: unknown;
   error?: string;
   session: Awaited<ReturnType<acp.SessionBuilder['start']>>;
@@ -277,10 +292,24 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           update.sessionUpdate === 'tool_call' ||
           update.sessionUpdate === 'tool_call_update'
         ) {
-          const tool = 'title' in update ? (update.title ?? update.toolCallId) : update.toolCallId;
-          record.toolCalls.push({ tool, at: new Date().toISOString() });
+          // Prefer THIS event's title; fall back to whatever we already have
+          // for this toolCallId (from the initiating tool_call); fall back to
+          // the raw id only if we have genuinely never seen a title for it.
+          const existing = record.toolCallsById.get(update.toolCallId);
+          const tool = update.title ?? existing?.tool ?? update.toolCallId;
+          record.toolCallsById.set(update.toolCallId, { tool, at: new Date().toISOString() });
+          record.toolCalls = [...record.toolCallsById.values()];
           touch();
-          debug(tag, update.sessionUpdate + ':', tool);
+          debug(
+            tag,
+            update.sessionUpdate + ':',
+            tool,
+            '(id=' +
+              update.toolCallId +
+              ', ' +
+              record.toolCallsById.size +
+              ' distinct call(s) so far)',
+          );
         } else {
           // See the DEBUG NOTE above — this branch existing at all is the fix.
           touch();
@@ -345,6 +374,7 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           status: 'running',
           log: ['started'],
           toolCalls: [],
+          toolCallsById: new Map(),
           session,
           startedAt: now,
           lastActivityAt: now,
