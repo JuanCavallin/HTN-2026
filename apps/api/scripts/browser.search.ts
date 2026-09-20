@@ -145,10 +145,16 @@ function buildDecider(): { decide: BrowserDecider; brain: string } {
   if (jev) {
     // If Jev fails mid-run the step still gets a decision, and the output says
     // so loudly rather than silently degrading.
+    // Report the SAME failure once. A gateway that is down is down for every
+    // step, and repeating a 300-character 403 per step buries the actual run.
+    let lastReported = '';
     const guarded = withFallback(jev, deterministic, (err) => {
+      const message = err instanceof Error ? err.message.split('\n')[0] : String(err);
+      if (message === lastReported) return;
+      lastReported = message;
       console.log(
-        '\n  !! JEV CALL FAILED — falling back to the deterministic decider\n     ' +
-          (err instanceof Error ? err.message.split('\n')[0] : String(err)) +
+        '\n  !! JEV UNAVAILABLE — every step below uses the deterministic fallback\n     ' +
+          message.slice(0, 180) +
           '\n',
       );
     });

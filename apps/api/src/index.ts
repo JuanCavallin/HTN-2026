@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { config, logConfigSummary } from './config.js';
 import { seedGraphs } from './services/graphs.service.js';
+import { loadToolClassifications } from './services/runtime.js';
 import { store } from './store/index.js';
 
 async function main(): Promise<void> {
@@ -11,6 +12,12 @@ async function main(): Promise<void> {
 
   // So the canvas is never empty on a cold start. Never overwrites an edit.
   await seedGraphs();
+
+  // Seed the tool -> action-kind index the risk gate reads. Until this runs
+  // every tool is unclassified and stops for a human, so it happens before the
+  // server accepts a request.
+  const classified = await loadToolClassifications();
+  console.log('[tools] ' + classified + ' tool(s) classified for the risk gate');
 
   const app = createApp();
   const server = app.listen(config.port, () => {

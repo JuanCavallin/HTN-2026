@@ -217,6 +217,36 @@ async function main() {
   check('GET /api/tools is 200', tools.status === 200, 'status ' + tools.status);
   const catalog = tools.body?.tools ?? [];
   check('catalog returned tools', catalog.length > 0, catalog.length + ' tools');
+  // THE SAFETY ASSERTION. A tool with no actionKind is unclassified, and an
+  // unclassified tool stops for a human -- so a catalog that forgets one is
+  // noisy, not dangerous. But a tool classified into a kind core/risk.ts does
+  // not know silently becomes auto-approved, which is the dangerous direction.
+  const KNOWN_KINDS = new Set([
+    'read_page', 'interact', 'unclassified_tool',
+    'submit_form', 'send_email', 'send_message', 'transfer_funds', 'make_payment',
+    'cancel_service', 'delete', 'publish', 'accept_terms', 'place_order',
+    'schedule', 'book', 'upload_document', 'update_profile', 'create_draft',
+  ]);
+  const unclassified = catalog.filter((t) => !t.actionKind);
+  const unknownKind = catalog.filter((t) => t.actionKind && !KNOWN_KINDS.has(t.actionKind));
+  check(
+    'every tool carries an actionKind for the risk gate',
+    unclassified.length === 0,
+    unclassified.map((t) => t.name).join(', ') || 'all classified',
+  );
+  check(
+    'no tool uses an actionKind core/risk.ts does not know',
+    unknownKind.length === 0,
+    unknownKind.map((t) => t.name + '=' + t.actionKind).join(', ') || 'all recognised',
+  );
+  check(
+    'the irreversible tools are still classified irreversible',
+    ['mail.send', 'forms.submit', 'payments.charge'].every((name) => {
+      const tool = catalog.find((t) => t.name === name);
+      return !tool || ['send_email', 'submit_form', 'make_payment'].includes(tool.actionKind);
+    }),
+  );
+
   check(
     'every tool has a name and a description',
     catalog.every((t) => Boolean(t.name) && Boolean(t.description)),

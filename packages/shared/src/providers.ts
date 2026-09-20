@@ -7,6 +7,7 @@
  */
 
 import type { BrowserOperation, BrowserPerformResult, ElementTable } from './browser.js';
+import type { Reversibility } from './policy.js';
 
 export type ProviderId =
   | 'hermes' // agent runtime (Nous Research)
@@ -235,10 +236,62 @@ export interface BrowserAdapter extends ProviderAdapter {
   ): Promise<ProviderResult<BrowserPerformResult>>;
 }
 
+/**
+ * One tool in the catalog.
+ *
+ * ============================================================================
+ * `actionKind` IS A SAFETY FIELD, not a label.
+ *
+ * `core/risk.ts` decides whether a human gets asked, and it decides from the
+ * action's KIND. A hand-written playbook passes that kind literally. A graph
+ * cannot: a `dispatch` node does not know which tool it will call until a model
+ * has picked one. So the kind has to travel WITH the tool, and this is where it
+ * travels.
+ *
+ * Getting it wrong in the permissive direction is the worst bug available in
+ * this codebase — it would let a model-selected `mail.send` run unattended and
+ * turn `dispatch` into a way around the approval gate.
+ *
+ * TWO RULES:
+ *
+ *  1. `actionKind` MUST be a value `core/risk.ts` already recognises. A kind it
+ *     does not know falls through to `reversible` and RUNS UNATTENDED. If you
+ *     need a new kind, add it to IRREVERSIBLE_KINDS / RECOVERABLE_KINDS in the
+ *     same change.
+ *  2. Tool names are OUR vocabulary, never a vendor's: `domain.action`,
+ *     lowercase, dot separated. Translate at the adapter boundary. That is what
+ *     lets a tool move between providers without touching a graph.
+ * ============================================================================
+ */
+export interface ToolCatalogEntry {
+  /** `domain.action`, our vocabulary — e.g. `mail.send`, not Composio's name. */
+  name: string;
+  description: string;
+  /**
+   * What calling this DOES, in `core/risk.ts`'s vocabulary.
+   *
+   * Optional only so the field can land additively; an entry without one is
+   * treated as UNCLASSIFIED and fails closed (stops for a human), never as safe.
+   */
+  actionKind?: string;
+  /** Overrides the kind -> reversibility inference when the tool knows better. */
+  reversibility?: Reversibility;
+  /** Grouping for the editor's tool picker: `mail`, `sheets`, `browser`, … */
+  group?: string;
+  /**
+   * A FIXTURE: an invented tool with no provider behind it.
+   *
+   * Fixtures exist so tool SELECTION and REDUCTION can be demonstrated before
+   * the sponsor catalog is chosen. They must be labelled truthfully in the UI
+   * and they must REFUSE TO EXECUTE — per the design spec, running one is an
+   * error, not a no-op. A fixture that quietly returns `ok` is worse than no
+   * fixture at all, because the trace then shows work that never happened.
+   */
+  simulated?: boolean;
+}
+
 export interface ToolboxAdapter extends ProviderAdapter {
-  listTools(
-    ctx: ProviderCallContext,
-  ): Promise<ProviderResult<{ name: string; description: string }[]>>;
+  listTools(ctx: ProviderCallContext): Promise<ProviderResult<ToolCatalogEntry[]>>;
   connectUrl(app: string, ctx: ProviderCallContext): Promise<ProviderResult<{ url: string }>>;
   callTool(
     input: { name: string; args: Record<string, unknown> },
