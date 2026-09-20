@@ -20,8 +20,10 @@ function upsert<T extends { id: string }>(list: T[], item: T): T[] {
   return next;
 }
 
-export function runReducer(state: RunView, event: RunEvent): RunView {
+export function runReducer(state: RunView, event: RunEvent | { type: 'reset' }): RunView {
   switch (event.type) {
+    case 'reset':
+      return emptyRunView;
     case 'run.updated':
       return { ...state, run: event.run };
 
@@ -61,11 +63,13 @@ export function runReducer(state: RunView, event: RunEvent): RunView {
 
 export interface RunStreamState extends RunView {
   connected: boolean;
+  lastEventAt: number | null;
 }
 
-export function useRunStream(runId: string | undefined): RunStreamState {
+export function useRunStream(runId: string | undefined, reconnectKey = 0): RunStreamState {
   const [view, dispatch] = useReducer(runReducer, emptyRunView);
   const [connected, setConnected] = useState(false);
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
 
   // A REST fallback for `view.run` specifically -- not steps/egress/approvals,
@@ -95,6 +99,9 @@ export function useRunStream(runId: string | undefined): RunStreamState {
   }, [runId]);
 
   useEffect(() => {
+    dispatch({ type: 'reset' });
+    setConnected(false);
+    setLastEventAt(null);
     if (!runId) return;
 
     const source = new EventSource('/api/runs/' + runId + '/stream');
@@ -105,6 +112,7 @@ export function useRunStream(runId: string | undefined): RunStreamState {
     source.onmessage = (message) => {
       try {
         dispatch(JSON.parse(message.data) as RunEvent);
+        setLastEventAt(Date.now());
       } catch {
         // A malformed frame must not tear down the stream.
       }
@@ -115,7 +123,7 @@ export function useRunStream(runId: string | undefined): RunStreamState {
       sourceRef.current = null;
       setConnected(false);
     };
-  }, [runId]);
+  }, [runId, reconnectKey]);
 
   // Close the stream once the run can produce no more events. Leaving it open
   // would hold one of the browser's ~6 connections per origin for nothing.
@@ -127,5 +135,5 @@ export function useRunStream(runId: string | undefined): RunStreamState {
     }
   }, [view.run]);
 
-  return { ...view, connected };
+  return { ...view, connected, lastEventAt };
 }

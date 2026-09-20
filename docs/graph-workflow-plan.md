@@ -13,7 +13,7 @@ the build order for one vertical that cuts across Person 1 (runtime), Person 2
 ## 1. The problem
 
 The pipeline today is imperative control flow — `core/playbooks/demo.playbook.ts`
-*is* the graph, encoded as `await` statements. You cannot edit control flow from
+_is_ the graph, encoded as `await` statements. You cannot edit control flow from
 a browser.
 
 So the first move is not "pick a graph library". It is: **make the pipeline a
@@ -61,17 +61,17 @@ AgentGraph = { id, name, description?, nodes, edges, version,
 `GraphNode.type` uses the **same vocabulary as `StepSpec.kind`**, which buys the
 icon map in `components/runs/StepRow.tsx` for free in the editor:
 
-| type | LLM? | maps to |
-|---|---|---|
-| `fetch` | no | `ctx.step` — load a source |
-| `tool` | **no** | `ctx.step` + `provider('toolbox').callTool` |
-| `redact` | no | `ctx.redact` |
-| `decide` | yes | `provider('text.model').complete` |
-| `agent_task` | yes | `ctx.runAgentTask` |
-| `swarm` | either | `ctx.fanOut` |
-| `judge` | yes | `provider('decision').decide` |
-| `submit` | no | `callTool` **behind** `ctx.requireApproval` |
-| `approval` | no | `ctx.requireApproval` standalone |
+| type         | LLM?   | maps to                                     |
+| ------------ | ------ | ------------------------------------------- |
+| `fetch`      | no     | `ctx.step` — load a source                  |
+| `tool`       | **no** | `ctx.step` + `provider('toolbox').callTool` |
+| `redact`     | no     | `ctx.redact`                                |
+| `decide`     | yes    | `provider('text.model').complete`           |
+| `agent_task` | yes    | `ctx.runAgentTask`                          |
+| `swarm`      | either | `ctx.fanOut`                                |
+| `judge`      | yes    | `provider('decision').decide`               |
+| `submit`     | no     | `callTool` **behind** `ctx.requireApproval` |
+| `approval`   | no     | `ctx.requireApproval` standalone            |
 
 **`tool` is first class: a deterministic tool call with no model in the loop.**
 Distinct from `submit` (same call, approval-gated because it is irreversible)
@@ -161,7 +161,7 @@ row to a step; `Step.nodeId` (§3.2) links a step to a node. Per-node rollup is
 therefore a **pure derivation over data already flowing** — no new storage, no
 new events.
 
-Put the types *and* the rollup function in `packages/shared/src/analytics.ts`:
+Put the types _and_ the rollup function in `packages/shared/src/analytics.ts`:
 
 ```
 NodeMetrics  = { nodeId, label?, stepIds[], status, wallMs, providerLatencyMs,
@@ -188,7 +188,7 @@ and already computes run-level totals.
 **Wall-clock vs. summed provider latency is a headline number.** With the
 promise-map executor, independent nodes overlap, so
 `sum(node.providerLatencyMs) / totals.wallMs` is a real parallelism factor:
-*"7 nodes, 12.4s of model time, 4.1s wall clock — 3.0× from the swarm."*
+_"7 nodes, 12.4s of model time, 4.1s wall clock — 3.0× from the swarm."_
 
 #### Known gap to fix first
 
@@ -208,7 +208,7 @@ actual baseline to compare against.
 **Make the baseline a `Run` with `kind: 'baseline'`** — same goal, one
 `text.model.complete` call at `tier: 'frontier'`, no tools, no graph. Because it
 is an ordinary run, it gets steps, egress rows, tokens, timing and the analytics
-endpoint *for free*, and it is comparable to a graph run by construction. Then
+endpoint _for free_, and it is comparable to a graph run by construction. Then
 `GET /api/runs/:id/comparison?baseline=<runId>` is a diff of two `RunAnalytics`.
 
 This lines up with work already scheduled in `implementation_plan.md` —
@@ -219,7 +219,7 @@ Milestone 2 Person 4 ("baseline comparison") and Milestone 4 Person 2
 
 A single frontier prompt will be **cheaper and faster than the graph almost by
 definition**. If the dashboard only shows tokens, cost and latency, it argues
-*against* the product.
+_against_ the product.
 
 The graph wins on correctness, verifiability and auditability — so the
 comparison needs a **success axis**, not just a cost axis. Add optional
@@ -239,15 +239,15 @@ That is the argument. Cost alone is not.
 Three things that are already true and that this plan has to design around.
 
 **Hermes does not enforce the tool list.** `providers/hermes/live.ts` is
-explicit: `_meta.enabled_toolsets` is best-effort and empirically did *not*
+explicit: `_meta.enabled_toolsets` is best-effort and empirically did _not_
 change Hermes's own `tool_search` kept-count. A node that says "this agent has 3
 tools" is therefore advisory under live Hermes, not a guarantee.
 
 Turn it into a feature rather than hiding it: the post-hoc audit in
 `core/orchestrator.ts` already records what Hermes actually called, so diff
 actual-vs-exposed and render a divergence badge on the node. The honest claim
-becomes *"Jev narrowed 50 tools to 6 before the harness started, and we detect
-when the harness exceeds that"* — true, and provable from the `ScheduleDecision`.
+becomes _"Jev narrowed 50 tools to 6 before the harness started, and we detect
+when the harness exceeds that"_ — true, and provable from the `ScheduleDecision`.
 
 **Hermes permission requests are auto-denied.** Also `hermes/live.ts`: the ACP
 permission callback is denied by default rather than routed to our approval
@@ -312,7 +312,7 @@ so Phase 0 did not block the team for half a day.
 8. `core/playbooks/graph.playbook.ts` + one line in `registry.ts`
 9. Port `demo.playbook.ts` into a seeded `demo.graph.json`
 
-> **Checkpoint:** curl a graph in, run it, watch the *existing* `StepTimeline`
+> **Checkpoint:** curl a graph in, run it, watch the _existing_ `StepTimeline`
 > fill in. No new UI. If this does not work, nothing downstream matters.
 
 ### Phase 2 — see it (~3h)
@@ -359,7 +359,7 @@ existing `text.model` capability and `rollup()`).
 is the fallback run that always works on stage.
 
 The least trustworthy estimate is the interpreter (#7). If it is not converging
-in ~3h, fall back to rendering the graph read-only *from* the steps the existing
+in ~3h, fall back to rendering the graph read-only _from_ the steps the existing
 `demo` playbook already emits — you keep the canvas, the live visualisation, the
 analytics and the chat, and lose only execution-from-graph.
 

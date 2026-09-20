@@ -1,0 +1,208 @@
+{
+  "title": "AgentOS: choose the workspace",
+  "question": "Compare the layout schematics, not just the colors. Every direction includes open-ended chat, a live decision graph, Hermes connection, usage metrics, and pause controls. This choice approves the design direction, not unfinished backend capabilities.",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "Signal Desk",
+      "kicker": "GRAPH FIRST",
+      "lineage": "Audio signal-routing consoles, translated into a calm execution workspace",
+      "thesis": "The conversation sets the task; the graph shows the work as it happens.",
+      "palette": ["#202322", "#292D2A", "#E9EDE8", "#BFD9A3", "#DCB36D"],
+      "materials": ["matte graphite", "precise connectors", "flat, legible controls"],
+      "viewport": "A quiet conversation lane occupies the left third, a large branching graph fills the right, Hermes sits in the header, and tokens, cost, time, and Pause share one fixed bottom strip.",
+      "risk": "A graph-first workspace needs a strong empty state so a new user immediately knows where to type.",
+      "raised": [
+        {
+          "from": "Archive",
+          "raise": "Every node has the same label, status, duration, and disclosure positions, making a dense run scannable."
+        },
+        {
+          "from": "Clear Field",
+          "raise": "Inactive surfaces stay flat and neutral; emphasis is reserved for the current work and user decisions."
+        },
+        {
+          "from": "Precision Rail",
+          "raise": "State uses text, symbols, and connector form together, never color alone."
+        },
+        {
+          "from": "Atlas",
+          "raise": "Selecting a branch preserves its context instead of zooming the rest of the workflow out of recognition."
+        }
+      ],
+      "wireframe": {
+        "cols": 12,
+        "rows": 10,
+        "regions": [
+          { "label": "AgentOS / task", "x": 0, "y": 0, "w": 8, "h": 1 },
+          { "label": "Connect Hermes", "x": 8, "y": 0, "w": 4, "h": 1 },
+          { "label": "Conversation", "x": 0, "y": 1, "w": 4, "h": 6 },
+          { "label": "Live decision graph", "x": 4, "y": 1, "w": 8, "h": 8, "accent": true },
+          { "label": "Ask anything", "x": 0, "y": 7, "w": 4, "h": 2 },
+          { "label": "Tokens / cost / elapsed / Pause", "x": 0, "y": 9, "w": 12, "h": 1 }
+        ]
+      }
+    },
+    {
+      "id": "model-pick",
+      "label": "Run Notebook",
+      "kicker": "CHAT FIRST",
+      "lineage": "Experiment notebooks and chronological execution records",
+      "thesis": "Each request becomes one readable record: task, execution graph, result.",
+      "palette": ["#F1F3F2", "#FFFFFF", "#222B31", "#315F70", "#B17922"],
+      "materials": ["cool pale canvas", "ink-like text", "unboxed chronological flow"],
+      "viewport": "One wide conversation column contains an expandable graph for the current request; a narrow status rail holds Hermes, usage, and Pause, and the composer stays anchored below.",
+      "risk": "Familiar and easy to learn, but closer to conventional chatbot layouts; the graph must earn its distinctive role.",
+      "wireframe": {
+        "cols": 12,
+        "rows": 10,
+        "regions": [
+          { "label": "AgentOS / conversations", "x": 0, "y": 0, "w": 12, "h": 1 },
+          { "label": "Your request", "x": 0, "y": 1, "w": 9, "h": 2 },
+          { "label": "Expandable execution graph", "x": 0, "y": 3, "w": 9, "h": 4, "accent": true },
+          { "label": "Response", "x": 0, "y": 7, "w": 9, "h": 1 },
+          { "label": "Ask anything", "x": 0, "y": 8, "w": 9, "h": 2 },
+          { "label": "Hermes / metrics / Pause", "x": 9, "y": 1, "w": 3, "h": 9 }
+        ]
+      }
+    },
+    {
+      "id": "wayfinding-cartography-signage-midnight-transit-diagram",
+      "label": "Route Map",
+      "kicker": "PATH FIRST",
+      "verdict": "competitive",
+      "lineage": "Transit diagrams with disciplined branches and interchange points",
+      "thesis": "Follow the path from your request to its outcome, and inspect the decisions at each junction.",
+      "palette": ["#142D43", "#EFF3F2", "#66A5DA", "#D5B46A", "#75B89D"],
+      "materials": ["flat midnight-blue field", "angular route lines", "clear interchange markers"],
+      "viewport": "A request strip and Hermes control sit above a full-width graph; the active path is emphasized, an inspector opens on selection, and the composer and usage controls sit below.",
+      "case": "Strong at explaining branches and parallel tasks to judges; less conversational than Signal Desk during a long exchange.",
+      "risk": "Connections must reflect real dependencies; attractive route lines cannot invent task relationships.",
+      "hero": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-midnight-transit-diagram-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-midnight-transit-diagram.webp",
+      "wireframe": {
+        "cols": 12,
+        "rows": 10,
+        "regions": [
+          { "label": "AgentOS / task / Hermes", "x": 0, "y": 0, "w": 12, "h": 1 },
+          { "label": "Current request", "x": 0, "y": 1, "w": 12, "h": 1 },
+          { "label": "Branching route map", "x": 0, "y": 2, "w": 9, "h": 6, "accent": true },
+          { "label": "Selected decision", "x": 9, "y": 2, "w": 3, "h": 6 },
+          { "label": "Conversation / composer", "x": 0, "y": 8, "w": 8, "h": 2 },
+          { "label": "Usage / Pause", "x": 8, "y": 8, "w": 4, "h": 2 }
+        ]
+      }
+    },
+    {
+      "id": "signals-instruments-split-flap-concourse",
+      "label": "Execution Board",
+      "kicker": "PERFORMANCE FIRST",
+      "verdict": "competitive",
+      "lineage": "Departure-board information grids, without novelty flap animations",
+      "thesis": "Read the run at a glance: which tasks are active, what they cost, and what is waiting.",
+      "palette": ["#202324", "#363B3D", "#F3F3EC", "#E8BF72"],
+      "materials": ["matte dark surface", "fixed aligned columns", "compact semantic status marks"],
+      "viewport": "The prompt and Hermes control head a board of aligned task rows, while a linked graph occupies the lower half and the composer, totals, and Pause remain fixed.",
+      "case": "Strongest at comparing timings and spotting bottlenecks; weaker than Signal Desk at maintaining a simple chatbot experience.",
+      "risk": "Could feel like a monitoring console unless secondary columns stay collapsed until requested.",
+      "hero": "https://impeccable.style/worlds/cards/signals-instruments-split-flap-concourse-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/signals-instruments-split-flap-concourse.webp",
+      "wireframe": {
+        "cols": 12,
+        "rows": 10,
+        "regions": [
+          { "label": "AgentOS / request / Hermes", "x": 0, "y": 0, "w": 12, "h": 2 },
+          {
+            "label": "Task / route / status / time / cost",
+            "x": 0,
+            "y": 2,
+            "w": 12,
+            "h": 3,
+            "accent": true
+          },
+          { "label": "Linked execution graph", "x": 0, "y": 5, "w": 12, "h": 3 },
+          { "label": "Ask anything", "x": 0, "y": 8, "w": 8, "h": 2 },
+          { "label": "Totals / Pause", "x": 8, "y": 8, "w": 4, "h": 2 }
+        ]
+      }
+    },
+    {
+      "id": "textiles-weave-drape-fashion-sneaker-box-stacks",
+      "label": "Archive",
+      "verdict": "declined",
+      "lineage": "Indexed archive boxes",
+      "thesis": "Each run is a labeled container that opens to reveal its execution.",
+      "palette": ["#BE632C", "#242522", "#F4EFE6"],
+      "materials": ["box-board fields", "label grids"],
+      "viewport": "Stacked run labels open into graph and conversation detail.",
+      "case": "Useful for history, but the archive metaphor is unfamiliar for asking a new question and hides the live task.",
+      "kept": "Consistent node anatomy for scanning dense runs.",
+      "risk": "Container animation adds friction to immediate execution.",
+      "hero": "https://impeccable.style/worlds/cards/textiles-weave-drape-fashion-sneaker-box-stacks-hero.webp"
+    },
+    {
+      "id": "clouds-storms-auroras-iridescent-cloud-edge",
+      "label": "Clear Field",
+      "verdict": "declined",
+      "lineage": "Cloud-edge observation fields",
+      "thesis": "An almost white canvas isolates one active observation at a time.",
+      "palette": ["#F7F9F9", "#3C4652", "#AFCEBD", "#BEAFCF"],
+      "materials": ["open white fields", "fine boundary lines"],
+      "viewport": "A large current-decision field is edged by quiet chat and measurement panels.",
+      "case": "The atmospheric metaphor adds no familiar way to understand task dependencies or control execution.",
+      "kept": "Inactive surfaces remain quiet rather than competing with the active decision.",
+      "risk": "Spectral accents risk becoming decoration unrelated to product state.",
+      "hero": "https://impeccable.style/worlds/cards/clouds-storms-auroras-iridescent-cloud-edge-hero.webp"
+    },
+    {
+      "id": "operate-c-emission-line-rail",
+      "label": "Precision Rail",
+      "verdict": "declined",
+      "lineage": "Calibrated spectrogram rails",
+      "thesis": "Every decision registers against one precise execution rail.",
+      "palette": ["#282A2B", "#E4E0D6", "#DFB55C"],
+      "materials": ["flat charcoal", "calibrated ticks", "line-form states"],
+      "viewport": "A single rail holds decision marks, opening one large task detail above it.",
+      "case": "Its abstract controls are harder to learn, and a single rail obscures parallel work compared with an explicit graph.",
+      "kept": "Status must remain legible through labels and form, not color alone.",
+      "risk": "Tiny calibrated marks would weaken presentation-distance readability.",
+      "hero": "https://impeccable.style/worlds/cards/operate-c-emission-line-rail-hero.webp"
+    },
+    {
+      "id": "notation-diagram-systems-star-atlas",
+      "label": "Atlas",
+      "verdict": "declined",
+      "lineage": "Indexed star-atlas plates",
+      "thesis": "Explore a run as a field of related observations.",
+      "palette": ["#182736", "#EBEBE5", "#BB7057"],
+      "materials": ["chart fields", "ranked markers", "coordinate indexes"],
+      "viewport": "A wide navigable field of task markers opens focused node details.",
+      "case": "Constellations suggest similarity rather than dependency, and offer less familiar task controls than an explicit workflow graph.",
+      "kept": "Focus a branch while preserving surrounding context.",
+      "risk": "An ornamental star field would make workflow structure less trustworthy.",
+      "hero": "https://impeccable.style/worlds/cards/notation-diagram-systems-star-atlas-hero.webp"
+    }
+  ],
+  "reroll": { "registers": ["safer", "bolder"] },
+  "steer": true,
+  "canon": true,
+  "canonCard": {
+    "label": "Conventional chat workspace",
+    "thesis": "A familiar chatbot layout with a graph tab and standard inspector.",
+    "palette": ["#FFFFFF", "#F0F2F4", "#20262D", "#345FC2"],
+    "materials": ["neutral panels", "standard chat controls"],
+    "viewport": "Conversation in the center, history on the left, and optional graph and metrics on the right.",
+    "risk": "Easy to recognize, but deliberately less distinctive.",
+    "wireframe": {
+      "cols": 12,
+      "rows": 10,
+      "regions": [
+        { "label": "History", "x": 0, "y": 0, "w": 2, "h": 10 },
+        { "label": "Chat / Hermes", "x": 2, "y": 0, "w": 7, "h": 8 },
+        { "label": "Composer", "x": 2, "y": 8, "w": 7, "h": 2 },
+        { "label": "Graph / metrics / Pause", "x": 9, "y": 0, "w": 3, "h": 10 }
+      ]
+    }
+  },
+  "buildPath": { "value": "code", "toggle": false }
+}

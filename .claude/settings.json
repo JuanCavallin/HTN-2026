@@ -1,5 +1,24 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/32757cda-c578-4eee-ac78-5ca54c84df7e/scratchpad/drag.mjs)",
+      "Bash(\"C:/Users/danie/.claude/plugins/cache/impeccable/impeccable/4.3.1/skills/impeccable/scripts/impeccable.cmd\" live *)",
+      "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/32757cda-c578-4eee-ac78-5ca54c84df7e/scratchpad/tokenize.mjs src/workspace.css)",
+      "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/32757cda-c578-4eee-ac78-5ca54c84df7e/scratchpad/tokenize.mjs src/workspace.css --write)",
+      "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/32757cda-c578-4eee-ac78-5ca54c84df7e/scratchpad/themes.mjs)",
+      "Bash(sed -i \"s/'node-planned-text': '#8a977f',/'node-planned-text': '#76836c',/\" themes.mjs)",
+      "Bash(node themes.mjs)",
+      "Bash(python /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/32757cda-c578-4eee-ac78-5ca54c84df7e/scratchpad/splice.py /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/32757cda-c578-4eee-ac78-5ca54c84df7e/scratchpad/themes.css src/workspace.css)",
+      "Bash(node /c/Users/danie/AppData/Local/Temp/claude/c--Users-danie-HTN-2026/32757cda-c578-4eee-ac78-5ca54c84df7e/scratchpad/themeshots.mjs)",
+      "Bash(node -e ' *)",
+      "Bash(sed -n '/const selector/p' tests/workspace.test.mjs)",
+      "Bash(node --test tests/)",
+      "Bash(node --test \"tests/*.test.mjs\")",
+      "Bash(node --test tests/theme.test.mjs)"
+    ]
+  },
   "enabledPlugins": {
-    "mattpocock-skills@mattpocock": true
+    "mattpocock-skills@mattpocock": true,
+    "impeccable@impeccable": true
   }
 }

@@ -1,90 +1,139 @@
-import { NavLink } from 'react-router-dom';
-import { Presentation, Search, Workflow } from 'lucide-react';
-import { useProviders } from '../../hooks/useRuns';
-import { ProviderBadges } from '../providers/ProviderBadges';
-
-const LINKS = [
-  { to: '/', label: 'Runs', end: true },
-  { to: '/graphs', label: 'Graphs', end: false },
-];
+import { useState } from 'react';
+import { Link, NavLink, useLocation } from 'react-router-dom';
+import { Icon, Mark } from '../ui/Icon';
+import { THEMES, type ThemeId } from '../../lib/theme';
 
 export function Nav({
-  widthClass,
-  onOpenPalette,
-  present,
-  onTogglePresent,
+  open = false,
+  onClose,
+  onConnect,
+  theme,
+  onThemeChange,
 }: {
-  widthClass: string;
-  onOpenPalette: () => void;
-  present: boolean;
-  onTogglePresent: () => void;
+  open?: boolean;
+  onClose?: () => void;
+  onConnect?: () => void;
+  theme: ThemeId;
+  onThemeChange: (theme: ThemeId) => void;
 }) {
-  const providers = useProviders();
-
+  const location = useLocation();
+  const [help, setHelp] = useState(false);
+  const [themes, setThemes] = useState(false);
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/75 backdrop-blur-md">
-      <div className={'mx-auto flex w-full flex-wrap items-center gap-4 px-4 py-2.5 ' + widthClass}>
-        <NavLink
-          to="/"
-          className="flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-100"
-        >
-          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-sky-500/15 text-sky-300 ring-1 ring-inset ring-sky-500/30">
-            <Workflow className="h-3.5 w-3.5" aria-hidden />
-          </span>
-          Agent Runtime
-          <span className="font-normal text-slate-600">HTN 2026</span>
+    <aside className={`sidebar ${open ? 'is-open' : ''}`} aria-label="Workspace navigation">
+      <Link className="brand" to="/">
+        <Mark />
+        <span>
+          Zephyr
+        </span>
+        <span className="brand-beta">beta</span>
+      </Link>
+      <button
+        className="icon-button mobile-nav-close"
+        aria-label="Close navigation"
+        onClick={onClose}
+      >
+        <Icon name="close" />
+      </button>
+      <Link to={'/?new=' + Date.now()} className="new-conversation">
+        <Icon name="plus" size={17} />
+        <span>New conversation</span>
+      </Link>
+      <nav className="primary-navigation">
+        <NavLink to="/" end>
+          <Icon name="chat" />
+          <span>Conversations</span>
+          <span className="nav-current-dot" />
         </NavLink>
-
-        <nav className="flex items-center gap-1">
-          {LINKS.map((link) => (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              end={link.end}
-              className={({ isActive }) =>
-                'rounded-md px-2.5 py-1 text-xs font-medium transition-colors ' +
-                (isActive
-                  ? 'bg-slate-800 text-slate-100'
-                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200')
-              }
-            >
-              {link.label}
-            </NavLink>
-          ))}
-        </nav>
-
-        <button
-          type="button"
-          onClick={onOpenPalette}
-          className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900/70 px-2.5 py-1 text-xs text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200"
+        <NavLink to="/graphs">
+          <Icon name="graph" />
+          <span>Workflows</span>
+        </NavLink>
+        <NavLink to="/runs">
+          <Icon name="clock" />
+          <span>Run history</span>
+        </NavLink>
+      </nav>
+      <div className="sidebar-section">
+        <span className="sidebar-label">Explore an example</span>
+        <Link
+          className={'example-link ' + (location.search.includes('support') ? 'selected' : '')}
+          to="/?example=support"
         >
-          <Search className="h-3 w-3" aria-hidden />
-          Search
-          <kbd className="rounded bg-slate-800 px-1 font-mono text-[10px] text-slate-400">
-            Ctrl K
-          </kbd>
-        </button>
-
-        <button
-          type="button"
-          onClick={onTogglePresent}
-          aria-pressed={present}
-          title="Presentation mode: larger UI for demos"
-          className={
-            'flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors ' +
-            (present
-              ? 'border-sky-500/50 bg-sky-500/15 text-sky-300'
-              : 'border-slate-700 bg-slate-900/70 text-slate-400 hover:border-slate-600 hover:text-slate-200')
-          }
+          <span className="example-mark">
+            <Icon name="file" size={14} />
+          </span>
+          <span>High-risk account research</span>
+        </Link>
+        <Link
+          className={'example-link ' + (location.search.includes('trip') ? 'selected' : '')}
+          to="/?example=trip"
         >
-          <Presentation className="h-3 w-3" aria-hidden />
-          Present
+          <span className="example-mark">
+            <Icon name="globe" size={14} />
+          </span>
+          <span>A weekend in Toronto</span>
+        </Link>
+        <p className="sidebar-caption">
+          Interactive previews.
+          <br />
+          No tools or models are called.
+        </p>
+      </div>
+      <div className="sidebar-bottom">
+        <button className="sidebar-utility" onClick={onConnect}>
+          <Icon name="connect" size={17} />
+          Harness connection
         </button>
-
-        <div className="ml-auto">
-          <ProviderBadges providers={providers} compact />
+        <button className="sidebar-utility" aria-expanded={themes} onClick={() => setThemes(!themes)}>
+          <Icon name="palette" size={17} />
+          Theme
+          <span className="utility-value">
+            {THEMES.find((item) => item.id === theme)?.label}
+          </span>
+        </button>
+        {themes && (
+          <div className="theme-picker" role="radiogroup" aria-label="Colour theme">
+            {THEMES.map((item) => (
+              <button
+                key={item.id}
+                role="radio"
+                aria-checked={theme === item.id}
+                className={`theme-option ${theme === item.id ? 'chosen' : ''}`}
+                onClick={() => onThemeChange(item.id)}
+              >
+                <span className="theme-swatch" aria-hidden="true">
+                  {item.swatch.map((colour) => (
+                    <i key={colour} style={{ background: colour }} />
+                  ))}
+                </span>
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.note}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        <button className="sidebar-utility" aria-expanded={help} onClick={() => setHelp(!help)}>
+          <Icon name="help" size={17} />
+          How it works
+        </button>
+        {help && (
+          <p className="sidebar-help">
+            Describe a task. Zephyr routes the work, records decisions, and stops for required
+            approvals. Preview mode lets you explore without calling real tools.
+          </p>
+        )}
+        <div className="workspace-identity">
+          <span className="identity-icon">Z</span>
+          <div>
+            <strong>Local workspace</strong>
+            <span>Hack the North 2026</span>
+          </div>
+          <Icon name="lock" size={13} />
         </div>
       </div>
-    </header>
+    </aside>
   );
 }
