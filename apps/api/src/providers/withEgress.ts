@@ -54,8 +54,7 @@ export function withEgress(
           () => (value as (...a: unknown[]) => Promise<unknown>).apply(target, args),
         )) as ProviderResult<unknown>;
 
-        const ctx = args[args.length - 1];
-        if (!isCallContext(ctx)) {
+        if (!isCallContext(callCtx)) {
           // No context means nothing to attribute the call to. Loud, because it
           // means someone broke the convention above rather than that it is fine.
           console.warn(
@@ -63,6 +62,7 @@ export function withEgress(
           );
           return result;
         }
+        const ctx = callCtx;
 
         try {
           const entry: EgressInput = {

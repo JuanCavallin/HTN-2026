@@ -116,6 +116,12 @@ export function outboundTextOf(action: ToolAction): string {
  *
  * `currentPolicy` is the authorization's final policy. The returned policy is
  * `currentPolicy` or stricter — see the invariant at the top of this file.
+ *
+ * NOT RE-RUN ON A HUMAN REVISION, deliberately. The broker reauthorizes revised
+ * arguments, but it does not re-score them: the question this check asks is
+ * "did a machine write this", and on the revision path a human demonstrably
+ * did. Re-scoring would also risk escalating to `ask_user` the payload the same
+ * person just wrote, which the broker documents as a loop rather than a gate.
  */
 export async function checkOutboundText(
   analysis: ContentAnalysisAdapter,

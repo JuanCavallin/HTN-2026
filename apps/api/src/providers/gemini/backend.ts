@@ -33,6 +33,15 @@
  * name AgentOS did not expose this turn is rejected, not executed. The gateway
  * filters which tools the model may see; this enforces that it cannot invent
  * one anyway.
+ *
+ * ONE TOOL CALL PER TURN, also to match OpenRouter. That backend sends
+ * `parallel_tool_calls: false`, so every downstream consumer — the broker, the
+ * approval gate, the trace — has only ever been exercised with a single call
+ * per turn. Gemini has no equivalent request flag, so the constraint is applied
+ * to the RESPONSE instead: extras are dropped and warned about rather than fed
+ * into a path that has never seen them. Silently passing two through would make
+ * the Gemini route behave differently from the OpenRouter one, for reasons a
+ * demo would surface at the worst possible moment.
  * ---------------------------------------------------------------------------
  * VERIFIED: endpoint shape, auth header and model ids confirmed against
  * Google's published API docs and Sept-2026 release notes. NOT exercised
@@ -286,7 +295,7 @@ export function parseToolCalls(
     ),
   );
 
-  return parts.flatMap((part, index) => {
+  const calls = parts.flatMap((part, index) => {
     const call = part.functionCall;
     if (!call) return [];
     if (typeof call.name !== 'string' || !allowed.has(call.name)) {
@@ -301,6 +310,18 @@ export function parseToolCalls(
       },
     ];
   });
+
+  // Validation above runs over EVERY call first, so an unexposed tool is still
+  // refused even when it is one we would go on to drop.
+  if (calls.length > 1) {
+    console.warn(
+      '[gemini] model returned ' +
+        calls.length.toString() +
+        ' tool calls; keeping the first to match the one-call-per-turn contract.',
+    );
+    return calls.slice(0, 1);
+  }
+  return calls;
 }
 
 async function completeLive(
