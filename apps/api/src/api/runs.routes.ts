@@ -102,8 +102,15 @@ runsRouter.get('/runs/:id/browser/:sessionId/live-view', async (req, res) => {
 
   res.json(
     result.ok
-      ? { liveViewUrl: result.data.liveViewUrl ?? null, interactive: result.data.interactive }
-      : { liveViewUrl: null, interactive: false },
+      ? {
+          liveViewUrl: result.data.liveViewUrl ?? null,
+          // 'about:blank' here means the session is open but nothing is loaded
+          // -- almost always an `open` node with no url. The UI says so rather
+          // than handing over a white box.
+          pageUrl: result.data.pageUrl ?? null,
+          interactive: result.data.interactive,
+        }
+      : { liveViewUrl: null, pageUrl: null, interactive: false },
   );
 });
 

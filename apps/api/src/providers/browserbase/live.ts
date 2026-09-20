@@ -352,32 +352,44 @@ function sameUrl(a: string, b: string): boolean {
  * is not blank, then whatever the top level said. The last fallback means this
  * can only improve on the old behaviour, never do worse than it.
  */
-function pickPage(debug: DebugResponse, startUrl?: string): string | undefined {
+function pickPage(debug: DebugResponse, startUrl?: string): { url?: string; pageUrl?: string } {
   const pages = (debug.pages ?? []).filter((page) => page.debuggerFullscreenUrl);
 
   if (startUrl) {
     const exact = pages.find((page) => page.url && sameUrl(page.url, startUrl));
-    if (exact) return exact.debuggerFullscreenUrl;
+    if (exact) return { url: exact.debuggerFullscreenUrl, pageUrl: exact.url };
   }
 
   const real = [...pages].reverse().find((page) => page.url && page.url !== 'about:blank');
-  return real?.debuggerFullscreenUrl ?? debug.debuggerFullscreenUrl;
+  if (real) return { url: real.debuggerFullscreenUrl, pageUrl: real.url };
+
+  // Nothing but blank pages. Returning the blank one is still correct -- there
+  // is genuinely nothing else to show -- but `pageUrl` reports that honestly so
+  // the caller can say "no page is loaded" instead of handing over a white box.
+  const fallback = pages[0];
+  return {
+    ...((fallback?.debuggerFullscreenUrl ?? debug.debuggerFullscreenUrl)
+      ? { url: fallback?.debuggerFullscreenUrl ?? debug.debuggerFullscreenUrl }
+      : {}),
+    ...(fallback?.url ? { pageUrl: fallback.url } : {}),
+  };
 }
 
 async function liveViewUrl(
   apiKey: string,
   sessionId: string,
   startUrl?: string,
-): Promise<{ url?: string; region?: string }> {
+): Promise<{ url?: string; pageUrl?: string; region?: string }> {
   const [debug, session] = await Promise.all([
     bbGet<DebugResponse>(apiKey, '/sessions/' + sessionId + '/debug'),
     bbGet<{ region?: string }>(apiKey, '/sessions/' + sessionId),
   ]);
 
-  const url = debug ? pickPage(debug, startUrl) : undefined;
+  const picked = debug ? pickPage(debug, startUrl) : {};
 
   return {
-    ...(url ? { url } : {}),
+    ...(picked.url ? { url: picked.url } : {}),
+    ...(picked.pageUrl ? { pageUrl: picked.pageUrl } : {}),
     ...(session?.region ? { region: session.region } : {}),
   };
 }
@@ -879,6 +891,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         ok: true as const,
         data: {
           ...(view.url ? { liveViewUrl: view.url } : {}),
+          ...(view.pageUrl ? { pageUrl: view.pageUrl } : {}),
           interactive: Boolean(view.url),
         },
         meta: meta('liveView', started, handle.destination),

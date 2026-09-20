@@ -392,7 +392,7 @@ async function callToolGated(
   // null means the registry does not know this tool, which is the normal
   // answer for a Composio name -- fall through to the toolbox below.
   if (brokered) {
-    await holdOpenedSession(ctx, args.stepId, brokered.output, args.lease);
+    await holdOpenedSession(ctx, args.stepId, brokered.output, args.toolArgs, args.lease);
     return brokered.output;
   }
 
@@ -726,6 +726,8 @@ async function holdOpenedSession(
   ctx: PlaybookContext,
   stepId: string,
   output: unknown,
+  /** The ARGS that were sent, which is the only place a requested url exists. */
+  toolArgs: Record<string, Json>,
   lease?: SessionLease,
 ): Promise<void> {
   if (!lease || !output || typeof output !== 'object' || Array.isArray(output)) return;
@@ -734,6 +736,22 @@ async function holdOpenedSession(
   if (typeof sessionId !== 'string' || sessionId.length === 0) return;
 
   lease.hold(sessionId);
+
+  // A browser opened with no url has nothing but about:blank in it, and a
+  // handoff that inherits it hands a person a white box. Say so at the moment
+  // it happens, naming the fix, rather than letting it surface as "the live
+  // view is broken" several nodes later.
+  const requestedUrl = toolArgs.url;
+  if (typeof requestedUrl !== 'string' || requestedUrl.trim() === '') {
+    await ctx
+      .log(
+        'warn',
+        'A browser session was opened with no url, so it is sitting on about:blank. ' +
+          'Anything that shows this session -- a handoff live view in particular -- will ' +
+          'look blank until something navigates it. Give the open node a url argument.',
+      )
+      .catch(() => undefined);
+  }
 
   // ANNOUNCE IT TOO. A session opened by a `tool` node is just as watchable as
   // one a handoff opened, and a later handoff that INHERITS this session has no

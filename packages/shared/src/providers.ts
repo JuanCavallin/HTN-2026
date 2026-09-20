@@ -275,7 +275,18 @@ export interface BrowserAdapter extends ProviderAdapter {
   liveView?(
     sessionId: string,
     ctx: ProviderCallContext,
-  ): Promise<ProviderResult<{ liveViewUrl?: string; interactive: boolean }>>;
+  ): Promise<
+    ProviderResult<{
+      liveViewUrl?: string;
+      /**
+       * The URL of the page the viewer is pointed at. 'about:blank' is a real,
+       * common answer -- a session opened with no start URL has nothing else --
+       * and callers should SAY SO rather than hand over a blank viewer.
+       */
+      pageUrl?: string;
+      interactive: boolean;
+    }>
+  >;
 
   /** Optional element-table path used by the Jev browser controller. */
   snapshot?(

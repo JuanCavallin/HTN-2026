@@ -51,11 +51,23 @@ export function ApprovalPanel({
     setError(null);
     const tab = window.open('', '_blank', 'noopener,noreferrer');
     try {
-      const { liveViewUrl } = await api.browserLiveView(approval.runId, handoffSessionId as string);
+      const { liveViewUrl, pageUrl } = await api.browserLiveView(
+        approval.runId,
+        handoffSessionId as string,
+      );
       if (!liveViewUrl) {
         tab?.close();
         setError('That browser session is no longer viewable. It may have already closed.');
         return;
+      }
+      // A blank page is not a broken viewer -- it is a browser that was opened
+      // without a URL. Saying which is the difference between "this is broken"
+      // and "the graph never told it where to go".
+      if (!pageUrl || pageUrl === 'about:blank') {
+        setError(
+          'The browser is open but no page is loaded (about:blank). The step that opened it ' +
+            'most likely had no url argument. Opening it anyway.',
+        );
       }
       if (tab) tab.location.href = liveViewUrl;
       else window.open(liveViewUrl, '_blank', 'noopener,noreferrer');

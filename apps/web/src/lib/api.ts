@@ -197,7 +197,7 @@ export const api = {
    * opened renders a blank, uninteractive page by the time anyone follows it.
    */
   browserLiveView: (runId: string, sessionId: string) =>
-    request<{ liveViewUrl: string | null; interactive: boolean }>(
+    request<{ liveViewUrl: string | null; pageUrl: string | null; interactive: boolean }>(
       '/runs/' + runId + '/browser/' + sessionId + '/live-view',
     ),
 
