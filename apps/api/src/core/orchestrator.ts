@@ -59,6 +59,15 @@ export interface OrchestratorDeps {
   decisionService: DecisionService;
   sessionStateService: SessionStateService;
   toolRegistry?: ToolRegistry;
+  /** The trusted broker. Absent means graph tool nodes have no brokered path. */
+  toolBroker?: {
+    execute(request: {
+      sessionStateId: string;
+      toolId: string;
+      arguments: Json;
+      signal?: AbortSignal;
+    }): Promise<{ output: Json; summary: string }>;
+  };
   toolDiscovery?: {
     discoverForTask(input: {
       query: string;
@@ -367,6 +376,50 @@ export class Orchestrator {
           redactions: spans.map((s) => ({ placeholder: s.placeholder, type: s.type })),
           hadSensitive: spans.length > 0,
         };
+      },
+
+      callBrokeredTool: async ({ stepId, toolId, args }) => {
+        const broker = this.deps.toolBroker;
+        const registry = this.deps.toolRegistry;
+        if (!broker || !registry) return null;
+
+        const [descriptor] = await registry.resolve([toolId]);
+        // Unknown to the registry is not a broker problem -- let the caller
+        // fall back to the provider catalog, which owns its own names.
+        if (!descriptor) return null;
+
+        // A short-lived session state whose ONLY purpose is to carry the
+        // author's pinned choice as a grant the broker can verify. One tool,
+        // one turn. It is not a harness session and never binds one.
+        const session = await sessionStateService.create({
+          runId,
+          stepId,
+          harness: 'hermes',
+          objective: 'graph tool node: ' + toolId,
+          dataLabels: ['private'],
+          // One call, so one step of budget. This session exists to carry a
+          // grant, not to run a loop.
+          budget: { stepsRemaining: 1 },
+          candidateToolIds: [toolId],
+        });
+        await sessionStateService.beginTurn(session.id);
+        await sessionStateService.grantToolExposure(session.id, {
+          modelCallId: 'graph-node:' + stepId,
+          selectedToolVersions: { [descriptor.id]: descriptor.version },
+        });
+
+        try {
+          const result = await broker.execute({
+            sessionStateId: session.id,
+            toolId: descriptor.id,
+            arguments: args as Json,
+            signal,
+          });
+          return { output: result.output, summary: result.summary };
+        } finally {
+          // The grant must not outlive the one call it was minted for.
+          await sessionStateService.clearToolExposure(session.id).catch(() => undefined);
+        }
       },
 
       announceBrowserSession: async (session) => {

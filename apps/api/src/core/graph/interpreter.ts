@@ -201,9 +201,9 @@ async function executeNode(
     case 'decide':
       return runDecide(ctx, node, scope, graph);
     case 'tool':
-      return runTool(ctx, node, scope);
+      return runTool(ctx, node, scope, lease);
     case 'dispatch':
-      return runDispatch(ctx, node, scope);
+      return runDispatch(ctx, node, scope, lease);
     case 'judge':
       return runJudge(ctx, node, scope);
     case 'agent_task':
@@ -211,7 +211,7 @@ async function executeNode(
     case 'swarm':
       return runSwarm(ctx, node, scope, graph);
     case 'submit':
-      return runSubmit(ctx, node, scope);
+      return runSubmit(ctx, node, scope, lease);
     case 'approval':
       return runApproval(ctx, node, scope);
     case 'handoff':
@@ -341,9 +341,71 @@ async function callToolGated(
     amountCents?: number;
     /** Force a human regardless of classification (an explicit `submit`). */
     forceApproval?: boolean;
+    /**
+     * Run-scoped session lease. A browser `open` deliberately does NOT close
+     * what it opened (core/tools/browser.ts sets ownsSession = false and hands
+     * the id back), so without this a plain `tool` node that opens a browser
+     * leaks a billed, concurrency-capped session on every run. Handing the
+     * lease down means the run releases it, exactly as a handoff's is.
+     */
+    lease?: SessionLease;
   },
 ): Promise<unknown> {
   const risk = toolRisk(args.tool, args.actionKind);
+
+  // THE BROKER FIRST. A tool AgentOS itself registers -- the browser family,
+  // local tools, anything reached over MCP -- executes through the same trusted
+  // path a harness turn uses: schema-validated arguments, availability and
+  // scope checks, exact-action authorization, and its own approval gate.
+  //
+  // This is not an optimisation. Every graph tool call used to go to the
+  // `toolbox` provider, so a node naming `browserbase.open` was handed to
+  // Composio, which has never heard of it: "Tool/version was not resolved from
+  // trusted Composio catalog metadata". The toolbox owns its own names and
+  // nothing else.
+  //
+  // NO requireApproval AROUND AN ORDINARY BROKERED CALL. The broker gates the
+  // concrete action itself; gating here as well asks a person twice for one
+  // call. That is the same rule the old tool routes stated as `gatesItself`.
+  //
+  // AN EXPLICIT `submit` NODE IS THE ONE EXCEPTION. "Always stop for a human"
+  // is the author's decision and must not depend on how the registry happens
+  // to classify the tool -- a submit node naming a reversible tool still stops.
+  // So it gates here FIRST and is then executed through the broker like
+  // anything else, rather than being pushed down the toolbox path where its
+  // name would not resolve.
+  if (args.forceApproval) {
+    await ctx.requireApproval(args.stepId, {
+      kind: risk.kind,
+      description: args.description,
+      amountCents: args.amountCents,
+      reversibility: 'irreversible',
+      payload: { tool: args.tool, args: args.toolArgs } as Json,
+    });
+  }
+
+  const brokered = await ctx.callBrokeredTool({
+    stepId: args.stepId,
+    toolId: args.tool,
+    args: args.toolArgs,
+  });
+  // null means the registry does not know this tool, which is the normal
+  // answer for a Composio name -- fall through to the toolbox below.
+  if (brokered) {
+    await holdOpenedSession(ctx, args.stepId, brokered.output, args.lease);
+    return brokered.output;
+  }
+
+  // Already gated above; do not ask again on the toolbox path either.
+  if (args.forceApproval) {
+    const toolbox = ctx.provider('toolbox');
+    const res = await toolbox.callTool(
+      { name: args.tool, args: args.toolArgs },
+      ctx.callContext({ stepId: args.stepId, policyRule: 'graph-node-submit' }),
+    );
+    if (!res.ok) throw new Error('Tool ' + args.tool + ' failed: ' + res.error.message);
+    return res.data;
+  }
 
   if (risk.unknown) {
     await ctx.log(
@@ -384,6 +446,7 @@ async function runTool(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'tool' }>,
   scope: RefScope,
+  lease: SessionLease,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -396,6 +459,7 @@ async function runTool(
         toolArgs: cfg.args,
         actionKind: cfg.actionKind,
         description: 'Call ' + cfg.tool,
+        lease,
       }),
   );
 
@@ -411,6 +475,7 @@ async function runDispatch(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'dispatch' }>,
   scope: RefScope,
+  lease: SessionLease,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -467,6 +532,7 @@ async function runDispatch(
         toolArgs,
         actionKind: cfg.actionKind,
         description: cfg.goal + ' (selected: ' + tool + ')',
+        lease,
       });
 
       return { tool, confidence: decision.data.confidence, result };
@@ -603,6 +669,7 @@ async function runSubmit(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'submit' }>,
   scope: RefScope,
+  lease: SessionLease,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -615,6 +682,7 @@ async function runSubmit(
         toolArgs: cfg.args,
         actionKind: cfg.actionKind,
         description: cfg.description,
+        lease,
         amountCents: cfg.amountCents,
         // A submit node means the author already decided this is consequential.
         forceApproval: true,
@@ -644,6 +712,43 @@ async function runApproval(
   });
 
   return { value: { approved: true }, output: { approved: true } };
+}
+
+/**
+ * Hold a browser session a tool call just opened.
+ *
+ * Recognised by shape rather than by tool name: `open` is the only browser
+ * operation that returns a `sessionId` and leaves it running, and matching on
+ * the payload keeps this working for any backend that does the same. Anything
+ * else returns a value with no sessionId and is ignored.
+ */
+async function holdOpenedSession(
+  ctx: PlaybookContext,
+  stepId: string,
+  output: unknown,
+  lease?: SessionLease,
+): Promise<void> {
+  if (!lease || !output || typeof output !== 'object' || Array.isArray(output)) return;
+  const payload = output as Record<string, unknown>;
+  const sessionId = payload.sessionId;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+
+  lease.hold(sessionId);
+
+  // ANNOUNCE IT TOO. A session opened by a `tool` node is just as watchable as
+  // one a handoff opened, and a later handoff that INHERITS this session has no
+  // other way to tell the UI which browser it is waiting on.
+  await ctx
+    .announceBrowserSession({
+      sessionId,
+      stepId,
+      providerId: ctx.providerFor('browser'),
+      // Whatever the open returned is already stale by the time anyone clicks
+      // it (Browserbase signs its viewer with a short-lived token), so this is
+      // only a "a viewer exists" signal. The URL is minted on demand.
+      interactive: typeof payload.liveViewUrl === 'string',
+    })
+    .catch(() => undefined);
 }
 
 /** Ten minutes. A person who has walked away, not a person who is reading. */

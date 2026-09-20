@@ -109,6 +109,8 @@ export const orchestrator = new Orchestrator({
   decisionService,
   sessionStateService,
   toolRegistry,
+  // Graph tool nodes execute through the SAME broker a harness turn does.
+  toolBroker,
   toolDiscovery: composioToolCatalog,
   localToolCandidates: async () => {
     const [mcpToolIds, registered] = await Promise.all([

@@ -169,6 +169,25 @@ export interface PlaybookContext {
    * expensive path.
    */
   /**
+   * Call a registered tool through the trusted broker.
+   *
+   * WHY A GRAPH NODE GETS A BROKER CALL AT ALL: the broker binds every call to
+   * a deliberate SELECTION (see assertSelected). For a harness turn that is the
+   * model's pick; for a graph node it is the author's, pinned in a reviewed
+   * document -- a stronger claim, not a weaker one. So the orchestrator mints a
+   * one-tool exposure grant from what the node names and executes against it.
+   *
+   * Returns null when no broker is wired, so a caller can fall back rather than
+   * fail. THE BROKER GATES ITS OWN CALLS -- do not also call requireApproval
+   * around this, or a person is asked twice for one action.
+   */
+  callBrokeredTool(input: {
+    stepId: string;
+    toolId: string;
+    args: Record<string, Json>;
+  }): Promise<{ output: Json; summary: string } | null>;
+
+  /**
    * Announce a browser session the UI can offer a live view of.
    *
    * Same shape as `recordSchedule`: core declares what it needs, the
