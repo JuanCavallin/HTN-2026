@@ -206,10 +206,17 @@ async function safeErrorDetail(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { error?: { message?: unknown } };
     const message = body.error?.message;
-    return typeof message === 'string' ? ': ' + message.slice(0, 240) : '.';
+    return typeof message === 'string' ? ': ' + redactProviderError(message).slice(0, 240) : '.';
   } catch {
     return '.';
   }
+}
+
+function redactProviderError(message: string): string {
+  return message.replace(
+    /https:\/\/openrouter\.ai\/workspaces\/[^\s/]+\/keys\/[^\s]+/gi,
+    '[OpenRouter account dashboard]',
+  );
 }
 
 function finiteNumber(value: unknown): number | undefined {

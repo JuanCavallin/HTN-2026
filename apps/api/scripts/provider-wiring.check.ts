@@ -108,17 +108,19 @@ if (process.env.OPENROUTER_LIVE_CHECK === '1') {
       },
     },
   );
-  const cloudCompletion = await cloud.complete(
-    {
-      route: cloudRoutes[0]!,
-      messages: [{ role: 'user', content: 'Reply with only OK.' }],
-      tools: [],
-      maxTokens: 32,
-    },
-    { runId: 'openrouter_live_check', policyRule: 'provider-wiring-check' },
-  );
-  assert.ok(cloudCompletion.actualModel);
-  assert.equal(cloudEgress.length, 1);
+  for (const route of cloudRoutes) {
+    const cloudCompletion = await cloud.complete(
+      {
+        route,
+        messages: [{ role: 'user', content: 'Reply with only OK.' }],
+        tools: [],
+        maxTokens: 32,
+      },
+      { runId: 'openrouter_live_check_' + route.id, policyRule: 'provider-wiring-check' },
+    );
+    assert.ok(cloudCompletion.actualModel);
+  }
+  assert.equal(cloudEgress.length, cloudRoutes.length);
 }
 
 console.log('provider wiring check: ok (ollama=' + ollamaConfig.models.cheap + ')');

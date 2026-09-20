@@ -84,11 +84,16 @@ export interface ChatModelBackend {
 export interface ModelGatewayOptions {
   modelRoutes?: (adapter: TextModelAdapter) => ModelRoute[];
   backend?: ChatModelBackend;
+  /** Provider-neutral ceiling for untrusted OpenAI-compatible output budgets. */
+  maxOutputTokens?: number;
 }
+
+export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 8_192;
 
 export class ModelGatewayService {
   private readonly routes: ModelRoute[];
   private readonly backend: ChatModelBackend;
+  private readonly maxOutputTokens: number;
 
   constructor(
     private readonly decisionService: DecisionService,
@@ -100,6 +105,10 @@ export class ModelGatewayService {
   ) {
     this.routes = (options.modelRoutes ?? modelRoutesFor)(model);
     this.backend = options.backend ?? textAdapterBackend(model);
+    this.maxOutputTokens = positiveIntegerOrDefault(
+      options.maxOutputTokens,
+      DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+    );
   }
 
   listModels(): ModelRoute[] {
@@ -245,7 +254,10 @@ export class ModelGatewayService {
           route: selectedRoute,
           messages,
           tools: selectedToolSchemas,
-          maxTokens: request.max_completion_tokens ?? request.max_tokens,
+          maxTokens: normalizeRequestedMaxTokens(
+            request.max_completion_tokens ?? request.max_tokens,
+            this.maxOutputTokens,
+          ),
         },
         callContext,
       );
@@ -525,6 +537,27 @@ function labelsArePublic(labels: DataLabel[]): boolean {
 function average(values: number[]): number {
   if (values.length === 0) return 1;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+/**
+ * OpenAI-compatible clients often report a model context window as their desired
+ * output budget. Treat that field as untrusted input and clamp it before it can
+ * reach any provider. Omitting or malformed values use the gateway ceiling;
+ * otherwise a provider may expand the request back to its full context window.
+ */
+export function normalizeRequestedMaxTokens(
+  requested: unknown,
+  maximum = DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+): number {
+  const safeMaximum = positiveIntegerOrDefault(maximum, DEFAULT_MODEL_MAX_OUTPUT_TOKENS);
+  if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+    return safeMaximum;
+  }
+  return Math.min(Math.floor(requested), safeMaximum);
+}
+
+function positiveIntegerOrDefault(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 function routeToTier(route: ModelRoute): ModelTier {

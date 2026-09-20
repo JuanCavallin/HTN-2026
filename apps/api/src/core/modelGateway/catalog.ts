@@ -37,3 +37,19 @@ export function modelRoutesFor(adapter: TextModelAdapter): ModelRoute[] {
     enabled: true,
   }));
 }
+
+/**
+ * Mock adapters keep a fresh clone runnable, but must never compete with real
+ * configured routes. Otherwise a low-confidence fallback can silently replace
+ * a live OpenRouter/Ollama call with simulated output.
+ */
+export function configuredModelRoutes(
+  adapter: TextModelAdapter,
+  additionalRoutes: ModelRoute[],
+): ModelRoute[] {
+  const boundRoutes = modelRoutesFor(adapter);
+  if (adapter.mode !== 'live' && additionalRoutes.some((route) => route.enabled)) {
+    return additionalRoutes;
+  }
+  return [...boundRoutes, ...additionalRoutes];
+}

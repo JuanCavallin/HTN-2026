@@ -45,6 +45,7 @@ const envSchema = z.object({
 
   MODEL_GATEWAY_BASE_URL: optionalUrl,
   MODEL_GATEWAY_API_KEY: z.string().default('agentos-local'),
+  MODEL_GATEWAY_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(1).max(65_536).default(8_192),
   MCP_GATEWAY_URL: optionalUrl,
   MCP_GATEWAY_API_KEY: z.string().default('agentos-mcp-local'),
 
@@ -241,6 +242,7 @@ export const config = Object.freeze({
   modelGateway: {
     baseUrl: env.MODEL_GATEWAY_BASE_URL ?? `http://127.0.0.1:${env.PORT}/v1`,
     apiKey: env.MODEL_GATEWAY_API_KEY,
+    maxOutputTokens: env.MODEL_GATEWAY_MAX_OUTPUT_TOKENS,
   },
   mcpGateway: {
     url: env.MCP_GATEWAY_URL ?? `http://127.0.0.1:${env.PORT}/mcp`,

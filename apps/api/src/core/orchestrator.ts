@@ -30,6 +30,7 @@ import { newId, nowIso } from '../lib/ids.js';
 import { ApprovalRejectedError, waitForApproval } from './approvalGate.js';
 import type { RunBus } from './bus.js';
 import { buildEgressEvent } from './ledger.js';
+import { modelCompletionEvidence } from './modelGateway/evidence.js';
 import { detectPii } from './redaction.js';
 import { classify } from './risk.js';
 import type { DecisionService } from './decisions/service.js';
@@ -642,19 +643,39 @@ export class Orchestrator {
             });
 
             const hasResult = finalResult !== null && finalResult !== undefined;
+            const stepEvents = await store.eventsSince(runId, 0);
+            const modelEvidence = modelCompletionEvidence(stepEvents, step.id);
+            const requiresModelEvidence = runtime.mode === 'live';
+            const hasSuccessfulModelResult = !requiresModelEvidence || modelEvidence.verified;
+            if (!hasSuccessfulModelResult) {
+              throw new Error(
+                modelEvidence.failureMessage
+                  ? 'Agent model call failed: ' + modelEvidence.failureMessage
+                  : 'Agent task ended without a completed AgentOS model call.',
+              );
+            }
             // Harness tool-result messages include provider errors as well as
             // successes. Only the broker's authoritative lifecycle event proves
             // that the exact action passed policy, approval, execution, and
             // verification; never infer success from a role=tool transcript entry.
-            const hasSuccessfulToolResult = (await store.eventsSince(runId, 0)).some(
+            const hasSuccessfulToolResult = stepEvents.some(
               ({ event }) =>
                 event.type === 'tool.lifecycle' &&
                 event.lifecycle.stepId === step.id &&
                 event.lifecycle.phase === 'succeeded',
             );
-            const verifiedOutcome = hasResult && (!requiresToolAction || hasSuccessfulToolResult);
+            const resultSummary = hasResult ? summarizeHarnessResult(finalResult) : undefined;
+            const sanitizedResultSummary =
+              resultSummary && labels.every((label) => label === 'public')
+                ? (await ctx.redact(resultSummary, 'agent_result')).redacted
+                : undefined;
+            const verifiedOutcome =
+              hasResult &&
+              hasSuccessfulModelResult &&
+              (!requiresToolAction || hasSuccessfulToolResult);
             const outstandingRequirements = [
               ...(!hasResult ? ['agent-result-missing'] : []),
+              ...(!hasSuccessfulModelResult ? ['model-call-not-completed'] : []),
               ...(requiresToolAction && !hasSuccessfulToolResult
                 ? ['required-tool-action-not-completed']
                 : []),
@@ -672,7 +693,9 @@ export class Orchestrator {
                   status: 'succeeded',
                   required: true,
                   sanitizedSummary: hasResult
-                    ? 'Hermes produced a result for the requested objective.'
+                    ? sanitizedResultSummary
+                      ? 'Hermes result: ' + sanitizedResultSummary
+                      : 'Hermes produced a result for the requested objective.'
                     : 'Harness produced no result.',
                 },
               ],
@@ -684,7 +707,9 @@ export class Orchestrator {
                   verified: verifiedOutcome,
                   dataLabels: labels,
                   sanitizedSummary: verifiedOutcome
-                    ? 'The required harness result and tool action are present and verified.'
+                    ? sanitizedResultSummary
+                      ? 'Verified harness result: ' + sanitizedResultSummary
+                      : 'The required harness result and tool action are present and verified.'
                     : undefined,
                 },
               ],
@@ -694,6 +719,16 @@ export class Orchestrator {
                   passed: hasResult,
                   required: true,
                   reasonCode: hasResult ? 'result-present' : 'result-missing',
+                },
+                {
+                  id: step.id + ':model-call-completed',
+                  passed: hasSuccessfulModelResult,
+                  required: true,
+                  reasonCode: requiresModelEvidence
+                    ? modelEvidence.verified
+                      ? 'model-call-completed'
+                      : 'model-call-not-completed'
+                    : 'model-call-simulated-by-mock-runtime',
                 },
                 ...(requiresToolAction
                   ? [
@@ -907,6 +942,19 @@ function decisionSource(reasonCodes: string[]): 'jev' | 'deterministic' | 'fallb
     return 'deterministic';
   }
   return 'jev';
+}
+
+/** Compact model-visible result evidence for Jev's completion judgment. */
+function summarizeHarnessResult(value: unknown): string | undefined {
+  const candidate =
+    typeof value === 'string'
+      ? value
+      : value && typeof value === 'object' && 'text' in value && typeof value.text === 'string'
+        ? value.text
+        : JSON.stringify(toJson(value));
+  const normalized = candidate?.replace(/\s+/g, ' ').trim();
+  if (!normalized) return undefined;
+  return normalized.length <= 1_000 ? normalized : normalized.slice(0, 997) + '...';
 }
 
 /** Best-effort conversion to a storable Json value. Never throws. */

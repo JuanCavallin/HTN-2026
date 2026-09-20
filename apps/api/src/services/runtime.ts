@@ -13,7 +13,7 @@ import { config } from '../config.js';
 import { buildEgressEvent } from '../core/ledger.js';
 import { Orchestrator } from '../core/orchestrator.js';
 import { DecisionService } from '../core/decisions/service.js';
-import { modelRoutesFor } from '../core/modelGateway/catalog.js';
+import { configuredModelRoutes } from '../core/modelGateway/catalog.js';
 import { ModelGatewayService, textAdapterBackend } from '../core/modelGateway/service.js';
 import { RunToolApprovalGate } from '../core/tools/approval.js';
 import { ToolBroker } from '../core/tools/broker.js';
@@ -84,11 +84,12 @@ export const modelGateway = new ModelGatewayService(
   toolRegistry,
   bus,
   {
-    modelRoutes: (adapter) => [
-      ...modelRoutesFor(adapter),
-      ...openRouterModelRoutes(config.providers.openrouter),
-      ...ollamaModelRoutes(config.providers.ollama),
-    ],
+    maxOutputTokens: config.modelGateway.maxOutputTokens,
+    modelRoutes: (adapter) =>
+      configuredModelRoutes(adapter, [
+        ...openRouterModelRoutes(config.providers.openrouter),
+        ...ollamaModelRoutes(config.providers.ollama),
+      ]),
     backend: createOllamaBackend(
       config.providers.ollama,
       recordEgress,

@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import type { ModelRoute, ToolDescriptor } from '@htn/shared';
 import { RunBus } from '../src/core/bus.js';
 import { DecisionService } from '../src/core/decisions/service.js';
-import { ModelGatewayService } from '../src/core/modelGateway/service.js';
+import { configuredModelRoutes } from '../src/core/modelGateway/catalog.js';
+import { modelCompletionEvidence } from '../src/core/modelGateway/evidence.js';
+import {
+  ModelGatewayService,
+  normalizeRequestedMaxTokens,
+} from '../src/core/modelGateway/service.js';
 import { InMemoryToolDescriptorCatalog } from '../src/core/modelGateway/toolCatalog.js';
 import { SessionStateService } from '../src/core/sessions/service.js';
 import { create as createTextModel } from '../src/providers/anthropic/index.js';
@@ -45,6 +50,8 @@ catalog.register({
 
 let backendTools: unknown[] = [];
 let backendRoute: ModelRoute | undefined;
+let backendMaxTokens: number | undefined;
+let backendError: Error | undefined;
 const TOOL_ROUTE: ModelRoute = {
   id: 'check-local-tools',
   providerId: 'anthropic',
@@ -73,16 +80,26 @@ const CLOUD_TOOL_ROUTE: ModelRoute = {
 };
 const gateway = new ModelGatewayService(decisions, sessions, model, catalog, bus, {
   modelRoutes: () => [NO_TOOL_ROUTE, TOOL_ROUTE, CLOUD_TOOL_ROUTE],
+  maxOutputTokens: 8_192,
   backend: {
     async complete(input) {
       backendTools = input.tools;
       backendRoute = input.route;
+      backendMaxTokens = input.maxTokens;
+      if (backendError) throw backendError;
       return { text: 'Search completed.', tokensIn: 8, tokensOut: 3 };
     },
   },
 });
 
 async function main(): Promise<void> {
+  const configuredRoutes = configuredModelRoutes(model, [CLOUD_TOOL_ROUTE]);
+  assert.deepEqual(
+    configuredRoutes.map((route) => route.id),
+    [CLOUD_TOOL_ROUTE.id],
+    'simulated model routes must not compete with configured live routes',
+  );
+
   const state = await sessions.create({
     runId: 'gateway_check',
     stepId: 'gateway_check_step',
@@ -114,6 +131,7 @@ async function main(): Promise<void> {
         function: { name: 'untrusted.delete_everything', parameters: { type: 'object' } },
       },
     ],
+    max_completion_tokens: 65_536,
   });
 
   assert.equal(completion.runId, 'gateway_check');
@@ -135,6 +153,11 @@ async function main(): Promise<void> {
     },
   ]);
   assert.equal(backendRoute?.id, TOOL_ROUTE.id, 'tool schemas require a tool-capable route');
+  assert.equal(backendMaxTokens, 8_192, 'Hermes output budgets are clamped for every backend');
+  assert.equal(normalizeRequestedMaxTokens(512, 8_192), 512);
+  assert.equal(normalizeRequestedMaxTokens(65_536, 8_192), 8_192);
+  assert.equal(normalizeRequestedMaxTokens(undefined, 8_192), 8_192);
+  assert.equal(normalizeRequestedMaxTokens('65536', 8_192), 8_192);
 
   const persisted = await sessions.get(state.id);
   assert.ok(persisted);
@@ -170,9 +193,33 @@ async function main(): Promise<void> {
   );
 
   const grantId = persisted.activeToolExposureGrant?.id;
+  backendError = new Error('simulated provider outage');
+  await assert.rejects(
+    () =>
+      gateway.complete({
+        messages: [{ role: 'user', content: 'This model request should fail.' }],
+        max_tokens: 65_536,
+      }),
+    /simulated provider outage/,
+  );
+  let completionEvidence = modelCompletionEvidence(
+    await store.eventsSince('gateway_check', 0),
+    'gateway_check_step',
+  );
+  assert.equal(completionEvidence.verified, false);
+  assert.equal(completionEvidence.latest?.phase, 'failed');
+  assert.equal(completionEvidence.failureMessage, 'simulated provider outage');
+
+  backendError = undefined;
   await gateway.complete({
     messages: [{ role: 'user', content: 'Create a short conversation title.' }],
   });
+  completionEvidence = modelCompletionEvidence(
+    await store.eventsSince('gateway_check', 0),
+    'gateway_check_step',
+  );
+  assert.equal(completionEvidence.verified, true, 'a later successful retry supersedes a failure');
+  assert.equal(completionEvidence.latest?.phase, 'completed');
   assert.equal(
     (await sessions.get(state.id))?.activeToolExposureGrant?.id,
     grantId,
