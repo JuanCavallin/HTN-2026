@@ -213,6 +213,11 @@ function CanvasControls({ signature }: { signature: string }) {
 /** Root -> current path. Everything off it is dimmed, which is the route map's whole thesis. */
 function activePath(trace: Trace) {
   const live = trace.nodes.filter((node) => node.status === 'running' || node.status === 'blocked');
+  // Nothing is "current" once the run has stopped. Dimming everything but the last node then
+  // makes a finished trace -- the thing people open to READ -- the least legible state of all,
+  // and with no authored edges there is no path to walk back along anyway. Light what ran.
+  if (!live.length && trace.status !== 'running' && trace.status !== 'pending')
+    return new Set(trace.nodes.filter((node) => !node.planned).map((node) => node.id));
   const heads = live.length ? live : trace.nodes.filter((node) => !node.planned).slice(-1);
   const onPath = new Set(heads.map((node) => node.id));
   for (let pass = 0; pass < trace.nodes.length; pass++) {
@@ -366,7 +371,7 @@ export function DecisionCanvas({
               nodesDraggable={false}
               nodesConnectable={false}
               deleteKeyCode={null}
-              proOptions={{ hideAttribution: true }}
+              attributionPosition="bottom-center"
               colorMode="dark"
             >
               <Background color="#1b211d" gap={26} size={0.8} />

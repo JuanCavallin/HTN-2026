@@ -521,9 +521,23 @@ export function buildTrace(
   const toolNodes = buildToolNodes(view, catalog, now, anchorFor);
   const edges = [...plannedEdges, ...runtimeEdges, ...toolNodes.edges];
 
+  // PLACEMENT ONLY -- never rendered. A run with no authored graph (a playbook, a free-form
+  // agent task) has no edges between its top-level steps, so the layout stacked them in one
+  // rank and the cards overlapped as soon as a label wrapped. Ordering them left to right by
+  // `seq` says "this ran after that", which is true; drawing an edge would claim "this
+  // DEPENDS on that", which the trace cannot know. So the hint feeds the layout and stays
+  // out of `edges` (see the "does not invent dependencies" test).
+  const topLevel = graph
+    ? []
+    : runtimeSteps.filter((step) => !step.parentStepId).sort((x, y) => x.seq - y.seq);
+  const placementHints = topLevel.slice(1).map((step, index) => ({
+    source: topLevel[index]!.id,
+    target: step.id,
+  }));
+
   const positions = layoutTrace(
     [...sources, ...toolNodes.nodes.map((node) => ({ id: node.id }))],
-    edges,
+    [...edges, ...placementHints],
   );
   const nodes = sources.map((node): TraceNode => {
     const steps = view.steps.filter((step) =>

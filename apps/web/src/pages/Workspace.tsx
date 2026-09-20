@@ -272,6 +272,18 @@ export function Workspace() {
   const [approval, setApproval] = useState<'approved' | 'rejected'>();
   const [selected, setSelected] = useState<string>();
   const [mode, setMode] = useState<ComposerMode>('preview');
+  // Pick a truthful default once provider health arrives, unless the user already chose:
+  //   live + healthy Hermes -> run the goal as a supervised agent task;
+  //   API up but Hermes is mock -> draft a workflow (a mock harness never proposes a tool,
+  //     so an agent task would only pause as `blocked`);
+  //   API unreachable -> stay on the labelled synthetic preview.
+  const modeChosen = useRef(false);
+  useEffect(() => {
+    if (modeChosen.current || started || providers.length === 0) return;
+    const hermes = providers.find((provider) => provider.id === 'hermes');
+    setMode(hermes?.healthy && hermes.mode === 'live' ? 'backend' : 'workflow');
+    modeChosen.current = true;
+  }, [providers, started]);
   const [prompt, setPrompt] = useState(SCENARIOS[scenario].prompt);
   const [customPreview, setCustomPreview] = useState(false);
   const [overrides, setOverrides] = useState<RouteOverrides>({});
@@ -586,6 +598,7 @@ export function Workspace() {
           mode={mode}
           busy={!!busy}
           onModeChange={(next) => {
+            modeChosen.current = true;
             setMode(next);
             setError('');
             if (next !== 'preview') setStarted(false);
@@ -817,11 +830,11 @@ export function LiveRunWorkspace() {
           busy={busy}
           disabled={!terminal}
           placeholder={
-            terminal ? 'Refine this workflow or ask a follow-up…' : 'Your workflow is running…'
+            terminal ? 'Ask a follow-up…' : 'This run is in progress…'
           }
           hint={
             terminal
-              ? 'A follow-up edits this workflow and starts a new run.'
+              ? 'A follow-up starts a new supervised run. This one stays as it is.'
               : 'Follow-ups unlock when this run finishes. Use the approval or cancel controls to intervene.'
           }
         />

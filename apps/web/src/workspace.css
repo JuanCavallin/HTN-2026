@@ -3022,3 +3022,28 @@ progress::-moz-progress-bar {
   font-size: 11px;
   color: var(--accent-text-dim);
 }
+/* Daylight: the workflow canvas's executor colours were authored for a dark ground --
+   deep *-950 tints under *-300 text. On a light ground those read as muddy fills with
+   washed-out labels, so the fills become plain cards (the coloured border still carries
+   the executor) and the pale accent text is darkened in place, keeping its hue. */
+[data-theme='daylight'] .react-flow__node [class*='-950/'],
+[data-theme='daylight'] .react-flow__node [class*='bg-zinc-800/'] {
+  background-color: var(--node-fill);
+}
+[data-theme='daylight'] [class*='text-'][class*='-300']:not([class*='slate']),
+[data-theme='daylight'] [class*='text-'][class*='-400']:not([class*='slate']) {
+  filter: brightness(0.5) saturate(1.5);
+}
+/* Phone: the minimap covers the nodes it is a map of. Pan and zoom are enough there. */
+@media (max-width: 640px) {
+  .react-flow__minimap {
+    display: none;
+  }
+}
+/* React Flow's attribution ships as a pale box; keep the credit, lose the slab. */
+.react-flow__attribution {
+  background: transparent;
+}
+.react-flow__attribution a {
+  color: var(--faint);
+}

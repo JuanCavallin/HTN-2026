@@ -17,19 +17,24 @@
   --color-canvas: var(--canvas);
   --color-muted: var(--secondary);
   --color-accent: var(--accent);
-  --color-slate-950: #0b0e0d;
-  --color-slate-900: #151b16;
-  --color-slate-800: #273022;
-  --color-slate-700: #3c4635;
-  --color-slate-600: #a0ad95;
-  --color-slate-500: #a9b69e;
-  --color-slate-400: #b9c5b0;
-  --color-slate-300: #cbd7bf;
-  --color-slate-200: #dce6d2;
-  --color-slate-100: #e9eee7;
-  --color-sky-500: #c0d49e;
-  --color-sky-400: #d0dfb5;
-  --color-sky-300: #dce9c6;
+  /* The slate + sky scales are ROLES, not fixed greys: each step points at a workspace
+     token, so Tailwind-styled surfaces (workflow editor, chat, inspector, compare, approval
+     and browser panels) follow the active theme. Hard-coded hexes here pinned all of them
+     to the dark world and made the light theme unreadable.
+       950-900 ground/panel · 800-700 lines · 600-400 quiet text · 300-100 text */
+  --color-slate-950: var(--bg);
+  --color-slate-900: var(--panel);
+  --color-slate-800: var(--line);
+  --color-slate-700: var(--line-3);
+  --color-slate-600: var(--faint);
+  --color-slate-500: var(--quiet);
+  --color-slate-400: var(--secondary);
+  --color-slate-300: var(--text-2);
+  --color-slate-200: var(--text-2);
+  --color-slate-100: var(--text);
+  --color-sky-500: var(--accent-text);
+  --color-sky-400: var(--accent);
+  --color-sky-300: var(--accent-bright);
   --color-ok: #4ade80;
   --color-warn: #fbbf24;
   --color-bad: #f87171;

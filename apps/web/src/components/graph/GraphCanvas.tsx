@@ -288,8 +288,9 @@ export function GraphCanvas({
           // A branch edge is labelled with the option that selects it, so a
           // judge's two outgoing paths are self-explaining.
           label: edge.sourceHandle,
-          labelStyle: { fill: '#94a3b8', fontSize: 10 },
-          labelBgStyle: { fill: '#0b0d12' },
+          // Theme tokens, not hexes: a fixed dark label box is a black slab on the light theme.
+          labelStyle: { fill: 'var(--secondary)', fontSize: 10 },
+          labelBgStyle: { fill: 'var(--panel)' },
           style: {
             stroke: traversed
               ? source
@@ -316,7 +317,8 @@ export function GraphCanvas({
         nodeTypes={NODE_TYPES}
         fitView
         fitViewOptions={{ padding: 0.2 }}
-        proOptions={{ hideAttribution: true }}
+        // Attribution stays visible: hiding it is reserved for React Flow Pro subscribers.
+        attributionPosition="top-right"
         nodesConnectable={editable}
         nodesDraggable={editable}
         elementsSelectable={editable}
@@ -329,7 +331,7 @@ export function GraphCanvas({
         onNodeClick={(_event, node) => onSelectNode?.(node.id)}
         className="bg-slate-950"
       >
-        <Background color="#1e293b" gap={16} />
+        <Background color="var(--line-3)" gap={16} />
         <Controls
           showInteractive={false}
           className="!bottom-2 !left-2 [&>button]:!border-slate-700 [&>button]:!bg-slate-800 [&>button]:!fill-slate-300"
@@ -338,7 +340,7 @@ export function GraphCanvas({
           pannable
           zoomable
           className="!bottom-2 !right-2 !bg-slate-900"
-          maskColor="rgba(11,13,18,0.7)"
+          maskColor="color-mix(in srgb, var(--bg) 70%, transparent)"
           nodeColor={(node) => {
             const data = node.data as NodeCardData;
             return EXECUTOR_CLASSES[executorOf(data.node.type)].stroke;

@@ -41,7 +41,7 @@ const SOURCES = [
 
 export const demoPlaybook = definePlaybook<DemoInput>({
   kind: 'demo',
-  title: 'Demo run (mock end-to-end)',
+  title: 'Demo run (end-to-end tour)',
   inputSchema: demoInputSchema,
 
   async execute(ctx, input) {
