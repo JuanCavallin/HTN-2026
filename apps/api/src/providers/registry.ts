@@ -21,6 +21,7 @@ import { withEgress, type RecordEgress } from './withEgress.js';
 import { create as createHermes } from './hermes/index.js';
 import { create as createJev } from './jev/index.js';
 import { create as createBrowserbase } from './browserbase/index.js';
+import { create as createLocalBrowser } from './localbrowser/index.js';
 import { create as createComposio } from './composio/index.js';
 import { create as createAnthropic } from './anthropic/index.js';
 import { create as createGptzero } from './gptzero/index.js';
@@ -31,6 +32,7 @@ const FACTORIES: Record<ProviderId, Factory> = {
   hermes: createHermes,
   jev: createJev,
   browserbase: createBrowserbase,
+  localbrowser: createLocalBrowser,
   composio: createComposio,
   anthropic: createAnthropic,
   gptzero: createGptzero,
@@ -41,6 +43,11 @@ const BINDINGS: Record<Capability, ProviderId> = {
   'agent.runtime': 'hermes',
   decision: 'jev',
   browser: 'browserbase',
+  // Two browser capabilities on purpose. Policy — not config, and not the
+  // executor — chooses between them per step, and the two bindings produce two
+  // distinct egress destinations. That is what makes "local-only data never
+  // reached Browserbase" a provable ledger fact rather than a claim.
+  'browser.local': 'localbrowser',
   toolbox: 'composio',
   'text.model': 'anthropic',
   'content.analysis': 'gptzero',
