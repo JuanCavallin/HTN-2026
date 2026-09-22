@@ -9,11 +9,10 @@
  *
  *  1. Every tool name must exist in the toolbox catalog, or the run fails
  *     classification. See docs/tool-registry-handoff.md.
- *  2. Every fixture must leave something for runtime to decide -- at least one
- *     `dispatch` or `agent_task`. Otherwise the synthesis service's own
- *     delegation guard rejects the mock's output and mock mode can never
- *     succeed. That is intentional: the mock is held to the same bar as the
- *     model.
+ *  2. Fixtures must pass the same structural checks as live synthesis. Direct
+ *     recipes need no `dispatch` or `agent_task`; delegation is descriptive,
+ *     not a quota. Existing fixtures illustrate runtime choices, but their
+ *     keyword matching does not evaluate the live planner's routing quality.
  */
 
 interface GraphFixture {
@@ -254,7 +253,8 @@ function applyOptimizeMutation(current: Record<string, unknown>): Record<string,
     if (config.tier !== 'cheap') {
       config.tier = 'cheap';
     } else {
-      const maxTokens = typeof config.maxTokens === 'number' ? config.maxTokens : DEFAULT_MAX_TOKENS;
+      const maxTokens =
+        typeof config.maxTokens === 'number' ? config.maxTokens : DEFAULT_MAX_TOKENS;
       config.maxTokens = Math.max(MIN_MAX_TOKENS, Math.round(maxTokens * MAX_TOKENS_FACTOR));
     }
     decideNode.config = config;

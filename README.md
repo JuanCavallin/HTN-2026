@@ -20,7 +20,8 @@ authorized, and what needs a human first.
 | **Observable**         | A live, replayable trace of every decision, model call, tool call and approval. Pause, resume, cancel.                             |
 
 **Start here:** [demo script](docs/DEMO.md) · [keys for the demo laptop](docs/DEMO-KEYS.md) · [sponsor tracks](docs/SPONSORS.md) ·
-[Devpost copy](docs/DEVPOST.md) · [design spec](docs/agentos-design.md)
+[Devpost copy](docs/DEVPOST.md) · [design spec](docs/agentos-design.md) ·
+[workflow roadmap](docs/workflow-roadmap.md)
 
 ## Quick start
 

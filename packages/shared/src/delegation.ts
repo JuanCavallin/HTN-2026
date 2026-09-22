@@ -1,30 +1,11 @@
 /**
- * How much of the work a graph LEAVES for runtime to decide.
+ * Descriptive tool-delegation telemetry, not workflow validity or quality.
  *
- * ============================================================================
- * THE FAILURE THIS EXISTS TO CATCH
- *
- * A synthesiser that emits a fully-specified graph -- every tool pinned, every
- * argument literal -- produces something that runs, looks impressive, and has
- * quietly demoted the two components the product is about:
- *
- *   the decision layer has nothing left to route (the tool is already chosen)
- *   the agent harness has nothing left to plan (the steps are already drawn)
- *
- * That graph does not "use Jev and Hermes". It replaces them, and the
- * availableTools-vs-exposedTools headline collapses to 1-of-1.
- *
- * So the division of labour is deliberate, and this file measures it:
- *
- *   SYNTHESIS decides STRUCTURE  -- what stages exist, their order, where the
- *                                   gates go
- *   the DECISION layer decides WHICH -- which tool, which tier, at runtime,
- *                                   per subtask
- *   the HARNESS decides HOW      -- its own loop, for a goal nobody decomposed
- *
- * A `tool` node is not bad -- deterministic plumbing should be pinned, and it
- * costs nothing. A graph made ENTIRELY of `tool` nodes is the warning sign.
- * ============================================================================
+ * Synthesis chooses structure, dispatch defers a bounded tool choice to Jev,
+ * and agent_task delegates an adaptive loop to a harness. Known recipes can
+ * validly use neither. Arguments may still come from upstream results, and
+ * other nodes (for example decide or judge) can use models without delegating
+ * tool selection. No field here proves a workflow is model-free or cheaper.
  */
 
 import type { AgentGraph } from './schemas/graph.js';
@@ -48,9 +29,8 @@ export interface GraphDelegation {
    */
   runtimeShare: number;
   /**
-   * Nothing was left for the decision layer or a harness. The graph is a
-   * script, not an agent pipeline -- worth surfacing in the UI and worth
-   * rejecting from a synthesiser.
+   * Legacy field name: there are no dispatch or agent_task nodes. This is valid,
+   * not a warning or rejection criterion, and does not imply zero model usage.
    */
   fullyPinned: boolean;
 }
@@ -93,12 +73,8 @@ export function delegationOf(graph: Pick<AgentGraph, 'nodes'>): GraphDelegation 
 }
 
 /**
- * Is this graph shaped so the decision layer and the harness still have work?
- *
- * Used to reject a synthesised graph before it is saved. Deliberately lenient:
- * ONE deferred decision anywhere is enough. The aim is to catch the degenerate
- * "model wrote a shell script" output, not to impose a style on a human author
- * who has good reason to pin everything.
+ * Does this graph defer any tool choices or adaptive subtasks to runtime?
+ * Retained for consumers of delegation telemetry; false is not a validation error.
  */
 export function hasRuntimeDelegation(graph: Pick<AgentGraph, 'nodes'>): boolean {
   return !delegationOf(graph).fullyPinned;
