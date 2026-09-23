@@ -1,7 +1,6 @@
 import { Router, type Response } from 'express';
-import { config } from '../config.js';
 import type { OpenAiChatRequest } from '../core/modelGateway/service.js';
-import { modelGateway } from '../services/runtime.js';
+import { modelGateway, sessionStateService } from '../services/runtime.js';
 
 export const modelGatewayRouter = Router();
 
@@ -53,72 +52,30 @@ function bearerToken(authorization: string | undefined): string | null {
   return raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
 }
 
-/**
- * Hermes's placeholder for "this endpoint is local, so it needs no auth".
- *
- * It is not a guess: hermes-agent substitutes this literal for any LOOPBACK
- * base_url with no usable secret, in several independent resolution paths
- * (hermes_cli/runtime_provider_custom.py, agent/auxiliary_client.py). Our
- * gateway is http://127.0.0.1:<port>/v1, so Hermes will never send the real
- * token no matter what environment it is given -- verified by trying both
- * `key_env` and OPENAI_API_KEY, and watching it send this instead.
- */
-const HERMES_LOCAL_PLACEHOLDER = 'no-key-required';
-
-/** True only for a request that actually arrived over the loopback interface. */
-function isLoopback(req: { ip?: string; socket: { remoteAddress?: string } }): boolean {
-  const address = req.ip ?? req.socket.remoteAddress ?? '';
-  return (
-    address === '127.0.0.1' ||
-    address === '::1' ||
-    address === '::ffff:127.0.0.1' ||
-    address.startsWith('127.')
-  );
-}
-
-modelGatewayRouter.use((req, res, next) => {
-  const authorization = req.header('authorization');
-  const token = bearerToken(authorization);
-
-  // The exemption is as narrow as the behaviour it accommodates: this exact
-  // placeholder, and only from a caller on the loopback interface. A remote
-  // caller presenting it is still rejected, and every other token is still
-  // compared against the configured one.
-  if (token === HERMES_LOCAL_PLACEHOLDER && isLoopback(req)) {
+// No global key or loopback placeholder can select an agent's state.
+modelGatewayRouter.use(async (req, res, next) => {
+  try {
+    res.locals.gatewayBinding = await sessionStateService.resolveGatewayToken(
+      bearerToken(req.header('authorization')) ?? undefined,
+      'model',
+    );
     next();
-    return;
+  } catch {
+    res
+      .status(401)
+      .json({
+        error: {
+          message: 'Invalid or expired AgentOS gateway binding.',
+          type: 'authentication_error',
+        },
+      });
   }
-
-  if (token !== config.modelGateway.apiKey) {
-    // SAY WHICH KIND OF WRONG. "Invalid token" alone sends you checking a key
-    // that is already correct; the common causes are a missing header entirely
-    // (the client never picked up its key_env) and a non-Bearer scheme. Only
-    // the shape is logged -- never the token, and never the expected value.
-    const shape = !authorization
-      ? 'no Authorization header was sent'
-      : !authorization.startsWith('Bearer ')
-        ? 'the Authorization header is not a Bearer token'
-        : authorization === 'Bearer '
-          ? 'the Bearer token was empty'
-          : 'the Bearer token did not match (length ' + (authorization.length - 7) + ')';
-    // Local dev token only: show the ends so a mismatch is identifiable
-    // without printing a credential in full.
-    const raw = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
-    const hint =
-      raw.length > 6 ? raw.slice(0, 3) + '...' + raw.slice(-3) : raw.length > 0 ? raw : '(none)';
-    console.warn('[model-gateway] rejected a call: ' + shape + ' [' + hint + ']');
-    res.status(401).json({
-      error: { message: 'Invalid AgentOS gateway token: ' + shape, type: 'authentication_error' },
-    });
-    return;
-  }
-  next();
 });
 
 modelGatewayRouter.post('/chat/completions', async (req, res) => {
   try {
     const input = req.body as OpenAiChatRequest;
-    const completion = await modelGateway.complete(input);
+    const completion = await modelGateway.complete(input, res.locals.gatewayBinding);
     res.setHeader('X-AgentOS-Run-Id', completion.runId);
     res.setHeader('X-AgentOS-Session-Id', completion.sessionStateId);
 

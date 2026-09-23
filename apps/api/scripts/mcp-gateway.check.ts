@@ -3,7 +3,6 @@ import { once } from 'node:events';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createApp } from '../src/app.js';
-import { config } from '../src/config.js';
 import {
   CORE_RUNTIME_STATUS_TOOL_ID,
   CORE_RUNTIME_STATUS_WIRE_NAME,
@@ -22,6 +21,7 @@ async function main(): Promise<void> {
     candidateToolIds: [CORE_RUNTIME_STATUS_TOOL_ID],
   });
   await sessionStateService.beginTurn(session.id);
+  const credentials = sessionStateService.issueGatewayCredentials(session.id);
   await sessionStateService.grantToolExposure(session.id, {
     modelCallId: 'chatcmpl_mcp_gateway_check',
     selectedToolVersions: { [CORE_RUNTIME_STATUS_TOOL_ID]: '1' },
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
 
     const client = new Client({ name: 'agentos-mcp-check', version: '1.0.0' });
     const transport = new StreamableHTTPClientTransport(endpoint, {
-      requestInit: { headers: { authorization: 'Bearer ' + config.mcpGateway.apiKey } },
+      requestInit: { headers: { authorization: 'Bearer ' + credentials.mcp } },
     });
     await client.connect(transport);
     try {

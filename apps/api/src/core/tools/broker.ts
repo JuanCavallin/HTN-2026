@@ -47,6 +47,8 @@ export class ToolBrokerError extends Error {
 
 export interface ToolExecutionRequest {
   sessionStateId: string;
+  /** Captured by the authenticated gateway, not by the model. */
+  expectedTurn?: number;
   toolId: string;
   arguments: Json;
   /** Labels may be added for a particular payload, but session labels cannot be removed. */
@@ -102,6 +104,9 @@ export class ToolBroker {
         'TOOL_NOT_SELECTED',
         'Agent session state not found: ' + request.sessionStateId,
       );
+    }
+    if (request.expectedTurn !== undefined && request.expectedTurn !== session.turn) {
+      throw new ToolBrokerError('TOOL_NOT_SELECTED', 'Stale gateway turn.');
     }
 
     const registered = await this.registry.get(request.toolId);
@@ -332,11 +337,23 @@ export class ToolBroker {
       );
     }
 
+    const currentSession = await this.sessions.get(session.id);
+    if (
+      !currentSession ||
+      currentSession.turn !== session.turn ||
+      !['created', 'running', 'awaiting_approval'].includes(currentSession.status)
+    ) {
+      throw new ToolBrokerError('TOOL_NOT_SELECTED', 'The authorized turn is no longer active.');
+    }
+    this.assertSelected(currentSession, registered.descriptor);
+    if (request.signal?.aborted)
+      throw new ToolBrokerError('TOOL_ACTION_DENIED', 'Tool call cancelled.');
     await this.emit(session, action, 'executing', { authorization, approvalId });
     let executed: ToolExecutionOutput;
     try {
       executed = await executor.execute(action, {
         ...callContext,
+        sessionStateId: session.id,
         policyRule: approvalId ? 'human-approved-exact-tool-action' : 'authorized-tool-action',
       });
     } catch (error) {

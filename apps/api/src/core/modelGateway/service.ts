@@ -13,7 +13,7 @@ import { newId, nowIso } from '../../lib/ids.js';
 import type { RunBus } from '../bus.js';
 import type { DecisionService } from '../decisions/service.js';
 import { decisionStateFromSession } from '../sessions/decisionState.js';
-import type { SessionStateService } from '../sessions/service.js';
+import type { GatewayTurnBinding, SessionStateService } from '../sessions/service.js';
 import type { RegisteredTool } from '../tools/registry.js';
 import { modelRoutesFor } from './catalog.js';
 import type { ToolDescriptorCatalog } from './toolCatalog.js';
@@ -106,8 +106,11 @@ export class ModelGatewayService {
     return this.routes.filter((route) => route.enabled);
   }
 
-  async complete(request: OpenAiChatRequest): Promise<GatewayCompletion> {
-    const initialSession = await this.sessions.resolveActiveHarnessSession('hermes');
+  async complete(
+    request: OpenAiChatRequest,
+    binding: GatewayTurnBinding,
+  ): Promise<GatewayCompletion> {
+    const initialSession = await this.sessions.requireGatewayTurn(binding);
     const messages = Array.isArray(request.messages) ? request.messages : [];
     if (messages.length === 0) throw new Error('messages must contain at least one item');
 
@@ -196,6 +199,7 @@ export class ModelGatewayService {
     );
 
     const modelCallId = newId('chatcmpl');
+    await this.sessions.requireGatewayTurn(binding);
     // Hermes can send built-in/core schemas that are not AgentOS capabilities.
     // Those must not erase the outer Jev selection: candidateToolIds is the
     // task-level authority used to validate later model turns. Only update it
@@ -240,6 +244,7 @@ export class ModelGatewayService {
 
     let completed: ChatModelBackendResult;
     try {
+      await this.sessions.requireGatewayTurn(binding);
       completed = await this.backend.complete(
         {
           route: selectedRoute,
@@ -272,6 +277,7 @@ export class ModelGatewayService {
       throw error;
     }
 
+    await this.sessions.requireGatewayTurn(binding);
     await this.emitModelLifecycle({
       modelCallId,
       runId: session.runId,

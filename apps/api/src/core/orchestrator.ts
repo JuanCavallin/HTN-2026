@@ -554,6 +554,7 @@ export class Orchestrator {
         const maxFailedToolCalls = spec.maxFailedToolCalls;
         const startedAt = Date.now();
         let sessionStateId: string | undefined;
+        let activeTaskId: string | undefined;
 
         try {
           // 1. Search and normalize only task-relevant provider tools. Private
@@ -795,10 +796,15 @@ export class Orchestrator {
           const runtime = provider('agent.runtime');
           const started = await runtime.startTask(
             { goal: spec.goal, context: spec.context, tools: decision.exposedTools },
-            buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
+            {
+              ...buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
+              sessionStateId: sessionState.id,
+              gatewayCredentials: sessionStateService.issueGatewayCredentials(sessionState.id),
+            },
           );
           if (!started.ok) throw new Error('Failed to start agent task: ' + started.error.message);
           const taskId = started.data.taskId;
+          activeTaskId = taskId;
           await sessionStateService.bindHarnessSession(sessionState.id, taskId);
 
           await bus.emit(runId, {
@@ -1098,6 +1104,14 @@ export class Orchestrator {
           });
           throw err;
         } finally {
+          if (activeTaskId) {
+            await provider('agent.runtime')
+              .cancelTask(
+                activeTaskId,
+                buildCallContext({ stepId: step.id, policyRule: 'task-finally-close' }),
+              )
+              .catch(() => undefined);
+          }
           try {
             await this.deps.releaseRunResources?.({ runId, stepId: step.id });
           } catch (error) {

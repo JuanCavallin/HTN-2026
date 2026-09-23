@@ -37,7 +37,7 @@ export function registerCoreLocalTools(
     ref: descriptor.executorRef,
     destinationFor: () => 'local://agentos/runtime',
     async execute(action) {
-      const session = await sessions.resolveActiveHarnessSession('hermes');
+      const session = await sessions.resolveStepSession(action.runId, action.stepId);
       if (session.runId !== action.runId || session.stepId !== action.stepId) {
         throw new Error('Active session changed before the local read executed.');
       }

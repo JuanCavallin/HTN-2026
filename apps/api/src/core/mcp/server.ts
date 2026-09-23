@@ -6,7 +6,7 @@ import {
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Json } from '@htn/shared';
-import type { SessionStateService } from '../sessions/service.js';
+import type { GatewayTurnBinding, SessionStateService } from '../sessions/service.js';
 import { ToolBrokerError, type ToolBroker } from '../tools/broker.js';
 import type { RegisteredTool, ToolRegistry } from '../tools/registry.js';
 
@@ -14,6 +14,7 @@ export interface AgentOsMcpServerDependencies {
   registry: ToolRegistry;
   broker: ToolBroker;
   sessions: SessionStateService;
+  binding: GatewayTurnBinding;
 }
 
 /** A fresh server is connected to each stateless Streamable HTTP request. */
@@ -24,6 +25,7 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    await deps.sessions.requireGatewayTurn(deps.binding);
     const registered = (await deps.registry.list()).filter(isExecutable);
     return { tools: registered.map(toMcpTool) };
   });
@@ -35,9 +37,10 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
     }
 
     try {
-      const session = await deps.sessions.resolveActiveHarnessSession('hermes');
+      const session = await deps.sessions.requireGatewayTurn(deps.binding);
       const result = await deps.broker.execute({
         sessionStateId: session.id,
+        expectedTurn: deps.binding.turn,
         toolId: registered.descriptor.id,
         arguments: toJsonArguments(request.params.arguments),
         signal: extra.signal,

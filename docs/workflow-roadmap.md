@@ -129,6 +129,18 @@ behavior with doubles/mock providers, not live browser continuity.
 
 ## Next: scoped gateways, shared context, and resource ownership (P0)
 
+Implementation steps (each verified step is committed separately):
+
+- [x] Scoped gateway transport: per-context, audience-specific process-local credentials;
+      model/MCP requests resolve the authenticated session and capture its turn, with
+      stale/terminal bindings rejected. Global keys and loopback placeholders cannot
+      select execution context. Live Hermes uses an isolated subprocess/profile per
+      context and a named custom provider honoring its scoped key environment.
+      Typecheck and model-gateway, MCP-gateway, and broker checks passed. Real ACP
+      compatibility remains an integration check, not a claim of these offline tests.
+- [ ] Enforced capability ceilings and fresh/continue scopes with labeled inputs.
+- [ ] Run-owned resources, serialized writers, and usable sanitized MCP results.
+
 Owners: Person 1 (runtime/session lifecycle), Person 2 (context/privacy/policy),
 3A (tool gateway), 3B (browser). Agree additive contracts before changing these tracks.
 

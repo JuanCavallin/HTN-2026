@@ -94,8 +94,11 @@ async function main(): Promise<void> {
     candidateToolIds: ['browser.search', 'untrusted.delete_everything'],
   });
   await sessions.beginTurn(state.id);
+  const credentials = sessions.issueGatewayCredentials(state.id);
+  const call = async (request: Parameters<typeof gateway.complete>[0]) =>
+    gateway.complete(request, await sessions.resolveGatewayToken(credentials.model, 'model'));
 
-  const completion = await gateway.complete({
+  const completion = await call({
     model: 'agentos-router',
     messages: [
       { role: 'system', content: 'Use only the schemas exposed to you.' },
@@ -170,7 +173,7 @@ async function main(): Promise<void> {
   );
 
   const grantId = persisted.activeToolExposureGrant?.id;
-  await gateway.complete({
+  await call({
     messages: [{ role: 'user', content: 'Create a short conversation title.' }],
   });
   assert.equal(
@@ -179,7 +182,7 @@ async function main(): Promise<void> {
     'an auxiliary no-tool request must not erase the task tool grant',
   );
 
-  await gateway.complete({
+  await call({
     messages: [{ role: 'tool', content: 'Untrusted raw tool output.' }],
   });
   assert.equal(backendRoute?.deployment, 'local');
@@ -188,7 +191,7 @@ async function main(): Promise<void> {
     'an unsanitized tool message must tighten canonical state to local_only',
   );
 
-  await sessions.create({
+  const second = await sessions.create({
     runId: 'gateway_check_2',
     stepId: 'gateway_check_step_2',
     harness: 'hermes',
@@ -197,10 +200,25 @@ async function main(): Promise<void> {
     dataLabels: ['public'],
     budget: { stepsRemaining: 1 },
   });
-  await assert.rejects(
-    () => gateway.complete({ messages: [{ role: 'user', content: 'ambiguous' }] }),
-    /Multiple active hermes sessions are ambiguous/,
+  await sessions.beginTurn(second.id);
+  const secondCredentials = sessions.issueGatewayCredentials(second.id);
+  const request = { messages: [{ role: 'user', content: 'Bound concurrent task.' }] };
+  const pair = await Promise.all([
+    call(request),
+    gateway.complete(request, await sessions.resolveGatewayToken(secondCredentials.model, 'model')),
+  ]);
+  assert.deepEqual(
+    pair.map((item) => item.runId),
+    ['gateway_check', 'gateway_check_2'],
   );
+  await assert.rejects(() => sessions.resolveGatewayToken('no-key-required', 'model'));
+  await assert.rejects(() => sessions.resolveGatewayToken(credentials.mcp, 'model'));
+  const stale = await sessions.resolveGatewayToken(secondCredentials.model, 'model');
+  await sessions.beginTurn(second.id);
+  await assert.rejects(() => gateway.complete(request, stale), /Stale/);
+  await sessions.setStatus(second.id, 'completed');
+  await assert.rejects(() => sessions.resolveGatewayToken(secondCredentials.model, 'model'));
+  assert.ok(!JSON.stringify(await store.listSessionStates()).includes(credentials.model));
 
   console.log('model gateway check: ok');
 }

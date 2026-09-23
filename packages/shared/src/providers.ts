@@ -72,6 +72,10 @@ export interface ProviderCallContext {
   /** Which policy rule permitted this call. Required — there is no anonymous egress. */
   policyRule: string;
   signal?: AbortSignal;
+  /** Trusted server-side attribution; never taken from model/tool arguments. */
+  sessionStateId?: string;
+  /** Process-local gateway credentials. Never persist or include in prompts/events. */
+  gatewayCredentials?: { model: string; mcp: string; profileId: string };
 }
 
 export interface ProviderMeta {

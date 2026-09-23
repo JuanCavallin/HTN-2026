@@ -4,9 +4,9 @@
  * ============================================================================
  * Drives Hermes as a local subprocess over ACP (Agent Client Protocol) — NOT
  * an HTTP API. `uv run hermes-acp` speaks newline-delimited JSON-RPC over
- * stdio; we spawn it once per process lifetime (this factory is called once
- * and cached by providers/registry.ts) and create one ACP session PER TASK,
- * so unrelated subtasks never see each other's conversation history.
+ * stdio. Each canonical context gets an isolated subprocess/profile and
+ * scoped model/MCP credentials. Continuations retain that context's ACP session;
+ * unrelated contexts never share process environment or conversation history.
  *
  * VERIFIED, not guessed: this shape (persistent `.connect()`, `_meta` as the
  * documented extension point on `NewSessionRequest`, `session/cancel` as the
@@ -84,6 +84,74 @@ function failure<T>(
 }
 
 export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
+  // Gateway credentials are process environment, so isolate a subprocess per
+  // canonical context. No process-global catalog or credentials can cross runs.
+  const workers = new Map<string, AgentRuntimeAdapter>();
+  return {
+    id: 'hermes',
+    mode: 'live',
+    capabilities: ['agent.runtime'],
+    async health() {
+      return cfg.cwd
+        ? {
+            ok: true,
+            data: { detail: 'Configured; ACP starts on an authenticated task.' },
+            meta: meta('health', Date.now(), null),
+          }
+        : failure('health', Date.now(), 'AUTH', 'HERMES_CWD is not set');
+    },
+    async invoke(op) {
+      return failure(op, Date.now(), 'BAD_INPUT', 'Unsupported Hermes operation.');
+    },
+    async startTask(input, ctx) {
+      if (!ctx.gatewayCredentials || !ctx.sessionStateId)
+        return failure(
+          'startTask',
+          Date.now(),
+          'AUTH',
+          'A trusted scoped gateway binding is required.',
+        );
+      const worker = createHermesProcess({
+        ...cfg,
+        apiKey: ctx.gatewayCredentials.model,
+        mcpApiKey: ctx.gatewayCredentials.mcp,
+        profileDir: resolve(
+          cfg.profileDir ?? resolve(process.cwd(), '.data/hermes-scopes'),
+          ctx.gatewayCredentials.profileId,
+        ),
+      });
+      const result = await worker.startTask(input, ctx);
+      if (result.ok) workers.set(result.data.taskId, worker);
+      return result;
+    },
+    async pollTask(id, ctx) {
+      return (
+        workers.get(id)?.pollTask(id, ctx) ??
+        failure('pollTask', Date.now(), 'BAD_INPUT', 'Expired Hermes context.')
+      );
+    },
+    async continueTask(id, input, ctx) {
+      return (
+        workers.get(id)?.continueTask(id, input, ctx) ??
+        failure(
+          'continueTask',
+          Date.now(),
+          'BAD_INPUT',
+          'Expired Hermes context; refusing to start a replacement.',
+        )
+      );
+    },
+    async cancelTask(id, ctx) {
+      const worker = workers.get(id);
+      workers.delete(id);
+      return worker
+        ? worker.cancelTask(id, ctx)
+        : { ok: true, data: null, meta: meta('cancelTask', Date.now(), null) };
+    },
+  };
+}
+
+function createHermesProcess(cfg: ProviderConfig): AgentRuntimeAdapter {
   const tasks = new Map<string, TaskRecord>();
   let connection: acp.ClientConnection | null = null;
   let connecting: Promise<acp.ClientConnection> | null = null;
@@ -122,10 +190,17 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
     const configYaml = [
       'model:',
       '  default: agentos-router',
-      '  provider: custom',
+      '  provider: custom:agentos',
       '  base_url: ' + JSON.stringify(cfg.baseUrl),
       '  key_env: AGENTOS_GATEWAY_API_KEY',
       '  context_length: 131072',
+      // Named custom providers honor key_env in the installed Hermes resolver.
+      // The secret stays in the child environment, never in the profile file.
+      'custom_providers:',
+      '  - name: agentos',
+      '    base_url: ' + JSON.stringify(cfg.baseUrl),
+      '    key_env: AGENTOS_GATEWAY_API_KEY',
+      '    api_mode: chat_completions',
       'agent:',
       '  max_turns: 20',
       // AgentOS already narrows the catalog before starting Hermes and its
@@ -169,6 +244,7 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       // reproduced live, not theoretical. Passing argv separately here also
       // sidesteps shell quoting entirely, which is more robust regardless.
       const spawned = spawn('uv', ['run', 'hermes-acp'], {
+        windowsHide: true,
         cwd: cfg.cwd,
         stdio: ['pipe', 'pipe', 'inherit'], // stderr inherited: Hermes's own logs stay visible
         env: {
@@ -189,6 +265,7 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           // gateway token. Scoped to this child process, and the base URL it
           // pairs with is loopback, so the value never leaves the machine.
           OPENAI_API_KEY: cfg.apiKey ?? 'agentos-local',
+          OPENAI_BASE_URL: cfg.baseUrl,
           AGENTOS_MCP_API_KEY: cfg.mcpApiKey ?? 'agentos-mcp-local',
         },
       });
@@ -354,6 +431,7 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
           meta: meta('startTask', started, 'hermes-acp://local'),
         };
       } catch (err) {
+        resetConnection();
         return failure('startTask', started, 'UPSTREAM', (err as Error).message);
       }
     },
@@ -430,6 +508,7 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
       }
       record.session.dispose();
       tasks.delete(taskId);
+      resetConnection();
       return { ok: true, data: null, meta: meta('cancelTask', started, 'hermes-acp://local') };
     },
   };

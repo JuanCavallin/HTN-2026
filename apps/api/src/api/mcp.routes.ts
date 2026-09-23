@@ -1,14 +1,19 @@
-import { timingSafeEqual } from 'node:crypto';
 import { Router } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { config } from '../config.js';
 import { createAgentOsMcpServer } from '../core/mcp/server.js';
 import { sessionStateService, toolBroker, toolRegistry } from '../services/runtime.js';
 
 export const mcpGatewayRouter = Router();
 
-mcpGatewayRouter.use((req, res, next) => {
-  if (!tokenMatches(req.header('authorization'), config.mcpGateway.apiKey)) {
+mcpGatewayRouter.use(async (req, res, next) => {
+  try {
+    const header = req.header('authorization');
+    res.locals.gatewayBinding = await sessionStateService.resolveGatewayToken(
+      header?.startsWith('Bearer ') ? header.slice(7) : undefined,
+      'mcp',
+    );
+    next();
+  } catch {
     res.status(401).json({
       jsonrpc: '2.0',
       error: { code: -32001, message: 'Invalid AgentOS MCP gateway token.' },
@@ -16,7 +21,6 @@ mcpGatewayRouter.use((req, res, next) => {
     });
     return;
   }
-  next();
 });
 
 mcpGatewayRouter.post('/', async (req, res) => {
@@ -24,6 +28,7 @@ mcpGatewayRouter.post('/', async (req, res) => {
     registry: toolRegistry,
     broker: toolBroker,
     sessions: sessionStateService,
+    binding: res.locals.gatewayBinding,
   });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   try {
@@ -52,11 +57,4 @@ for (const method of ['get', 'delete'] as const) {
       id: null,
     });
   });
-}
-
-function tokenMatches(authorization: string | undefined, expected: string): boolean {
-  if (!authorization?.startsWith('Bearer ')) return false;
-  const provided = Buffer.from(authorization.slice('Bearer '.length));
-  const wanted = Buffer.from(expected);
-  return provided.length === wanted.length && timingSafeEqual(provided, wanted);
 }

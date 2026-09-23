@@ -10,6 +10,12 @@ import type {
 import { newId, nowIso } from '../../lib/ids.js';
 import type { Store } from '../../store/types.js';
 import type { RunBus } from '../bus.js';
+import { createHash, randomBytes } from 'node:crypto';
+
+export interface GatewayTurnBinding {
+  sessionStateId: string;
+  turn: number;
+}
 
 const MAX_CONTEXT_ENTRIES = 80;
 const ACTIVE_STATUSES = new Set<AgentSessionStatus>(['created', 'running']);
@@ -33,6 +39,63 @@ export interface CreateSessionStateInput {
  */
 export class SessionStateService {
   private readonly mutations = new Map<string, Promise<unknown>>();
+  private readonly gatewayTokens = new Map<
+    string,
+    { sessionStateId: string; audience: 'model' | 'mcp' }
+  >();
+
+  /** Secrets are process-local and restart-invalidated, never session state or SSE. */
+  issueGatewayCredentials(sessionStateId: string) {
+    const issue = (audience: 'model' | 'mcp') => {
+      const token = randomBytes(32).toString('hex');
+      this.gatewayTokens.set(createHash('sha256').update(token).digest('hex'), {
+        sessionStateId,
+        audience,
+      });
+      return token;
+    };
+    return { model: issue('model'), mcp: issue('mcp'), profileId: sessionStateId };
+  }
+
+  revokeGatewayCredentials(sessionStateId: string): void {
+    for (const [token, binding] of this.gatewayTokens) {
+      if (binding.sessionStateId === sessionStateId) this.gatewayTokens.delete(token);
+    }
+  }
+
+  async resolveGatewayToken(
+    token: string | undefined,
+    audience: 'model' | 'mcp',
+  ): Promise<GatewayTurnBinding> {
+    const binding =
+      token && this.gatewayTokens.get(createHash('sha256').update(token).digest('hex'));
+    if (!binding || binding.audience !== audience)
+      throw new Error('Invalid or expired gateway binding.');
+    const session = await this.require(binding.sessionStateId);
+    const turn = { sessionStateId: session.id, turn: session.turn };
+    await this.requireGatewayTurn(turn);
+    return turn;
+  }
+
+  async requireGatewayTurn(binding: GatewayTurnBinding): Promise<AgentSessionState> {
+    const state = await this.require(binding.sessionStateId);
+    if (
+      state.harness !== 'hermes' ||
+      !ACTIVE_STATUSES.has(state.status) ||
+      state.turn !== binding.turn
+    ) {
+      throw new Error('Stale or inactive gateway turn.');
+    }
+    return state;
+  }
+
+  async resolveStepSession(runId: string, stepId: string): Promise<AgentSessionState> {
+    const matches = (await this.store.listSessionStates(runId)).filter(
+      (state) => state.stepId === stepId,
+    );
+    if (matches.length !== 1) throw new Error('Missing or ambiguous step session.');
+    return matches[0]!;
+  }
 
   constructor(
     private readonly store: Store,
@@ -176,6 +239,7 @@ export class SessionStateService {
   }
 
   setStatus(id: string, status: AgentSessionStatus): Promise<AgentSessionState> {
+    if (['completed', 'failed', 'cancelled'].includes(status)) this.revokeGatewayCredentials(id);
     return this.savePatch(id, {
       status,
       ...(!ACTIVE_STATUSES.has(status) && status !== 'awaiting_approval'
