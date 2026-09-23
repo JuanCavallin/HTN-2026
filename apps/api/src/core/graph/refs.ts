@@ -30,6 +30,7 @@ export function lookup(scope: RefScope, path: string): unknown {
   for (const key of path.split('.')) {
     if (current === null || current === undefined) return undefined;
     if (typeof current !== 'object') return undefined;
+    if (!Object.hasOwn(current, key)) return undefined;
     current = (current as Record<string, unknown>)[key];
   }
   return current;
@@ -68,11 +69,14 @@ export function resolveRefs<T>(value: T, scope: RefScope): T {
   }
 
   if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = resolveRefs(item, scope);
-    }
-    return out as T;
+    // fromEntries defines own properties, including a literal __proto__ key;
+    // ordinary assignment could instead change the output object's prototype.
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        resolveRefs(item, scope),
+      ]),
+    ) as T;
   }
 
   return value;

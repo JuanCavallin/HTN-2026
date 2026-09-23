@@ -289,6 +289,9 @@ await check(
     assert.match(prompt, /AgentOS.*gateway/);
     assert.match(prompt, /Never put an irreversible tool/);
     assert.match(prompt, /local_only/);
+    assert.match(prompt, /contextInputs/);
+    assert.match(prompt, /only direct predecessor outputs/);
+    assert.match(prompt, /missing\/skipped source blocks/);
     assert.match(prompt, /\{\{open_store\.result\.sessionId\}\}/);
     assert.match(prompt, /test\.read/);
     assert.match(prompt, /test\.search/);

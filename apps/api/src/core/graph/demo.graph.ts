@@ -109,6 +109,7 @@ export function buildDemoGraph(at: string): AgentGraph {
         position: { x: 0, y: 390 },
         config: {
           goal: 'Given the case summary, identify what follow-up action, if any, is warranted.',
+          contextInputs: { summary: '{{summary.text}}' },
           /**
            * REAL REGISTRY IDS, not invented ones.
            *

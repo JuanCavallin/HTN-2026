@@ -28,6 +28,7 @@
  */
 
 import type { AgentGraph, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
+import { graphAncestorIds } from '@htn/shared';
 import type { PlaybookContext, PlaybookOutcome } from '../playbooks/types.js';
 import { collectRefs, lookup, resolveRefs, type RefScope } from './refs.js';
 import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
@@ -101,6 +102,9 @@ export async function runGraph(
   /** Resolved outcomes so far. Read by resolveRefs; grows as nodes finish. */
   const outcomes = new Map<string, NodeOutcome>();
   const pending = new Map<string, Promise<NodeOutcome>>();
+  const ancestors = new Map(
+    graph.nodes.map((node) => [node.id, graphAncestorIds(node.id, graph.edges)]),
+  );
 
   const held = new Set<string>();
   const lease: SessionLease = {
@@ -108,13 +112,14 @@ export async function runGraph(
     release: (sessionId) => held.delete(sessionId),
   };
 
-  /** Built fresh per node so a ref can only see work that has actually finished. */
-  function scopeNow(): RefScope {
-    const scope: RefScope = { input: variables };
-    for (const [id, outcome] of outcomes) {
-      if (outcome.ran) scope[id] = outcome.value;
+  /** Only completed ancestors are visible; unrelated branches never become ambient context. */
+  function scopeNow(nodeId: string): RefScope {
+    const entries: [string, unknown][] = [['input', variables]];
+    for (const id of ancestors.get(nodeId) ?? []) {
+      const outcome = outcomes.get(id);
+      if (outcome?.ran) entries.push([id, outcome.value]);
     }
-    return scope;
+    return Object.fromEntries(entries);
   }
 
   function resolve(nodeId: string): Promise<NodeOutcome> {
@@ -146,7 +151,7 @@ export async function runGraph(
         }
       }
 
-      const scope = scopeNow();
+      const scope = scopeNow(node.id);
       await warnUnresolvedRefs(ctx, node, scope);
       const result = await executeNode(ctx, node, scope, graph, lease);
       const ran: Ran = { ran: true, value: result.value, choice: result.choice };
@@ -200,8 +205,8 @@ export async function runGraph(
  *
  * So: warn, and NAME WHAT IS ACTUALLY AVAILABLE on that node. "verify has:
  * text" turns a long hunt into a one-character fix. Warning rather than
- * throwing is deliberate -- a ref into a skipped branch is legitimately empty,
- * and a graph that is 90% right should still run.
+ * throwing is retained for optional text in skipped branches. Resource IDs and
+ * explicit agent context inputs have stricter checks before their consumers run.
  */
 async function warnUnresolvedRefs(
   ctx: PlaybookContext,
@@ -263,7 +268,7 @@ async function executeNode(
     case 'judge':
       return runJudge(ctx, node, scope);
     case 'agent_task':
-      return runAgentTaskNode(ctx, node, scope);
+      return runAgentTaskNode(ctx, node, scope, graph);
     case 'swarm':
       return runSwarm(ctx, node, scope, graph);
     case 'submit':
@@ -322,7 +327,7 @@ async function runRedact(
 }
 
 /**
- * Every redaction recorded by any redact node that has already run. Attached to
+ * Every redaction recorded by an ancestor redact node that has already run. Attached to
  * the call context of outbound model calls so the ledger records WHAT CLASS of
  * data was in play. Slightly over-reports (it does not trace which refs a node
  * actually used), which is the safe direction to be wrong in.
@@ -408,6 +413,7 @@ async function callToolGated(
     lease?: SessionLease;
   },
 ): Promise<unknown> {
+  assertSuppliedSessionId(args.toolArgs);
   const risk = toolRisk(args.tool, args.actionKind);
 
   // THE BROKER FIRST. A tool AgentOS itself registers -- the browser family,
@@ -488,6 +494,7 @@ async function callToolGated(
   // the risk classification was made against that name and a revision is not
   // allowed to repoint the call at a different tool.
   const authorizedArgs = authorizedToolArgs(authorized.payload, args.toolArgs);
+  assertSuppliedSessionId(authorizedArgs);
 
   const toolbox = ctx.provider('toolbox');
   const res = await toolbox.callTool(
@@ -565,6 +572,9 @@ async function dispatchArgs(
   stepId: string,
 ): Promise<Record<string, Json>> {
   const staticArgs = (cfg.args[tool] ?? {}) as Record<string, Json>;
+  // An unresolved state binding is an error, not a request for a model to
+  // invent a replacement browser session. Only the selected candidate matters.
+  assertSuppliedSessionId(staticArgs);
   if (cfg.argsFrom !== 'model') return staticArgs;
 
   const model = ctx.provider('text.model');
@@ -586,7 +596,12 @@ async function dispatchArgs(
   );
   if (!res.ok) return staticArgs;
   try {
-    return { ...staticArgs, ...(JSON.parse(res.data.text) as Record<string, Json>) };
+    return {
+      ...staticArgs,
+      ...(JSON.parse(res.data.text) as Record<string, Json>),
+      // The graph's resource binding wins over generated arguments.
+      ...(Object.hasOwn(staticArgs, 'sessionId') ? { sessionId: staticArgs.sessionId } : {}),
+    };
   } catch {
     return staticArgs;
   }
@@ -733,6 +748,7 @@ async function runAgentTaskNode(
   ctx: PlaybookContext,
   node: Extract<GraphNode, { type: 'agent_task' }>,
   scope: RefScope,
+  graph: AgentGraph,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -749,7 +765,7 @@ async function runAgentTaskNode(
     label: node.label,
     nodeId: node.id,
     goal: cfg.goal,
-    context: { scope: summariseScope(scope) },
+    context: agentContext(node, scope, graph),
     availableTools: cfg.availableTools,
     pollIntervalMs: cfg.pollIntervalMs,
     maxPolls: cfg.maxPolls,
@@ -1030,6 +1046,7 @@ async function runHandoff(
   const result = await ctx.step(
     { label: node.label, kind: 'handoff', nodeId: node.id, providerId: ctx.providerFor('browser') },
     async (step) => {
+      assertSuppliedSessionId(cfg);
       let sessionId = inherited ? (cfg.sessionId as string) : undefined;
 
       // A handoff opens its OWN browser only when no session was handed to it.
@@ -1038,16 +1055,10 @@ async function runHandoff(
       // {{ref}} resolved to nothing (see warnUnresolvedRefs) or a missing
       // `sessionId` that should have inherited an earlier node's browser.
       if (!inherited && (typeof cfg.url !== 'string' || cfg.url.trim() === '')) {
-        await ctx
-          .log(
-            'warn',
-            'Handoff "' +
-              node.label +
-              '" has neither a sessionId to inherit nor a url to open, so the person ' +
-              'will be handed a blank browser. Give it sessionId (to reuse the browser an ' +
-              'earlier node opened) or a url that resolves.',
-          )
-          .catch(() => undefined);
+        throw new Error(
+          'Handoff requires a valid sessionId to inherit or a non-empty url to open. ' +
+            'No blank replacement browser was opened.',
+        );
       }
 
       if (!inherited) {
@@ -1124,14 +1135,44 @@ async function runHandoff(
 /* Result shaping                                                             */
 /* -------------------------------------------------------------------------- */
 
-/** Compact view of the scope for handing to an agent runtime as context. */
-function summariseScope(scope: RefScope): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(scope)) {
-    if (key === 'input') continue;
-    out[key] = value;
+/** A supplied resource binding must never degrade into the provider's new-session default. */
+function assertSuppliedSessionId(value: object): void {
+  if (!Object.hasOwn(value, 'sessionId')) return;
+  const sessionId = (value as { sessionId?: unknown }).sessionId;
+  if (typeof sessionId !== 'string' || sessionId.trim().length === 0) {
+    throw new Error(
+      'sessionId was supplied but did not resolve to a non-empty string. ' +
+        'Check the upstream reference (tool results use .result.sessionId). ' +
+        'No replacement session was opened.',
+    );
   }
-  return out;
+}
+
+/** Narrow data inputs, without changing authorization or claiming shared harness memory. */
+function agentContext(
+  node: Extract<GraphNode, { type: 'agent_task' }>,
+  scope: RefScope,
+  graph: AgentGraph,
+): Record<string, unknown> {
+  if (node.config.contextInputs !== undefined) {
+    const inputs = Object.entries(node.config.contextInputs).map(([name, reference]) => {
+      const path = reference.slice(2, -2).trim();
+      const value = lookup(scope, path);
+      if (value === undefined) {
+        throw new Error('Required context input "' + name + '" could not resolve ' + path);
+      }
+      return [name, value];
+    });
+    return { inputs: Object.fromEntries(inputs) };
+  }
+  const parents = new Set(
+    graph.edges.filter((edge) => edge.target === node.id).map((edge) => edge.source),
+  );
+  return {
+    scope: Object.fromEntries(
+      [...parents].filter((id) => Object.hasOwn(scope, id)).map((id) => [id, scope[id]]),
+    ),
+  };
 }
 
 function toJson(value: unknown): Json {

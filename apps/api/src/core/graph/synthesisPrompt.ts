@@ -85,6 +85,8 @@ STRUCTURE
 - Nodes form a DAG. Cycles are rejected.
 - Edges express order. A node also reads any upstream node's output through
   "{{node_id.field}}" refs; "{{input.name}}" reads a run variable.
+- A referenced node must be an ancestor connected by edges, not merely a
+  parallel branch that happens to finish first.
 - A judge node's outgoing edges carry "sourceHandle" set to one of its options.
   That is how branching works: only the matching branch runs.
 - Independent branches run concurrently. Do not chain steps that do not depend
@@ -97,6 +99,13 @@ STRUCTURE
   Do not assume separate agent_task nodes share a transcript or browser session.
   Keep adaptive actions needing one working conversation in one agent_task for now.
   Do not invent context-scope or resource fields absent from the JSON Schema.
+- For each new agent_task, set contextInputs to named whole references, for example
+  {"evidence": "{{summary.text}}"}. Select only the needed, already-redacted fields;
+  do not forward raw pre-redaction documents or all run inputs for convenience.
+  An explicit {} passes no implicit context. When omitted on existing graphs,
+  only direct predecessor outputs are passed, not all ancestors or sibling branches.
+  Every explicit binding is required: a missing/skipped source blocks the task.
+  These are data bindings, not privacy declassification or shared-session handles.
 - Put "background": true on a node whose failure should not abort the run.
 - agent_task's "harness" field is validated against every known provider id,
   but only "hermes" is actually wired to run one today. OMIT "harness"
@@ -164,11 +173,13 @@ function webLookupRules(tools: ToolCatalogEntry[]): string {
     '',
     '- A `tool` node exposes its result under `.result`. The session id from an `open`',
     '  node with id "open_store" is "{{open_store.result.sessionId}}" -- NOT',
-    '  "{{open_store.sessionId}}". A ref that resolves to nothing is dropped silently, so',
-    '  a browser node with a missing sessionId quietly opens a SECOND, blank browser.',
+    '  "{{open_store.sessionId}}". A supplied sessionId that resolves to nothing fails',
+    '  before execution; it must never fall back to a SECOND, blank browser.',
     '- Every later browser node that must act on the SAME page -- including a `handoff`,',
     '  whose sessionId is a top-level config field, not inside args -- has to carry that',
     '  ref. Omitting it does not reuse the page; it opens a new one.',
+    '- A handoff without an inherited session needs an explicit non-empty url.',
+    '  Argument generation cannot replace a sessionId already bound by the graph.',
     '- Pick ONE browser backend for the whole flow and use it consistently. Prefer the',
     '  `browserbase.*` tools whenever a person will be handed the browser: a cloud session',
     '  has a viewer a human can be shown, and the local browser has none, so a handoff on',

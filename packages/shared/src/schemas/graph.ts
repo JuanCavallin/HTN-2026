@@ -212,6 +212,20 @@ export const agentTaskNodeSchema = nodeVariant(
      */
     availableTools: z.array(z.string()).default([]),
     /**
+     * Explicit named inputs for this task, each a whole {{node.path}} or
+     * {{input.path}} reference. Omitted: direct predecessor outputs only.
+     * Empty object: no implicit context. This selects data, not permissions,
+     * privacy labels, a shared transcript, or a browser resource owner.
+     */
+    contextInputs: z
+      .record(
+        z.string().min(1).max(64),
+        z.string().regex(/^\{\{\s*[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*\s*\}\}$/, {
+          message: 'Context inputs must be whole {{node.path}} or {{input.path}} references',
+        }),
+      )
+      .optional(),
+    /**
      * Which agent runtime to use. Validated against the provider vocabulary so
      * the abstraction is real, but the interpreter accepts only 'hermes' today.
      */
@@ -306,7 +320,7 @@ export const handoffNodeSchema = nodeVariant(
      */
     url: z.string().optional(),
     /**
-     * Reuse an existing session, normally "{{open_portal.sessionId}}". When set,
+     * Reuse an existing session, normally "{{open_portal.result.sessionId}}". When set,
      * this node does NOT open (or close) the session — whoever opened it owns it.
      */
     sessionId: z.string().optional(),
@@ -417,6 +431,34 @@ export function findGraphCycle(
   return null;
 }
 
+/**
+ * All transitive data predecessors, excluding the node itself. Edges, not
+ * completion timing, define which node results may enter its reference scope.
+ * The visited set also keeps inspection of invalid cyclic drafts bounded.
+ */
+export function graphAncestorIds(
+  nodeId: string,
+  edges: { source: string; target: string }[],
+): Set<string> {
+  const parents = new Map<string, string[]>();
+  for (const edge of edges) {
+    const incoming = parents.get(edge.target) ?? [];
+    incoming.push(edge.source);
+    parents.set(edge.target, incoming);
+  }
+  const visited = new Set([nodeId]);
+  const ancestors = new Set<string>();
+  const pending = [...(parents.get(nodeId) ?? [])];
+  while (pending.length > 0) {
+    const id = pending.pop() as string;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    ancestors.add(id);
+    pending.push(...(parents.get(id) ?? []));
+  }
+  return ancestors;
+}
+
 export const agentGraphSchema = z
   .object({
     id: z.string().min(1).max(64),
@@ -474,6 +516,22 @@ export const agentGraphSchema = z
         path: ['edges'],
         message: 'Graph contains a cycle: ' + cycle.join(' -> '),
       });
+    }
+
+    for (const [index, node] of graph.nodes.entries()) {
+      if (node.type !== 'agent_task' || node.config.contextInputs === undefined) continue;
+      const ancestors = graphAncestorIds(node.id, graph.edges);
+      for (const [name, reference] of Object.entries(node.config.contextInputs)) {
+        const root = reference.slice(2, -2).trim().split('.')[0] as string;
+        if (root === 'input' || ancestors.has(root)) continue;
+        ctx.addIssue({
+          code: 'custom',
+          path: ['nodes', index, 'config', 'contextInputs', name],
+          message:
+            'Context input must reference a run input or an upstream node connected by edges: ' +
+            root,
+        });
+      }
     }
   });
 

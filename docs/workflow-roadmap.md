@@ -62,7 +62,72 @@ These tests establish deterministic admission behavior and prompt content. They 
 not prove that a live model chooses the intended node type for every natural-language
 request, or that a live Hermes/browser integration completes successfully.
 
-## Next: execution context and resource ownership (P0)
+## Second batch: bounded node inputs and session references (P0)
+
+Status: implemented. This is the graph-runtime foundation, not shared Hermes memory
+or a complete fix for Browserbase page continuity. Scope: Person 1's graph execution
+and additive shared graph contracts. Policy, gateway, provider, and UI code stay unchanged.
+
+- Resolve node references only against completed ancestors connected by edges.
+  Completion timing no longer exposes an unrelated parallel branch's output.
+- Add optional `agent_task.config.contextInputs`: named, whole references to selected
+  ancestor fields or run inputs. Values retain their JSON types. An explicit `{}`
+  supplies no implicit context; omission supplies only direct predecessor outputs.
+- Reject self/unknown/unconnected context bindings when saving the graph. Fail before
+  invoking Hermes if a required selected field is absent or its branch was skipped.
+- Reject a supplied `sessionId` that resolves to missing, null, blank, or a non-string
+  before tool execution. A handoff with neither an inherited ID nor a usable URL fails
+  instead of opening a blank page. Model-inferred dispatch arguments cannot repair a
+  missing session binding or overwrite a valid graph-bound session.
+- Preserve existing graph-owned session cleanup on completion and failure. Harden
+  reference resolution against inherited prototype properties.
+- Teach synthesis these rules and give the demo agent explicit summary input.
+
+Example (inside an agent task's config; `summary` must be an ancestor):
+
+```json
+{
+  "goal": "Check the supplied evidence and report uncertainty.",
+  "contextInputs": {
+    "evidence": "{{summary.text}}",
+    "question": "{{input.question}}"
+  }
+}
+```
+
+This controls the implicit context payload, not the task's goal or other explicitly
+referenced config fields. It is **not** a tool capability ceiling, a privacy-label
+override, a shared transcript, or authorization to reuse a browser. Select sanitized
+artifacts; existing privacy and exact-action gates still apply.
+
+Compatibility: no database migration or required new field. Existing graphs still
+parse, but agents that relied on ambient grandparent results need explicit bindings.
+References to unrelated nodes need real dependency edges. A required binding from a
+conditional branch must be moved onto that branch or bound to an always-produced
+artifact; it no longer quietly becomes empty context. Saved demo graphs are not
+overwritten by seeding, so only a fresh demo receives the example binding automatically.
+There is no dedicated context-input inspector control yet; use graph JSON/API or chat.
+
+Acceptance checks (tick only after the commands pass):
+
+- [x] `pnpm --filter @htn/api check:graph` (schema, 16 synthesis checks, and 19 new
+      context/reference checks): unrelated/raw ancestor exclusion; explicit/empty/
+      transitive/required context; skipped branches; missing session guards; dispatch
+      inference pinning; successful session reuse and failure cleanup; prototype safety.
+- [x] `pnpm typecheck`.
+- [x] `pnpm test` (all invariant suites and 32 web tests passed).
+- [x] `pnpm build` (successful; existing bundle-size warning remains).
+- [x] `scripts/smoke.mjs` against an isolated ephemeral localhost API with all providers
+      mocked and an in-memory store: demo and graph execution, approvals, rejection,
+      CRUD validation, node attribution, and analytics all passed. No live provider or
+      existing database used.
+
+Still pending: trusted gateway session binding, capability ceilings, privacy-label
+lineage, transcript continuation, run-owned resources across Hermes tasks, page
+reattachment, resource locks, and live supervision. The tests above prove interpreter
+behavior with doubles/mock providers, not live browser continuity.
+
+## Next: scoped gateways, shared context, and resource ownership (P0)
 
 Owners: Person 1 (runtime/session lifecycle), Person 2 (context/privacy/policy),
 3A (tool gateway), 3B (browser). Agree additive contracts before changing these tracks.
@@ -70,7 +135,9 @@ Owners: Person 1 (runtime/session lifecycle), Person 2 (context/privacy/policy),
 1. **Separate three identities:** workflow run, agent context scope, and resource
    reference. Keep node type as the single source of execution strategy; do not add
    a conflicting second execution-mode field. Define explicit artifact inputs and
-   outputs instead of handing each agent every completed node's context.
+   outputs instead of handing each agent every completed node's context. The second
+   batch implements selected data inputs; scope/resource identities and labeled artifact
+   contracts still remain. Implement trusted gateway binding next, before session reuse.
 2. **Bind gateway requests to the actual session/turn.** Replace the global
    single-active-Hermes lookup with trusted scoped routing for both model and MCP
    requests. A model-supplied scope ID must not authorize another session's tools.
@@ -208,6 +275,37 @@ responses are fixtures and are not a test of natural-language routing quality.
    dangling edges and cycles; natural-language prompts are not a reliable way to
    force a model to generate a particular invalid structure.
 
-Still pending after this batch: shared context/resources, browser continuation and
+Still pending after the first batch: shared context/resources, browser continuation and
 the live side pane, comparison fixes, and the unified graph view. No migration is
 needed for the planning/admission changes.
+
+## Manual checks for the second batch
+
+Use a disposable graph and synthetic public data. Run
+`pnpm --filter @htn/api check:graph-context` first: its deterministic doubles inspect
+the exact agent input, broker calls, and browser open/close counts. A mock Hermes
+answer alone cannot demonstrate which context it received.
+
+1. In graph JSON/API, connect a `summary` node to an agent and set
+   `contextInputs: { "evidence": "{{summary.text}}" }`. Save/reload and confirm the
+   field persists, then run it. With no binding, only direct predecessors are passed;
+   with `{}`, none are passed implicitly. The offline check verifies these payloads.
+2. Change the binding to `{{summary.missing}}`: saving is allowed because result fields
+   are runtime data, but running must fail with a required-context-input error before
+   Hermes starts. A binding to an unconnected node must instead fail graph validation.
+3. Build open -> handoff -> extract using a reviewed browser tool. Use
+   `{{open.result.sessionId}}` for the handoff and `{{handoff.sessionId}}` for extraction,
+   with edges between them. Check the same session ID reaches each step and is released
+   at run end. Mock checks establish ID plumbing only; live page/login continuity still
+   requires separate provider verification and is not fixed by this batch alone.
+4. Change the handoff's ID to `{{open.sessionId}}` (missing `.result`) while keeping a
+   valid URL. Run again: it must fail with the session-reference error, not open a
+   replacement session. Also remove both ID and URL: handoff must fail, not open blank.
+5. For a dispatch that infers arguments, bind its browser candidate's `sessionId`
+   explicitly. Check that generated arguments cannot change it. The offline check
+   forces an attempted replacement and also verifies that an unused candidate's bad
+   reference does not prevent selecting a different valid tool.
+
+Do not test live outbound sends or enable parallel Hermes nodes to validate this slice.
+Live synthesis, browser embedding, takeover/resume, and cross-agent state retention
+remain unverified and are acceptance work for later batches.
