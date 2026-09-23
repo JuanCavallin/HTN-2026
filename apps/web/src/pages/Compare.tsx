@@ -25,6 +25,7 @@ import {
   type GraphAssertion,
   type Run,
   type RunAnalytics,
+  isTerminal,
 } from '@htn/shared';
 import { api, type RunDetail } from '../lib/api';
 import { humanStatus, msLabel, relativeTime, RUN_STATUS_TONE } from '../lib/format';
@@ -96,9 +97,25 @@ export function Compare() {
     if (!aId || !bId) return;
     setSides(null);
     setError(null);
-    Promise.all([loadSide(aId), loadSide(bId)])
-      .then(([a, b]) => setSides([withAssertions(a, b), withAssertions(b, a)]))
-      .catch((err) => setError((err as Error).message));
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      try {
+        const [a, b] = await Promise.all([loadSide(aId), loadSide(bId)]);
+        if (!active) return;
+        setSides([withAssertions(a, b), withAssertions(b, a)]);
+        if (!isTerminal(a.run.status) || !isTerminal(b.run.status)) {
+          timer = setTimeout(() => void refresh(), 1500);
+        }
+      } catch (err) {
+        if (active) setError((err as Error).message);
+      }
+    };
+    void refresh();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
   }, [aId, bId]);
 
   if (!aId || !bId) {
@@ -116,10 +133,16 @@ export function Compare() {
 
   const [a, b] = sides;
   const sameGraph = a.graph && b.graph && a.graph.id === b.graph.id;
+  const updating = !isTerminal(a.run.status) || !isTerminal(b.run.status);
 
   return (
     <div className="space-y-5">
       <h1 className="text-lg font-semibold text-slate-100">Compare runs</h1>
+      {updating && (
+        <p className="text-xs text-sky-300" role="status">
+          Measurements refresh while either run is active; values may be partial.
+        </p>
+      )}
 
       <div className="grid grid-cols-[10rem_1fr_1fr] gap-x-4 gap-y-1 text-sm">
         <div />
@@ -129,34 +152,38 @@ export function Compare() {
         <Row label="Version" a={versionLabel(a, b, sameGraph)} b={versionLabel(b, a, sameGraph)} />
         <Row
           label="Wall time"
-          a={msLabel(a.analytics.totals.wallMs)}
-          b={msLabel(b.analytics.totals.wallMs)}
+          a={measured(a, a.analytics.totals.wallMs, msLabel)}
+          b={measured(b, b.analytics.totals.wallMs, msLabel)}
         />
         <Row
           label="Tokens (in/out)"
-          a={a.analytics.totals.tokensIn + ' / ' + a.analytics.totals.tokensOut}
-          b={b.analytics.totals.tokensIn + ' / ' + b.analytics.totals.tokensOut}
+          a={measured(
+            a,
+            a.analytics.totals.tokensIn + a.analytics.totals.tokensOut,
+            () => a.analytics.totals.tokensIn + ' / ' + a.analytics.totals.tokensOut,
+          )}
+          b={measured(
+            b,
+            b.analytics.totals.tokensIn + b.analytics.totals.tokensOut,
+            () => b.analytics.totals.tokensIn + ' / ' + b.analytics.totals.tokensOut,
+          )}
         />
         <Row
           label="Estimated cost"
-          a={a.analytics.totals.estimatedCostCents.toFixed(4) + '¢'}
-          b={b.analytics.totals.estimatedCostCents.toFixed(4) + '¢'}
+          a={measured(a, a.analytics.totals.estimatedCostCents, (value) => value.toFixed(4) + '¢')}
+          b={measured(b, b.analytics.totals.estimatedCostCents, (value) => value.toFixed(4) + '¢')}
         />
         <Row
           label="Model calls"
-          a={String(a.analytics.totals.llmCalls)}
-          b={String(b.analytics.totals.llmCalls)}
+          a={measured(a, a.analytics.totals.llmCalls, String)}
+          b={measured(b, b.analytics.totals.llmCalls, String)}
         />
-        <Row
-          label="Tool reduction"
-          a={toolReductionLabel(a.analytics)}
-          b={toolReductionLabel(b.analytics)}
-        />
+        <Row label="Tool reduction" a={toolReductionLabel(a)} b={toolReductionLabel(b)} />
         <Row label="Approvals" a={approvalsLabel(a)} b={approvalsLabel(b)} />
         <Row
           label="PII spans pinned"
-          a={String(a.detail.piiSpans.length)}
-          b={String(b.detail.piiSpans.length)}
+          a={measured(a, a.detail.piiSpans.length, String)}
+          b={measured(b, b.detail.piiSpans.length, String)}
         />
       </div>
 
@@ -211,14 +238,21 @@ function versionLabel(side: Side, other: Side, sameGraph: boolean | null): strin
   return 'v' + side.graph.version + ' (different graph)';
 }
 
-function toolReductionLabel(analytics: RunAnalytics): string {
-  const { toolsAvailable, toolsExposed } = analytics.totals;
+function measured(side: Side, value: number, format: (value: number) => string): string {
+  if (!isTerminal(side.run.status) && value === 0) return 'Waiting for measurements…';
+  return format(value);
+}
+
+function toolReductionLabel(side: Side): string {
+  const { toolsAvailable, toolsExposed } = side.analytics.totals;
+  if (!isTerminal(side.run.status) && toolsAvailable === 0) return 'Waiting for routing…';
   if (toolsAvailable === 0) return 'n/a — no tools routed';
   return toolsExposed + ' of ' + toolsAvailable;
 }
 
 function approvalsLabel(side: Side): string {
   const { approvals, approvalsPending } = side.analytics.totals;
+  if (!isTerminal(side.run.status) && approvals === 0) return 'Waiting…';
   if (approvals === 0) return side.run.kind === 'baseline' ? '0 — cannot gate' : '0';
   return approvals + (approvalsPending > 0 ? ' (' + approvalsPending + ' pending)' : '');
 }

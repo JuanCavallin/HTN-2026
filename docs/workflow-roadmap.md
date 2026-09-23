@@ -277,8 +277,24 @@ zero-delegation workflows are measured normally, without a delegation penalty.
 Progress: graph lineage now has a top-level `Run.graphId`, a SQLite index with an
 idempotent backfill from existing JSON run bodies, and a graphId filter shared by the
 API and memory store. Existing step, egress, result, and run-input records are already
-durable, so no second metrics store is needed. Typecheck passed. Live compare refresh,
-explicit previous-run selection, and pair metadata remain to implement.
+durable, so no second metrics store is needed. The Compare page refreshes both sides
+while either run is active, labels not-yet-measured values as waiting rather than zero,
+and stops refreshing at terminal status. GraphEditor can launch against the latest
+terminal run of that same graph; explicit run IDs remain in the compare URL. Typecheck
+and build passed. SQLite backfill and live-run UI behavior remain manual checks.
+
+Manual verification:
+
+1. On a graph that has a completed run, choose “Run + compare to previous.” Confirm the
+   URL contains the new and prior run IDs, both headers show the expected statuses, and
+   a reload keeps the same pair.
+2. Choose “Run + compare to baseline.” While either side is active, expect an updating
+   note and waiting placeholders for measurements not produced yet. Confirm values
+   refresh and settle after terminal status, including genuine zero values for mock or
+   no-tool runs.
+3. Start once with a pre-lineage SQLite database. Confirm it opens, existing graph and
+   baseline runs appear under the same graph filter, and a subsequent restart preserves
+   that lineage. No raw metrics are duplicated into a separate table.
 
 ## Unified graph presentation (P2, deliberately last)
 

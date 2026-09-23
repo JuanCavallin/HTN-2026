@@ -21,8 +21,9 @@ import type {
   GraphCritique,
   GraphEdge,
   GraphNodeType,
+  Run,
 } from '@htn/shared';
-import { GRAPH_NODE_TYPES } from '@htn/shared';
+import { GRAPH_NODE_TYPES, isTerminal } from '@htn/shared';
 import { useGraph, useGraphs } from '../hooks/useGraph';
 import { useTools } from '../hooks/useTools';
 import { api, ApiError } from '../lib/api';
@@ -72,10 +73,35 @@ export function GraphEditor() {
   // be merged into a rewrite the model already computed without seeing it --
   // so canvas mutation is locked for the duration rather than raced against.
   const [chatBusy, setChatBusy] = useState(false);
+  const [previousGraphRun, setPreviousGraphRun] = useState<Run | null>(null);
+  const [loadingPreviousRun, setLoadingPreviousRun] = useState(false);
 
   useEffect(() => {
     if (loaded) setGraph(loaded);
   }, [loaded]);
+
+  useEffect(() => {
+    if (!graph?.id) {
+      setPreviousGraphRun(null);
+      return;
+    }
+    let active = true;
+    setLoadingPreviousRun(true);
+    void api
+      .listRuns({ graphId: graph.id, kind: 'graph', limit: 30 })
+      .then(({ runs }) => {
+        if (active) setPreviousGraphRun(runs.find((run) => isTerminal(run.status)) ?? null);
+      })
+      .catch(() => {
+        if (active) setPreviousGraphRun(null);
+      })
+      .finally(() => {
+        if (active) setLoadingPreviousRun(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [graph?.id]);
 
   // With no graph in the URL, show the most recent one so the canvas is not
   // empty while the chat is still untouched.
@@ -150,6 +176,20 @@ export function GraphEditor() {
         api.createRun('baseline', { target: DEMO_TARGET, graphId: graph.id }),
       ]);
       navigate('/compare?a=' + graphRun.id + '&b=' + baselineRun.id);
+    } catch (err) {
+      setLaunchError((err as Error).message);
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const launchAgainstPrevious = async () => {
+    if (!graph || !previousGraphRun) return;
+    setLaunching(true);
+    setLaunchError(null);
+    try {
+      const { run } = await api.runGraph(graph.id, { target: DEMO_TARGET });
+      navigate('/compare?a=' + run.id + '&b=' + previousGraphRun.id);
     } catch (err) {
       setLaunchError((err as Error).message);
     } finally {
@@ -309,6 +349,18 @@ export function GraphEditor() {
             disabled={launching || !graph}
           >
             Run + compare to baseline
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void launchAgainstPrevious()}
+            disabled={launching || !graph || !previousGraphRun || loadingPreviousRun}
+            title={
+              previousGraphRun
+                ? 'Compare this run with the latest terminal run of this graph'
+                : 'Run this graph once before comparing with a previous run'
+            }
+          >
+            {loadingPreviousRun ? 'Finding previous run…' : 'Run + compare to previous'}
           </Button>
           <Button
             variant="ghost"
