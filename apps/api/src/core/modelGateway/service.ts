@@ -14,6 +14,7 @@ import type { RunBus } from '../bus.js';
 import type { DecisionService } from '../decisions/service.js';
 import { decisionStateFromSession } from '../sessions/decisionState.js';
 import type { GatewayTurnBinding, SessionStateService } from '../sessions/service.js';
+import { KeyedLock } from '../locks.js';
 import type { RegisteredTool } from '../tools/registry.js';
 import { modelRoutesFor } from './catalog.js';
 import type { ToolDescriptorCatalog } from './toolCatalog.js';
@@ -87,6 +88,7 @@ export interface ModelGatewayOptions {
 }
 
 export class ModelGatewayService {
+  private readonly calls = new KeyedLock();
   private readonly routes: ModelRoute[];
   private readonly backend: ChatModelBackend;
 
@@ -107,6 +109,18 @@ export class ModelGatewayService {
   }
 
   async complete(
+    request: OpenAiChatRequest,
+    binding: GatewayTurnBinding,
+  ): Promise<GatewayCompletion> {
+    const release = await this.calls.acquire(binding.sessionStateId);
+    try {
+      return await this.completeBound(request, binding);
+    } finally {
+      release();
+    }
+  }
+
+  private async completeBound(
     request: OpenAiChatRequest,
     binding: GatewayTurnBinding,
   ): Promise<GatewayCompletion> {
@@ -131,7 +145,9 @@ export class ModelGatewayService {
     const requestedToolNames = extractToolNames(request.tools ?? []);
     const requestTools = await this.resolveRequestedTools(
       request.tools ?? [],
-      session.candidateToolIds,
+      session.candidateToolIds.filter(
+        (id) => session.toolCeiling === undefined || session.toolCeiling.includes(id),
+      ),
     );
     const trustedDescriptors = requestTools.map((tool) => tool.registered.descriptor);
     if (

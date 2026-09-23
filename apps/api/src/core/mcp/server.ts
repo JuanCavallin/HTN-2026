@@ -9,6 +9,7 @@ import type { Json } from '@htn/shared';
 import type { GatewayTurnBinding, SessionStateService } from '../sessions/service.js';
 import { ToolBrokerError, type ToolBroker } from '../tools/broker.js';
 import type { RegisteredTool, ToolRegistry } from '../tools/registry.js';
+import { modelToolText } from '../tools/executors.js';
 
 export interface AgentOsMcpServerDependencies {
   registry: ToolRegistry;
@@ -25,8 +26,12 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    await deps.sessions.requireGatewayTurn(deps.binding);
-    const registered = (await deps.registry.list()).filter(isExecutable);
+    const session = await deps.sessions.requireGatewayTurn(deps.binding);
+    const registered = (await deps.registry.list()).filter(
+      (tool) =>
+        isExecutable(tool) &&
+        (session.toolCeiling === undefined || session.toolCeiling.includes(tool.descriptor.id)),
+    );
     return { tools: registered.map(toMcpTool) };
   });
 
@@ -51,7 +56,7 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
             type: 'text',
             // Raw provider output stays local. Hermes receives only the compact broker summary,
             // or the explicitly sanitized version when an executor supplied one.
-            text: result.sanitizedSummary ?? result.summary,
+            text: modelToolText(result),
           },
         ],
       } satisfies CallToolResult;

@@ -164,6 +164,8 @@ export type AgentSessionStatus =
  */
 export interface SessionContextEntry {
   id: string;
+  /** Source node/input paths, not raw values. */
+  provenance?: string[];
   role: 'system' | 'user' | 'assistant' | 'tool';
   summary: string;
   sanitizedSummary?: string;
@@ -195,6 +197,10 @@ export interface AgentSessionState {
   stepId: string;
   harness: string;
   harnessSessionId?: string;
+  /** Run-scoped graph transcript identity, independent of browser resources. */
+  contextScopeId?: string;
+  /** Optional hard tool ceiling; an explicit empty array permits no tools. */
+  toolCeiling?: string[];
   objective: string;
   sanitizedObjective?: string;
   dataLabels: DataLabel[];

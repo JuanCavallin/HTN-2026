@@ -89,16 +89,21 @@ STRUCTURE
   parallel branch that happens to finish first.
 - A judge node's outgoing edges carry "sourceHandle" set to one of its options.
   That is how branching works: only the matching branch runs.
-- Independent branches run concurrently. Do not chain steps that do not depend
-  on each other just to order them. Current exception: serialize agent_task nodes;
-  concurrent Hermes sessions are not yet supported by the gateway binding.
+- Independent branches, including fresh agent contexts, run concurrently. Do not
+  chain independent work just to order it. Tasks sharing a contextScope must form
+  a single ordered chain: one {id, mode: "fresh"}, then the same id with mode "continue".
 - Node type determines execution. A known tool list does not turn an agent_task
   into a direct call. A failed direct call does not automatically invoke Hermes;
   any fallback must be explicit in the graph.
 - Execution, agent conversation context, and browser resources are separate.
-  Do not assume separate agent_task nodes share a transcript or browser session.
-  Keep adaptive actions needing one working conversation in one agent_task for now.
-  Do not invent context-scope or resource fields absent from the JSON Schema.
+  Separate agent_task nodes start fresh unless contextScope explicitly continues
+  a run-local scope. Continuing never starts a replacement if the scope expired.
+  A browser session reference does not imply a shared transcript, or vice versa.
+  Set toolCeiling to the maximum permitted catalog IDs; [] means no tools. This is
+  enforced across discovery, gateway exposure, and execution, unlike availableTools.
+  Continuations may narrow but cannot widen an existing explicit ceiling.
+  dataLabels on graphs/nodes/agent tasks only tighten inherited sensitivity;
+  summaries and redaction do not automatically declassify a labeled artifact.
 - For each new agent_task, set contextInputs to named whole references, for example
   {"evidence": "{{summary.text}}"}. Select only the needed, already-redacted fields;
   do not forward raw pre-redaction documents or all run inputs for convenience.

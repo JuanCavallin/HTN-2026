@@ -30,6 +30,8 @@ export interface CreateSessionStateInput {
   budget: SessionBudget;
   candidateModelRouteIds?: string[];
   candidateToolIds?: string[];
+  toolCeiling?: string[];
+  contextScopeId?: string;
 }
 
 /**
@@ -109,6 +111,8 @@ export class SessionStateService {
       runId: input.runId,
       stepId: input.stepId,
       harness: input.harness,
+      contextScopeId: input.contextScopeId,
+      toolCeiling: input.toolCeiling,
       objective: input.objective,
       sanitizedObjective: input.sanitizedObjective,
       dataLabels: [...new Set(input.dataLabels)],

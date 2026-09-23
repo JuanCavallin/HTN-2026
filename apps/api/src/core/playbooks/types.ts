@@ -64,6 +64,9 @@ export interface RedactionOutput {
 }
 
 export interface AgentTaskSpec {
+  toolCeiling?: string[];
+  contextScope?: { id: string; mode: 'fresh' | 'continue' };
+  contextProvenance?: string[];
   /** Step label shown in the timeline. */
   label: string;
   /** The goal handed to the agent runtime. */
@@ -98,6 +101,7 @@ export interface AgentTaskSpec {
 }
 
 export interface AgentTaskResult {
+  dataLabels?: DataLabel[];
   result: unknown;
   /** The routing decision Jev made before this task started. */
   scheduleDecision: ScheduleDecision;
@@ -192,10 +196,11 @@ export interface PlaybookContext {
    * around this, or a person is asked twice for one action.
    */
   callBrokeredTool(input: {
+    dataLabels?: DataLabel[];
     stepId: string;
     toolId: string;
     args: Record<string, Json>;
-  }): Promise<{ output: Json; summary: string } | null>;
+  }): Promise<{ output: Json; summary: string; dataLabels?: DataLabel[] } | null>;
 
   /**
    * Which of these tool ids the registry can actually execute right now.

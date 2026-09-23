@@ -138,7 +138,14 @@ Implementation steps (each verified step is committed separately):
       context and a named custom provider honoring its scoped key environment.
       Typecheck and model-gateway, MCP-gateway, and broker checks passed. Real ACP
       compatibility remains an integration check, not a claim of these offline tests.
-- [ ] Enforced capability ceilings and fresh/continue scopes with labeled inputs.
+- [x] Enforced capability ceilings and fresh/continue scopes with labeled inputs.
+      `toolCeiling` is optional; `[]` prohibits tools and a continuation cannot widen
+      its existing ceiling. `contextScope: {id, mode: "fresh" | "continue"}` names a
+      run-local transcript. The schema requires one fresh owner and an ordered chain;
+      omitted scopes are independent. Labels merge monotonically; context entries
+      retain input provenance/version without persisting raw input values. Run/node
+      labels also propagate through derived graph outputs. Typecheck, graph checks
+      (including the new scope suite), and gateway/broker checks verify these contracts.
 - [ ] Run-owned resources, serialized writers, and usable sanitized MCP results.
 
 Owners: Person 1 (runtime/session lifecycle), Person 2 (context/privacy/policy),

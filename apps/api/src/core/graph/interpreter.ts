@@ -27,7 +27,7 @@
  * ============================================================================
  */
 
-import type { AgentGraph, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
+import type { AgentGraph, DataLabel, GraphEdge, GraphNode, Json, ModelTier } from '@htn/shared';
 import { graphAncestorIds } from '@htn/shared';
 import type { PlaybookContext, PlaybookOutcome } from '../playbooks/types.js';
 import { collectRefs, lookup, resolveRefs, type RefScope } from './refs.js';
@@ -39,6 +39,7 @@ import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
 
 interface Ran {
   ran: true;
+  dataLabels: DataLabel[];
   /** Visible to downstream {{refs}}. Never streamed. */
   value: unknown;
   /** For a `judge`: which option won, so outgoing branches can be selected. */
@@ -153,8 +154,51 @@ export async function runGraph(
 
       const scope = scopeNow(node.id);
       await warnUnresolvedRefs(ctx, node, scope);
-      const result = await executeNode(ctx, node, scope, graph, lease);
-      const ran: Ran = { ran: true, value: result.value, choice: result.choice };
+      const labels = new Set<DataLabel>([
+        ...(graph.dataLabels ?? ['public']),
+        ...(node.dataLabels ?? []),
+      ]);
+      for (const id of ancestors.get(node.id) ?? []) {
+        const prior = outcomes.get(id);
+        if (prior?.ran) prior.dataLabels.forEach((label) => labels.add(label));
+      }
+      const labeled: PlaybookContext = {
+        ...ctx,
+        async runAgentTask(spec) {
+          const result = await ctx.runAgentTask({
+            ...spec,
+            dataLabels: [...new Set([...labels, ...(spec.dataLabels ?? [])])],
+          });
+          result.dataLabels?.forEach((label) => labels.add(label));
+          return result;
+        },
+        async callBrokeredTool(input) {
+          const result = await ctx.callBrokeredTool({ ...input, dataLabels: [...labels] });
+          result?.dataLabels?.forEach((label) => labels.add(label));
+          return result;
+        },
+        provider(capability) {
+          const provider = ctx.provider(capability);
+          // Fail closed when a direct node cannot use the gateway's local route.
+          // Mock calls never perform egress; local adapters retain their own destination checks.
+          if (
+            provider.mode === 'live' &&
+            capability !== 'agent.runtime' &&
+            [...labels].some((label) => label === 'local_only' || label === 'secret') &&
+            !['localbrowser', 'ollama'].includes(provider.id)
+          ) {
+            throw new Error('Local-only graph context cannot use this remote provider.');
+          }
+          return provider;
+        },
+      };
+      const result = await executeNode(labeled, node, scope, graph, lease);
+      const ran: Ran = {
+        ran: true,
+        value: result.value,
+        choice: result.choice,
+        dataLabels: [...labels],
+      };
       outcomes.set(nodeId, ran);
       return ran;
     })();
@@ -767,6 +811,13 @@ async function runAgentTaskNode(
     goal: cfg.goal,
     context: agentContext(node, scope, graph),
     availableTools: cfg.availableTools,
+    toolCeiling: cfg.toolCeiling,
+    contextScope: cfg.contextScope,
+    dataLabels: cfg.dataLabels,
+    contextProvenance:
+      node.config.contextInputs === undefined
+        ? graph.edges.filter((edge) => edge.target === node.id).map((edge) => edge.source)
+        : Object.values(node.config.contextInputs),
     pollIntervalMs: cfg.pollIntervalMs,
     maxPolls: cfg.maxPolls,
     maxDurationMs: cfg.maxDurationMs,

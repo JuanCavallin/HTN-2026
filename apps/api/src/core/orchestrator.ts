@@ -67,7 +67,7 @@ export interface OrchestratorDeps {
       toolId: string;
       arguments: Json;
       signal?: AbortSignal;
-    }): Promise<{ output: Json; summary: string }>;
+    }): Promise<{ output: Json; summary: string; dataLabels?: DataLabel[] }>;
   };
   toolDiscovery?: {
     discoverForTask(input: {
@@ -79,12 +79,15 @@ export interface OrchestratorDeps {
   };
   /** Cached/local catalog sources, including user-configured MCP servers. */
   localToolCandidates?: () => Promise<string[]>;
-  /** Release resources such as browser sessions when an agent subtask ends. */
+  /** Release resources only after the run and all its graph branches have settled. */
   releaseRunResources?: (input: { runId: string; stepId: string }) => Promise<void>;
 }
 
+import { KeyedLock } from './locks.js';
+
 export class Orchestrator {
   private readonly inFlight = new Map<string, AbortController>();
+  private readonly contextLocks = new KeyedLock();
 
   constructor(private readonly deps: OrchestratorDeps) {}
 
@@ -140,6 +143,34 @@ export class Orchestrator {
     } catch (err) {
       await this.finishWithError(run.id, err as Error, controller.signal.aborted);
     } finally {
+      // Contexts and mutable browser resources belong to the run, not an agent node.
+      const finalRun = await store.getRun(run.id);
+      for (const session of await store.listSessionStates(run.id)) {
+        if (session.harnessSessionId) {
+          await this.deps
+            .provider('agent.runtime')
+            .cancelTask(session.harnessSessionId, {
+              runId: run.id,
+              stepId: session.stepId,
+              policyRule: 'run-context-release',
+            })
+            .catch(() => undefined);
+        }
+        if (!['completed', 'failed', 'cancelled'].includes(session.status)) {
+          await this.deps.sessionStateService.setStatus(
+            session.id,
+            finalRun?.status === 'succeeded' ? 'completed' : 'cancelled',
+          );
+        }
+      }
+      await this.deps
+        .releaseRunResources?.({ runId: run.id, stepId: 'run-finalize' })
+        .catch((error) => {
+          console.warn(
+            '[orchestrator] run resource cleanup failed:',
+            error instanceof Error ? error.message : 'unknown',
+          );
+        });
       this.inFlight.delete(run.id);
       clearPause(run.id);
       void bus;
@@ -202,6 +233,7 @@ export class Orchestrator {
     const { store, bus, provider, providerFor, decisionService, sessionStateService } = this.deps;
     /** Keeps placeholder numbering unique across every field in this run. */
     let piiCounter = 0;
+    const contextScopes = new Map<string, { sessionStateId: string; taskId: string }>();
 
     /** Shared by ctx.callContext and runAgentTask's own internal provider calls. */
     const buildCallContext = (args: {
@@ -434,7 +466,7 @@ export class Orchestrator {
         return candidates.filter((id) => executable.has(id));
       },
 
-      callBrokeredTool: async ({ stepId, toolId, args }) => {
+      callBrokeredTool: async ({ stepId, toolId, args, dataLabels }) => {
         const broker = this.deps.toolBroker;
         const registry = this.deps.toolRegistry;
         if (!broker || !registry) return null;
@@ -462,7 +494,7 @@ export class Orchestrator {
           stepId,
           harness: 'graph',
           objective: 'graph tool node: ' + toolId,
-          dataLabels: ['private'],
+          dataLabels: dataLabels ?? ['private'],
           // One call, so one step of budget. This session exists to carry a
           // grant, not to run a loop.
           budget: { stepsRemaining: 1 },
@@ -481,7 +513,7 @@ export class Orchestrator {
             arguments: args as Json,
             signal,
           });
-          return { output: result.output, summary: result.summary };
+          return { output: result.output, summary: result.summary, dataLabels: result.dataLabels };
         } finally {
           // The grant must not outlive the one call it was minted for, and
           // neither must the session: an ACTIVE one left behind is state that
@@ -555,12 +587,37 @@ export class Orchestrator {
         const startedAt = Date.now();
         let sessionStateId: string | undefined;
         let activeTaskId: string | undefined;
+        let retainContext = false;
+        let releaseScope: (() => void) | undefined;
 
         try {
+          if (spec.contextScope)
+            releaseScope = await this.contextLocks.acquire(
+              runId + ':' + spec.contextScope.id,
+              signal,
+            );
+          const previous = spec.contextScope ? contextScopes.get(spec.contextScope.id) : undefined;
+          if (spec.contextScope?.mode === 'fresh' && previous)
+            throw new Error('Context scope already exists; use continue.');
+          if (spec.contextScope?.mode === 'continue' && !previous)
+            throw new Error('Missing or expired context scope; refusing to start a replacement.');
+          const priorState = previous
+            ? await sessionStateService.get(previous.sessionStateId)
+            : null;
+          if (previous && priorState?.status !== 'quiescent')
+            throw new Error('Context scope is not available for continuation.');
+          const ceiling =
+            priorState?.toolCeiling === undefined
+              ? spec.toolCeiling
+              : spec.toolCeiling === undefined
+                ? priorState.toolCeiling
+                : spec.toolCeiling.filter((id) => priorState.toolCeiling!.includes(id));
           // 1. Search and normalize only task-relevant provider tools. Private
           //    objectives use an explicitly sanitized query; secret/local-only
           //    objectives never leave the machine for catalog discovery.
-          const labels: DataLabel[] = spec.dataLabels ?? ['public'];
+          const labels: DataLabel[] = [
+            ...new Set([...(priorState?.dataLabels ?? []), ...(spec.dataLabels ?? ['public'])]),
+          ];
           const sanitizedTask =
             spec.sanitizedGoal ??
             (labels.every((label) => label === 'public') ? spec.goal : undefined);
@@ -577,7 +634,12 @@ export class Orchestrator {
           if (this.deps.localToolCandidates) {
             discoveredIds.push(...(await this.deps.localToolCandidates()));
           }
-          if (this.deps.toolDiscovery && sanitizedTask && !remoteForbidden) {
+          if (
+            this.deps.toolDiscovery &&
+            sanitizedTask &&
+            !remoteForbidden &&
+            ceiling?.length !== 0
+          ) {
             const discovery = await this.deps.toolDiscovery.discoverForTask({
               query: sanitizedTask,
               runId,
@@ -601,6 +663,8 @@ export class Orchestrator {
           // Resolve all candidates through the trusted registry, then use Jev's
           // typed family/tool decisions before Hermes can start its inner loop.
           let availableTools = [...new Set([...spec.availableTools, ...discoveredIds])];
+          if (ceiling !== undefined)
+            availableTools = availableTools.filter((id) => ceiling.includes(id));
           let selectedBeforeLegacyRoute = availableTools;
           if (this.deps.toolRegistry) {
             const resolved = await this.deps.toolRegistry.resolve(availableTools);
@@ -777,7 +841,7 @@ export class Orchestrator {
           // 2. Register AgentOS's canonical state BEFORE Hermes can make its
           // first model request. The model gateway resolves this active record
           // and never treats Hermes's internal transcript as canonical state.
-          const sessionState = await sessionStateService.create({
+          const sessionInput = {
             runId,
             stepId: step.id,
             harness: 'hermes',
@@ -788,24 +852,49 @@ export class Orchestrator {
             dataLabels: labels,
             budget: { stepsRemaining: maxTurns },
             candidateToolIds: decision.exposedTools,
-          });
+            toolCeiling: ceiling,
+            contextScopeId: spec.contextScope?.id,
+          };
+          const sessionState = priorState
+            ? await sessionStateService.patch(priorState.id, {
+                ...sessionInput,
+                status: 'created',
+                latestCheckpoint: undefined,
+              })
+            : await sessionStateService.create(sessionInput);
           sessionStateId = sessionState.id;
-          await sessionStateService.beginTurn(sessionState.id);
+          await sessionStateService.appendContext(sessionState.id, [
+            {
+              role: 'user',
+              summary: 'Graph task inputs updated for ' + (spec.nodeId ?? step.id) + '.',
+              dataLabels: labels,
+              provenance: spec.contextProvenance ?? [],
+            },
+          ]);
+          const begun = await sessionStateService.beginTurn(sessionState.id);
 
           // 3. Start the task with ONLY the tools Jev exposed.
           const runtime = provider('agent.runtime');
-          const started = await runtime.startTask(
-            { goal: spec.goal, context: spec.context, tools: decision.exposedTools },
-            {
-              ...buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
-              sessionStateId: sessionState.id,
-              gatewayCredentials: sessionStateService.issueGatewayCredentials(sessionState.id),
-            },
-          );
+          const started = previous
+            ? await runtime.continueTask(
+                previous.taskId,
+                { instruction: spec.goal, context: spec.context },
+                buildCallContext({ stepId: step.id, policyRule: 'graph-context-continuation' }),
+              )
+            : await runtime.startTask(
+                { goal: spec.goal, context: spec.context, tools: decision.exposedTools },
+                {
+                  ...buildCallContext({ stepId: step.id, policyRule: 'jev-filtered-toolset' }),
+                  sessionStateId: sessionState.id,
+                  gatewayCredentials: sessionStateService.issueGatewayCredentials(sessionState.id),
+                },
+              );
           if (!started.ok) throw new Error('Failed to start agent task: ' + started.error.message);
-          const taskId = started.data.taskId;
+          const taskId = previous?.taskId ?? (started.data as { taskId: string }).taskId;
           activeTaskId = taskId;
           await sessionStateService.bindHarnessSession(sessionState.id, taskId);
+          if (spec.contextScope)
+            contextScopes.set(spec.contextScope.id, { sessionStateId: sessionState.id, taskId });
 
           await bus.emit(runId, {
             type: 'harness.turn',
@@ -813,7 +902,7 @@ export class Orchestrator {
               id: newId('turn'),
               runId,
               sessionId: taskId,
-              turnId: taskId + ':1',
+              turnId: taskId + ':' + begun.turn,
               phase: 'started',
               at: nowIso(),
             },
@@ -892,7 +981,7 @@ export class Orchestrator {
                 id: newId('turn'),
                 runId,
                 sessionId: taskId,
-                turnId: taskId + ':' + turn,
+                turnId: taskId + ':' + (begun.turn + turn - 1),
                 phase: 'quiescent',
                 payload: toJson({ toolCallCount: turnToolCalls.length }),
                 at: nowIso(),
@@ -977,7 +1066,11 @@ export class Orchestrator {
 
             if (completionDecision.status === 'done' && completionDecision.verified) {
               completed = true;
-              await sessionStateService.setStatus(sessionState.id, 'completed');
+              retainContext = Boolean(spec.contextScope);
+              await sessionStateService.setStatus(
+                sessionState.id,
+                retainContext ? 'quiescent' : 'completed',
+              );
               break;
             }
             if (completionDecision.status === 'blocked') {
@@ -1029,7 +1122,7 @@ export class Orchestrator {
                   id: newId('turn'),
                   runId,
                   sessionId: taskId,
-                  turnId: taskId + ':' + (turn + 1),
+                  turnId: taskId + ':' + (begun.turn + turn),
                   phase: 'started',
                   at: nowIso(),
                 },
@@ -1048,10 +1141,11 @@ export class Orchestrator {
             );
           }
 
-          await runtime.cancelTask(
-            taskId,
-            buildCallContext({ stepId: step.id, policyRule: 'completed-session-close' }),
-          );
+          if (!retainContext)
+            await runtime.cancelTask(
+              taskId,
+              buildCallContext({ stepId: step.id, policyRule: 'completed-session-close' }),
+            );
 
           // 5. Post-hoc audit. The runtime ran its own loop internally, so this
           //    is our only visibility into what it touched — recorded into the
@@ -1078,7 +1172,7 @@ export class Orchestrator {
           await this.upsertStep(step.id, {
             status: 'succeeded',
             output: toJson({
-              result: finalResult,
+              resultPresent: finalResult !== null && finalResult !== undefined,
               toolCallCount: toolCalls.length,
               toolCalls,
               completionDecision,
@@ -1086,7 +1180,13 @@ export class Orchestrator {
             endedAt: nowIso(),
           });
 
-          return { result: finalResult, scheduleDecision: decision, toolCalls, completionDecision };
+          return {
+            result: finalResult,
+            scheduleDecision: decision,
+            toolCalls,
+            completionDecision,
+            dataLabels: (await sessionStateService.get(sessionState.id))?.dataLabels ?? labels,
+          };
         } catch (err) {
           if (sessionStateId) {
             const state = await sessionStateService.get(sessionStateId);
@@ -1104,7 +1204,7 @@ export class Orchestrator {
           });
           throw err;
         } finally {
-          if (activeTaskId) {
+          if (activeTaskId && !retainContext) {
             await provider('agent.runtime')
               .cancelTask(
                 activeTaskId,
@@ -1112,15 +1212,7 @@ export class Orchestrator {
               )
               .catch(() => undefined);
           }
-          try {
-            await this.deps.releaseRunResources?.({ runId, stepId: step.id });
-          } catch (error) {
-            await ctx.log(
-              'warn',
-              'Run resource cleanup failed: ' +
-                (error instanceof Error ? error.message : String(error)),
-            );
-          }
+          releaseScope?.();
         }
       },
     };

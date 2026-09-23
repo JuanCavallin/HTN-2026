@@ -18,6 +18,7 @@ import type { SessionStateService } from '../sessions/service.js';
 import type { ToolApprovalGate } from './approval.js';
 import { checkOutboundText } from './contentCheck.js';
 import type { ToolExecutorRegistry, ToolExecutionOutput } from './executors.js';
+import { modelToolText } from './executors.js';
 import type { RegisteredTool, ToolRegistry } from './registry.js';
 
 export type ToolBrokerErrorCode =
@@ -382,10 +383,12 @@ export class ToolBroker {
     }
 
     const outputSummary = compactSummary(executed.summary);
-    const sanitizedSummary = executed.sanitizedSummary
-      ? compactSummary(executed.sanitizedSummary)
-      : undefined;
     const outputLabels = mergeLabels(action.dataLabels, executed.dataLabels);
+    executed = { ...executed, dataLabels: outputLabels };
+    const sanitizedSummary =
+      executed.sanitizedSummary && outputLabels.every((label) => label === 'public')
+        ? compactSummary(modelToolText(executed))
+        : undefined;
     await this.sessions.appendContext(session.id, [
       {
         role: 'tool',
@@ -403,6 +406,12 @@ export class ToolBroker {
   }
 
   private assertSelected(session: AgentSessionState, descriptor: ToolDescriptor): void {
+    if (session.toolCeiling !== undefined && !session.toolCeiling.includes(descriptor.id)) {
+      throw new ToolBrokerError(
+        'TOOL_NOT_SELECTED',
+        'Tool exceeds this context capability ceiling.',
+      );
+    }
     const grant = session.activeToolExposureGrant;
     if (!grant || grant.sessionStateId !== session.id || grant.turn !== session.turn) {
       throw new ToolBrokerError(

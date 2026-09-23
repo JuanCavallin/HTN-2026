@@ -87,6 +87,7 @@ export const graphNodeTypeSchema = z.enum(GRAPH_NODE_TYPES);
 /* -------------------------------------------------------------------------- */
 
 const baseNode = {
+  dataLabels: z.array(z.enum(['public', 'private', 'secret', 'local_only'])).optional(),
   id: z.string().min(1).max(64),
   label: z.string().min(1).max(160),
   position: z.object({ x: z.number(), y: z.number() }).default({ x: 0, y: 0 }),
@@ -211,6 +212,21 @@ export const agentTaskNodeSchema = nodeVariant(
      * Never put an irreversible tool in here.
      */
     availableTools: z.array(z.string()).default([]),
+    /** Hard capability ceiling, unlike discovery candidates. [] means no tools. */
+    toolCeiling: z.array(z.string().min(1)).optional(),
+    /** Run-local mutable transcript identity. Omission creates an isolated task. */
+    contextScope: z
+      .object({
+        id: z
+          .string()
+          .min(1)
+          .max(64)
+          .regex(/^[A-Za-z0-9_-]+$/),
+        mode: z.enum(['fresh', 'continue']),
+      })
+      .optional(),
+    /** Explicit sensitivity can only tighten inherited context labels. */
+    dataLabels: z.array(z.enum(['public', 'private', 'secret', 'local_only'])).optional(),
     /**
      * Explicit named inputs for this task, each a whole {{node.path}} or
      * {{input.path}} reference. Omitted: direct predecessor outputs only.
@@ -461,6 +477,8 @@ export function graphAncestorIds(
 
 export const agentGraphSchema = z
   .object({
+    /** Labels on run inputs; derived nodes may tighten but never remove them. */
+    dataLabels: z.array(z.enum(['public', 'private', 'secret', 'local_only'])).optional(),
     id: z.string().min(1).max(64),
     name: z.string().min(1).max(200),
     description: z.string().max(2000).optional(),
@@ -519,6 +537,33 @@ export const agentGraphSchema = z
     }
 
     for (const [index, node] of graph.nodes.entries()) {
+      if (node.type === 'agent_task' && node.config.contextScope) {
+        const scope = node.config.contextScope;
+        const peers = graph.nodes.filter(
+          (other) => other.type === 'agent_task' && other.config.contextScope?.id === scope.id,
+        );
+        const ancestors = graphAncestorIds(node.id, graph.edges);
+        const creators = peers.filter(
+          (other) => other.type === 'agent_task' && other.config.contextScope?.mode === 'fresh',
+        );
+        if (
+          creators.length !== 1 ||
+          (scope.mode === 'continue' && !ancestors.has(creators[0]!.id)) ||
+          peers.some(
+            (other) =>
+              other.id !== node.id &&
+              !ancestors.has(other.id) &&
+              !graphAncestorIds(other.id, graph.edges).has(node.id),
+          )
+        ) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['nodes', index, 'config', 'contextScope'],
+            message:
+              'A context scope requires one fresh owner followed by an ordered chain of continuations.',
+          });
+        }
+      }
       if (node.type !== 'agent_task' || node.config.contextInputs === undefined) continue;
       const ancestors = graphAncestorIds(node.id, graph.edges);
       for (const [name, reference] of Object.entries(node.config.contextInputs)) {

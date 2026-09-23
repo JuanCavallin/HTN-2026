@@ -8,8 +8,19 @@ export interface ToolExecutionOutput {
   dataLabels: DataLabel[];
   /** Deliberately prepared text that may be returned to a remote model when labels allow it. */
   sanitizedSummary?: string;
+  /** Executor-prepared, bounded public fields for the model. Never raw provider output. */
+  modelOutput?: Json;
   /** Required when AgentOS policy says the result needs verification. */
   verified?: boolean;
+}
+
+export function modelToolText(result: ToolExecutionOutput): string {
+  const summary = result.sanitizedSummary ?? result.summary;
+  if (result.modelOutput !== undefined && result.dataLabels.every((label) => label === 'public')) {
+    const serialized = JSON.stringify({ summary, result: result.modelOutput });
+    if (serialized.length <= 6000) return serialized;
+  }
+  return summary;
 }
 
 export interface ToolExecutor {

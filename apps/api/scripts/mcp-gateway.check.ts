@@ -78,6 +78,15 @@ async function main(): Promise<void> {
       });
       assert.equal(expired.isError, true);
       assert.match(JSON.stringify(expired.content), /TOOL_NOT_SELECTED/);
+      await sessionStateService.patch(session.id, { toolCeiling: [] });
+      await sessionStateService.grantToolExposure(session.id, {
+        modelCallId: 'forged-wide-grant',
+        selectedToolVersions: { [CORE_RUNTIME_STATUS_TOOL_ID]: '1' },
+      });
+      assert.equal((await client.listTools()).tools.length, 0);
+      const capped = await client.callTool({ name: CORE_RUNTIME_STATUS_WIRE_NAME, arguments: {} });
+      assert.equal(capped.isError, true);
+      assert.match(JSON.stringify(capped.content), /capability ceiling/);
     } finally {
       await client.close();
     }
