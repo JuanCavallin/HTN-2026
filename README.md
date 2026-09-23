@@ -1,11 +1,15 @@
 # Zephyr
 
-**A control plane for AI agents.** Built at Hack the North 2026. (The codebase and the
-design spec call the architecture **AgentOS**; Zephyr is the product.)
+**A control plane for AI agents.** Built in 36 hours at **Hack the North 2026**, where it
+finished **top 12 for Warp's Best Developer Tool** track. (The codebase and the design
+spec call the architecture **AgentOS**; Zephyr is the product.) We're actively continuing
+to build this beyond the hackathon — see [What's next](#whats-next).
 
 Agents today are a black box holding your credentials: every step goes to the most
 expensive model, the agent can see every tool you own, your data goes wherever it decides,
-and you find out about the email after it was sent.
+and you find out about the email after it was sent. Zephyr is the opposite bet: an agent
+you can supervise, that gets cheaper and more private *because* of that supervision, not
+in spite of it.
 
 Zephyr sits between any agent harness and the world. A tiny, non-generative decision model
 (**Jev**) picks the model route, the handful of tools, and the moment to stop. Deterministic
@@ -199,9 +203,28 @@ stdio · editing a node of a _running_ workflow is not implemented · the produc
 build expects the API on the same origin under `/api` (no static hosting is wired up).
 Deliberately skipped: Docker, TS project references, ESLint, a state-management library.
 
+## What's next
+
+Hack the North was the start, not the finish. In progress:
+
+- More harness adapters (the adapter boundary already exists) so the same policy layer
+  supervises any agent, not just Hermes.
+- Editing a node of a _running_ workflow, under the same re-authorization rules as revised
+  approvals.
+- Per-user auth and policy packs — budgets, approval thresholds, data residency — for teams.
+- Caching resolved browser targets so repeat runs need no model call at all.
+- Using the egress ledger and approval history to learn which steps never needed the
+  frontier model in the first place.
+
 ## Team
 
-Juan Cavallin ([@JuanCavallin](https://github.com/JuanCavallin)) · Daniel Zhao
-([@danielzhao07](https://github.com/danielzhao07)) · Sheharyar
-([@Sheharyar45](https://github.com/Sheharyar45)) · Krish
-([@KrishP147](https://github.com/KrishP147))
+Built by four people over one hackathon weekend, now maintained past it:
+
+- **Juan Andres Cavallin** — [@JuanCavallin](https://github.com/JuanCavallin)
+- **Daniel Zhao** — [@danielzhao07](https://github.com/danielzhao07)
+- **Sheharyar Meghani** — [@Sheharyar45](https://github.com/Sheharyar45)
+- **Krish Punjabi** — [@KrishP147](https://github.com/KrishP147)
+
+## License
+
+[MIT](LICENSE)
