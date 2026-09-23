@@ -239,6 +239,13 @@ export interface DecisionAdapter extends ProviderAdapter {
 }
 
 export interface BrowserAdapter extends ProviderAdapter {
+  /** Change who may control a run-owned session. Human ownership blocks agent I/O. */
+  setOwnership?(
+    input: { sessionId: string; owner: 'agent' | 'human' },
+    ctx: ProviderCallContext,
+  ): Promise<void>;
+  /** Close all browser sessions still owned by a run. */
+  releaseRun?(runId: string, ctx: ProviderCallContext): Promise<void>;
   openSession(
     input: { startUrl?: string },
     ctx: ProviderCallContext,

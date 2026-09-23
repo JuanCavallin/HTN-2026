@@ -1132,17 +1132,29 @@ async function runHandoff(
         // Held for the REST OF THE RUN, not this step: downstream nodes inherit
         // the authenticated session. runGraph's drain is what gives it back.
         lease.hold(sessionId);
+      }
 
-        // The person cannot reach the browser unless the viewer URL is put on
-        // the run stream. Undefined liveViewUrl is NORMAL (local and mocked
-        // browsers have no viewer) and the UI says so rather than dead-linking.
+      const browser = ctx.provider('browser');
+      if (!browser.setOwnership)
+        throw new Error('Browser backend cannot safely transfer session ownership.');
+      await browser.setOwnership(
+        { sessionId: sessionId as string, owner: 'human' },
+        ctx.callContext({ stepId: step.id, policyRule: 'explicit-human-handoff' }),
+      );
+      if (!inherited) {
+        const opened = await browser.liveView?.(
+          sessionId as string,
+          ctx.callContext({ stepId: step.id, policyRule: 'handoff-live-view' }),
+        );
         await ctx.announceBrowserSession({
-          sessionId,
+          sessionId: sessionId as string,
           stepId: step.id,
           nodeId: node.id,
           providerId: ctx.providerFor('browser'),
-          ...(opened.data.liveViewUrl ? { liveViewUrl: opened.data.liveViewUrl } : {}),
-          interactive: opened.data.interactive === true,
+          ...(opened?.ok && opened.data.liveViewUrl
+            ? { liveViewUrl: opened.data.liveViewUrl }
+            : {}),
+          interactive: opened?.ok === true && opened.data.interactive,
           ...(cfg.url ? { startUrl: cfg.url } : {}),
         });
       }
@@ -1171,6 +1183,11 @@ async function runHandoff(
       // THE TIMEOUT FAILS THE RUN. It never falls through to letting the agent
       // do it -- see handoffNodeSchema.
       await withHandoffTimeout(waiting, cfg.timeoutMs ?? HANDOFF_TIMEOUT_MS, node.label);
+
+      await browser.setOwnership(
+        { sessionId: sessionId as string, owner: 'agent' },
+        ctx.callContext({ stepId: step.id, policyRule: 'resume-after-human-handoff' }),
+      );
 
       return { sessionId, handedOff: true, resumeWhen: cfg.resumeWhen };
     },

@@ -1,6 +1,6 @@
 # Workflow execution and supervision roadmap
 
-Updated: 2026-09-22. Active follow-up to the archived graph workflow plan.
+Updated: 2026-09-23. Active follow-up to the archived graph workflow plan.
 The [design specification](agentos-design.md) remains authoritative for privacy,
 permissions, exact-action approval, and the harness-agnostic architecture.
 
@@ -146,7 +146,11 @@ Implementation steps (each verified step is committed separately):
       retain input provenance/version without persisting raw input values. Run/node
       labels also propagate through derived graph outputs. Typecheck, graph checks
       (including the new scope suite), and gateway/broker checks verify these contracts.
-- [ ] Run-owned resources, serialized writers, and usable sanitized MCP results.
+- [x] Run-owned resources, serialized writers, and bounded sanitized MCP results.
+      Browser sessions are run-owned at the provider boundary, browser calls serialize
+      per session, and human handoff blocks agent I/O until resume. Teardown releases
+      leftovers; only explicitly prepared, bounded public model output crosses MCP.
+      Typecheck passed. Provider-live handoff and UI embedding remain manual/P1 checks.
 
 Owners: Person 1 (runtime/session lifecycle), Person 2 (context/privacy/policy),
 3A (tool gateway), 3B (browser). Agree additive contracts before changing these tracks.

@@ -7,6 +7,7 @@
  */
 
 import type {
+  BrowserAdapter,
   Capability,
   CapabilityMap,
   ProviderAdapter,
@@ -17,6 +18,7 @@ import { PROVIDER_IDS } from '@htn/shared';
 import { config, type ProviderConfig } from '../config.js';
 import { newId } from '../lib/ids.js';
 import { withEgress, type RecordEgress } from './withEgress.js';
+import { withBrowserOwnership } from './withBrowserOwnership.js';
 
 import { create as createHermes } from './hermes/index.js';
 import { create as createJev } from './jev/index.js';
@@ -75,7 +77,12 @@ export function createProviderRegistry(record: RecordEgress): ProviderRegistry {
   function get(id: ProviderId): ProviderAdapter {
     const cached = cache.get(id);
     if (cached) return cached;
-    const adapter = withEgress(FACTORIES[id](config.providers[id]), record, newId);
+    const raw = FACTORIES[id](config.providers[id]);
+    const owned =
+      id === 'browserbase' || id === 'localbrowser'
+        ? withBrowserOwnership(raw as BrowserAdapter)
+        : raw;
+    const adapter = withEgress(owned, record, newId);
     cache.set(id, adapter);
     return adapter;
   }

@@ -142,12 +142,15 @@ export const orchestrator = new Orchestrator({
       .map((tool) => tool.descriptor.id);
     return [...new Set([...mcpToolIds, ...browserToolIds])];
   },
-  releaseRunResources: ({ runId, stepId }) =>
-    browserTools.closeRunSessions(runId, {
-      runId,
-      stepId,
-      policyRule: 'agent-task-resource-release',
-    }),
+  releaseRunResources: async ({ runId, stepId }) => {
+    const ctx = { runId, stepId, policyRule: 'agent-task-resource-release' };
+    await browserTools.closeRunSessions(runId, ctx);
+    await Promise.all(
+      [providers.provider('browser'), providers.provider('browser.local')].map(async (browser) => {
+        if (browser.releaseRun) await browser.releaseRun(runId, ctx);
+      }),
+    );
+  },
 });
 
 let providersInitialized = false;

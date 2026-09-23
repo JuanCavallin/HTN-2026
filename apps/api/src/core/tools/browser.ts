@@ -101,7 +101,9 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
         );
         if (!opened.ok) throw new Error('Could not open browser session: ' + opened.error.message);
         sessionId = opened.data.sessionId;
-        liveViewUrl = opened.data.liveViewUrl;
+        // Never put Browserbase's interactive debugger URL in agent/tool output.
+        // It is minted only for an explicit human handoff.
+        liveViewUrl = undefined;
         ownsSession = true;
         sessions.set(sessionId, { providerId, url: requestedUrl, runId: action.runId });
       }
