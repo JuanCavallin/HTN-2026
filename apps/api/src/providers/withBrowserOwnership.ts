@@ -61,9 +61,12 @@ export function withBrowserOwnership(adapter: BrowserAdapter): BrowserAdapter {
           await Promise.all(
             entries.map(([id]) =>
               serialized(id, async () => {
-                const result = await target.closeSession(id, ctx);
-                if (!result.ok) throw new Error(result.error.message);
-                sessions.delete(id);
+                try {
+                  const result = await target.closeSession(id, ctx);
+                  if (!result.ok) throw new Error(result.error.message);
+                } finally {
+                  sessions.delete(id);
+                }
               }),
             ),
           );

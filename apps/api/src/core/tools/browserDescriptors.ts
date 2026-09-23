@@ -4,13 +4,14 @@ import type { ToolRegistration } from './registry.js';
 
 type BrowserProviderId = 'localbrowser' | 'browserbase';
 type BrowserOperation =
-  'open' | 'search' | 'extract' | 'inspect' | 'click' | 'type' | 'submit' | 'close';
+  'open' | 'search' | 'read' | 'extract' | 'inspect' | 'click' | 'type' | 'submit' | 'close';
 
 interface OperationSpec {
   operation: BrowserOperation;
   description: string;
   effect: ToolDescriptor['baselineEffect'];
   reversibility: ToolDescriptor['reversibility'];
+  interactionMode: NonNullable<ToolDescriptor['interactionMode']>;
   schema: Json;
 }
 
@@ -31,6 +32,7 @@ const OPERATIONS: readonly OperationSpec[] = [
     description: 'Open a browser session, optionally at a starting URL.',
     effect: 'read',
     reversibility: 'reversible',
+    interactionMode: 'resource_management',
     schema: objectSchema({ url: urlProperty }),
   },
   {
@@ -38,13 +40,24 @@ const OPERATIONS: readonly OperationSpec[] = [
     description: 'Search the public web and return a concise result.',
     effect: 'read',
     reversibility: 'reversible',
+    interactionMode: 'research',
     schema: objectSchema({ query: textProperty, url: urlProperty }, ['query']),
+  },
+  {
+    operation: 'read',
+    description:
+      'Read a page as bounded research evidence in a disposable browser session; does not continue or modify another page.',
+    effect: 'read',
+    reversibility: 'reversible',
+    interactionMode: 'research',
+    schema: objectSchema({ url: urlProperty, instruction: textProperty }, ['url', 'instruction']),
   },
   {
     operation: 'extract',
     description: 'Extract requested information from a browser page.',
     effect: 'read',
     reversibility: 'reversible',
+    interactionMode: 'interactive',
     schema: objectSchema(
       { sessionId: sessionProperty, url: urlProperty, instruction: textProperty },
       ['instruction'],
@@ -55,30 +68,30 @@ const OPERATIONS: readonly OperationSpec[] = [
     description: 'Inspect the indexed interactive controls on a browser page.',
     effect: 'read',
     reversibility: 'reversible',
-    schema: objectSchema({ sessionId: sessionProperty, url: urlProperty }),
+    interactionMode: 'interactive',
+    schema: objectSchema({ sessionId: sessionProperty }, ['sessionId']),
   },
   {
     operation: 'click',
     description: 'Click the page control that best matches a specific goal.',
     effect: 'write',
     reversibility: 'recoverable',
-    schema: objectSchema({ sessionId: sessionProperty, url: urlProperty, goal: textProperty }, [
-      'goal',
-    ]),
+    interactionMode: 'interactive',
+    schema: objectSchema({ sessionId: sessionProperty, goal: textProperty }, ['sessionId', 'goal']),
   },
   {
     operation: 'type',
     description: 'Type an exact value into the page field that best matches a goal.',
     effect: 'write',
     reversibility: 'recoverable',
+    interactionMode: 'interactive',
     schema: objectSchema(
       {
         sessionId: sessionProperty,
-        url: urlProperty,
         goal: textProperty,
         text: textProperty,
       },
-      ['goal', 'text'],
+      ['sessionId', 'goal', 'text'],
     ),
   },
   {
@@ -86,15 +99,15 @@ const OPERATIONS: readonly OperationSpec[] = [
     description: 'Click a submit control; this irreversible action always requires approval.',
     effect: 'write',
     reversibility: 'irreversible',
-    schema: objectSchema({ sessionId: sessionProperty, url: urlProperty, goal: textProperty }, [
-      'goal',
-    ]),
+    interactionMode: 'interactive',
+    schema: objectSchema({ sessionId: sessionProperty, goal: textProperty }, ['sessionId', 'goal']),
   },
   {
     operation: 'close',
     description: 'Close and release a browser session.',
     effect: 'read',
     reversibility: 'reversible',
+    interactionMode: 'resource_management',
     schema: objectSchema({ sessionId: sessionProperty }, ['sessionId']),
   },
 ];
@@ -121,11 +134,12 @@ function build(
     return {
       descriptor: {
         id,
-        version: '1',
+        version: '2',
         providerId,
         family: 'browser',
+        interactionMode: spec.interactionMode,
         description: spec.description,
-        inputSchemaRef: 'agentos://schemas/' + id + '/1',
+        inputSchemaRef: 'agentos://schemas/' + id + '/2',
         transport: providerId === 'localbrowser' ? 'local' : 'http',
         baselineEffect: spec.effect,
         reversibility: spec.reversibility,

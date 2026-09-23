@@ -189,30 +189,44 @@ mutate each other; expired scope/resource references fail explicitly; parallel
 independent tasks are correctly attributed; shared resources cannot have two writers;
 unknown/unselected tools, local-only egress and unapproved external writes stay blocked.
 
-## Browser continuity and research split (P0, after resource contracts)
+## Browser continuity and research split (P0; implementation complete)
 
 Owners: 3B with Person 1; Person 2 reviews privacy and side-effect handling.
 
-1. Inventory registry tools as research search/extract versus interactive browser
-   operations using trusted metadata. Both direct and Hermes calls use the same
-   brokered implementations. Do not expose native harness search as an escape hatch.
-2. Research usually needs evidence/artifacts, not a persistent visible page. Fixed
-   queries run directly; adaptive investigation uses Hermes with the same known tools.
-3. Interactive nodes reference the existing browser session **and page**, retaining
-   login, navigation, cookies, and user changes. Reattach to the selected page rather
-   than creating a new page. Parallel browser work uses explicitly separate resources.
-4. Fail on missing/unresolved/stale required session refs instead of silently opening
-   a fresh blank session. Preserve existing `{{open.result.sessionId}}` graphs through
-   a compatibility mapping. Credentials remain human-entered, not graph arguments.
-5. Implement server-enforced agent/view-only/human ownership. On takeover, stop new
-   agent actions and settle in-flight work; on resume, refresh page observations and
-   invalidate stale element handles. Human completion is not an approval for unrelated
-   side effects. Recheck exact actions after resuming.
+1. [x] Inventory registry tools as research search/read versus interactive browser
+       operations using trusted metadata (`interactionMode`). Both direct and Hermes calls
+       use the same brokered implementations; no native harness search escape hatch.
+2. [x] Keep research stateless: `search` and the new `read` operation open disposable
+       sessions and return bounded, whitelisted evidence. Fixed lookups remain direct tool
+       nodes; adaptive investigation can use Hermes with the same catalog tools.
+3. [x] Bind interactive operations to an existing run-owned session. `inspect`, `click`,
+       `type`, and `submit` require `sessionId`; no missing id can create a replacement page.
+       `open` returns the id for refs such as `{{open.result.sessionId}}`; `extract` keeps its
+       prior explicit-URL compatibility behavior. Browserbase page attachment remains within
+       its existing provider session/context.
+4. [x] Fail on unknown, cross-run, or wrong-backend session ids. Existing graphs using
+       `{{open.result.sessionId}}` remain compatible. Credentials remain human-entered, not
+       graph arguments.
+5. [x] Enforce server-side agent/human ownership and serialize session calls. Handoff
+       yields access before publishing a viewer link; resume returns ownership to the agent.
+       Run teardown closes residual sessions. Tool/result authorization remains per action.
 
-Acceptance: open -> user login -> resume -> another node keeps the same session/page;
-expired sessions produce recovery UI, not a hidden restart; two graph nodes cannot
-race on the same page; cancellation releases sessions without discarding another
-active owner's resource.
+Acceptance: typecheck passed. Live Browserbase open -> login -> resume -> next-node
+continuity, viewer expiry/recovery, and cancellation against a real provider remain
+manual integration checks. Browser session ownership and backend checks are enforced
+in-process; the side-pane viewer/takeover UI remains P1 below.
+
+Manual integration sequence:
+
+1. Create a graph with `browserbase.open` at a login page, a handoff bound to
+   `{{open.result.sessionId}}`, then `browserbase.inspect` or `browserbase.extract`
+   bound to that same id. Sign in during the handoff; confirm the resumed node sees
+   the authenticated page rather than a newly opened tab.
+2. Try `browserbase.inspect` without a session id and with an id from another run;
+   both must fail without opening a page. Cancel a run with an open session and
+   confirm the provider session is released.
+3. Run `browserbase.search` and `browserbase.read`; confirm results are bounded
+   evidence and those calls do not yield a session id for later interactive actions.
 
 ## Live supervision pane (P1, depends on browser/context contracts)
 

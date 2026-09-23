@@ -76,23 +76,27 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
 
       if (operation === 'close') {
         const sessionId = requiredString(args, 'sessionId');
-        assertSessionProvider(sessions, sessionId, providerId);
+        assertSessionProvider(sessions, sessionId, providerId, action.runId);
         const closed = await adapter.closeSession(sessionId, ctx);
         if (!closed.ok) throw new Error(closed.error.message);
         sessions.delete(sessionId);
         return output(action, { closed: sessionId }, 'Closed browser session.');
       }
 
+      const suppliedSessionId = optionalString(args, 'sessionId');
+      const stateful = ['inspect', 'click', 'type', 'submit'].includes(operation);
+      if (stateful && !suppliedSessionId) {
+        throw new Error(operation + ' requires an existing sessionId; open a page first.');
+      }
       const requestedUrl = requestedStartUrl(operation, args);
       assertSensitiveDestination(action.dataLabels, requestedUrl);
 
-      const suppliedSessionId = optionalString(args, 'sessionId');
       let sessionId = suppliedSessionId;
       let ownsSession = false;
       let liveViewUrl: string | undefined;
 
       if (sessionId) {
-        assertSessionProvider(sessions, sessionId, providerId);
+        assertSessionProvider(sessions, sessionId, providerId, action.runId);
         assertSensitiveDestination(action.dataLabels, sessions.get(sessionId)?.url);
       } else {
         const opened = await adapter.openSession(
@@ -122,7 +126,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           );
         }
 
-        if (operation === 'search' || operation === 'extract') {
+        if (operation === 'search' || operation === 'read' || operation === 'extract') {
           const instruction =
             operation === 'search'
               ? 'Return concise search results for: ' + requiredString(args, 'query')
@@ -132,10 +136,17 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
             childContext(ctx, 'browser-read'),
           );
           if (!extracted.ok) throw new Error(extracted.error.message);
+          const publicOnly = action.dataLabels.every((label) => label === 'public');
+          const evidence = publicOnly ? boundedEvidence(extracted.data) : { available: true };
           return output(
             action,
-            extracted.data,
-            operation === 'search' ? 'Completed browser search.' : 'Extracted browser content.',
+            evidence,
+            operation === 'search'
+              ? 'Completed stateless browser research search.'
+              : operation === 'read'
+                ? 'Read a page as bounded stateless research evidence.'
+                : 'Extracted bounded evidence from the existing browser page.',
+            publicOnly ? evidence : undefined,
           );
         }
 
@@ -228,6 +239,10 @@ function providerFor(toolId: string): BrowserSession['providerId'] {
 function requestedStartUrl(operation: string, args: Record<string, Json>): string | undefined {
   const explicit = optionalString(args, 'url');
   if (explicit) return normalizeBrowserUrl(explicit);
+  if (operation === 'read') throw new Error('read requires a URL.');
+  if (operation === 'extract' && !optionalString(args, 'sessionId')) {
+    throw new Error('extract requires an existing sessionId or an explicit URL.');
+  }
   if (operation !== 'search') return undefined;
   const query = requiredString(args, 'query');
   return 'https://www.google.com/search?q=' + encodeURIComponent(query);
@@ -256,8 +271,12 @@ function assertSessionProvider(
   sessions: Map<string, BrowserSession>,
   sessionId: string,
   providerId: BrowserSession['providerId'],
+  runId: string,
 ): void {
   const known = sessions.get(sessionId);
+  if (known && known.runId !== runId) {
+    throw new Error('Browser session is unknown or belongs to a different run.');
+  }
   if (known && known.providerId !== providerId) {
     throw new Error('Browser session belongs to a different backend.');
   }
@@ -278,15 +297,65 @@ async function snapshot(
   return result.data;
 }
 
-function output(action: ToolAction, value: Json, summary: string): ToolExecutionOutput {
+function output(
+  action: ToolAction,
+  value: Json,
+  summary: string,
+  modelOutput?: Json,
+): ToolExecutionOutput {
   const publicOnly = action.dataLabels.every((label) => label === 'public');
   return {
     output: value,
     summary,
     ...(publicOnly ? { sanitizedSummary: summary } : {}),
+    ...(publicOnly && modelOutput !== undefined ? { modelOutput } : {}),
     dataLabels: [...action.dataLabels],
     verified: true,
   };
+}
+
+/** Whitelist short evidence fields; never pass a provider's whole document through. */
+function boundedEvidence(value: Json): Json {
+  if (typeof value === 'string') return { text: value.slice(0, 2400) };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { available: true };
+  }
+  const source = value as Record<string, Json>;
+  const evidence: Record<string, Json> = {};
+  for (const key of ['title', 'text', 'snippet', 'summary', 'description']) {
+    const field = source[key];
+    if (typeof field === 'string' && field.trim()) evidence[key] = field.slice(0, 1800);
+  }
+  for (const key of ['url', 'sourceUrl']) {
+    const field = source[key];
+    if (typeof field !== 'string') continue;
+    try {
+      const url = new URL(field);
+      if (url.protocol === 'https:' || url.protocol === 'http:') {
+        url.username = '';
+        url.password = '';
+        url.search = '';
+        url.hash = '';
+        evidence.url = url.toString().slice(0, 500);
+        break;
+      }
+    } catch {
+      // Unparseable provider URLs are excluded from the model-visible artifact.
+    }
+  }
+  const results = source.results;
+  if (Array.isArray(results)) {
+    evidence.results = results.slice(0, 5).map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return {};
+      const result = item as Record<string, Json>;
+      return Object.fromEntries(
+        ['title', 'url', 'snippet', 'description']
+          .filter((key) => typeof result[key] === 'string')
+          .map((key) => [key, (result[key] as string).slice(0, key === 'url' ? 500 : 800)]),
+      ) as Json;
+    });
+  }
+  return Object.keys(evidence).length ? evidence : { available: true };
 }
 
 function childContext(ctx: ProviderCallContext, policyRule: string): ProviderCallContext {

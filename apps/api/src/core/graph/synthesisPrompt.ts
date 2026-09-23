@@ -25,13 +25,20 @@
  */
 
 import { z } from 'zod';
-import { GRAPH_NODE_TYPES, graphEdgeSchema, graphNodeSchema, type AgentGraph } from '@htn/shared';
+import {
+  GRAPH_NODE_TYPES,
+  graphEdgeSchema,
+  graphNodeSchema,
+  type AgentGraph,
+  type ToolInteractionMode,
+} from '@htn/shared';
 
 export interface ToolCatalogEntry {
   name: string;
   description: string;
   /** Editor grouping (`web`, `mail`, ...). Also how a family of tools is recognised here. */
   group?: string;
+  interactionMode?: ToolInteractionMode;
 }
 
 /**
@@ -150,13 +157,19 @@ REDACTION
  * added web tool needs no edit to this file.
  */
 function webLookupRules(tools: ToolCatalogEntry[]): string {
-  const web = tools.filter((t) => t.group === 'web').map((t) => t.name);
+  const web = tools.filter((t) => t.group === 'web' || t.group === 'browser');
   if (web.length === 0) return '';
 
   return [
     'LIVE WEB LOOKUPS',
     '',
-    '- Catalog web tools: ' + web.join(', ') + '.',
+    '- Catalog web tools: ' + web.map((tool) => tool.name).join(', ') + '.',
+    '  Trusted interaction modes: ' +
+      web
+        .filter((tool) => tool.interactionMode)
+        .map((tool) => tool.name + '=' + tool.interactionMode)
+        .join(', ') +
+      '.',
     '  Use each tool according to its description; do not assume every web tool is',
     "  a cloud browser, has a visible page, or shares another tool's session.",
     '- A known query or page read belongs in a `tool` node; a bounded choice of',
@@ -169,8 +182,11 @@ function webLookupRules(tools: ToolCatalogEntry[]): string {
     '  explicit bounds. Known tools do not imply a known sequence. Every call must',
     '  remain on the AgentOS gateway/broker path, never an unregistered native tool.',
     '- Research returns evidence; interactive browsing operates on a particular page.',
-    '  Hermes is not required just to keep that page. Keep browser handoff and its',
-    '  continuation as explicit graph steps carrying the existing session reference.',
+    '  Choose research-mode search/read for stateless evidence; they use disposable pages',
+    '  and cannot continue a login or prior navigation. Choose open followed by interactive',
+    '  inspect/extract/click/type/submit when the existing page state matters. Every such',
+    '  call must pass the same sessionId returned by open; missing ids fail, never open a',
+    '  replacement page. Hermes is not required just to keep that page.',
     "- Each tool's description states its args and result fields. Pass one lookup's result",
     '  to a later node with a ref, e.g. "{{search.result.text}}" for a node with id "search".',
     '',
@@ -182,7 +198,7 @@ function webLookupRules(tools: ToolCatalogEntry[]): string {
     '  before execution; it must never fall back to a SECOND, blank browser.',
     '- Every later browser node that must act on the SAME page -- including a `handoff`,',
     '  whose sessionId is a top-level config field, not inside args -- has to carry that',
-    '  ref. Omitting it does not reuse the page; it opens a new one.',
+    '  ref. Omitting it fails; it never silently opens a replacement page.',
     '- A handoff without an inherited session needs an explicit non-empty url.',
     '  Argument generation cannot replace a sessionId already bound by the graph.',
     '- Pick ONE browser backend for the whole flow and use it consistently. Prefer the',

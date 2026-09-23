@@ -31,6 +31,7 @@ export interface ModelRoute {
 
 export type ToolEffect = 'read' | 'write' | 'destructive' | 'unknown';
 export type ToolTransport = 'mcp' | 'local' | 'harness' | 'http' | 'fixture';
+export type ToolInteractionMode = 'research' | 'interactive' | 'resource_management';
 
 /** Short metadata sent to Jev; schemas, credentials, and executors remain local. */
 export interface ToolDescriptor {
@@ -38,6 +39,8 @@ export interface ToolDescriptor {
   version: string;
   providerId: string;
   family: string;
+  /** Trusted distinction between stateless evidence gathering and page-bound actions. */
+  interactionMode?: ToolInteractionMode;
   description: string;
   inputSchemaRef: string;
   transport: ToolTransport;

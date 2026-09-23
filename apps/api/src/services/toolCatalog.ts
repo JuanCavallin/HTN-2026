@@ -36,6 +36,9 @@ async function fromRegistry(): Promise<ToolCatalogEntry[]> {
       name: tool.descriptor.id,
       description: tool.descriptor.description,
       group: tool.descriptor.family,
+      ...(tool.descriptor.interactionMode
+        ? { interactionMode: tool.descriptor.interactionMode }
+        : {}),
     }));
 }
 
