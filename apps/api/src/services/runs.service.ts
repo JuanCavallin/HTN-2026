@@ -84,12 +84,16 @@ export async function createRun(args: {
   }
 
   const at = nowIso();
+  const parsedObject =
+    input && typeof input === 'object' ? (input as Record<string, unknown>) : null;
+  const graphId = typeof parsedObject?.graphId === 'string' ? parsedObject.graphId : undefined;
   const run: Run = {
     id: newId('run'),
     kind: args.kind,
     title: args.title ?? (args.kind === 'graph' ? playbookTitleFor(input) : playbook.title),
     status: 'pending',
     input,
+    ...(graphId ? { graphId } : {}),
     createdAt: at,
     updatedAt: at,
   };

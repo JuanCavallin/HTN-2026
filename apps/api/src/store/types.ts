@@ -28,6 +28,7 @@ import type {
 } from '@htn/shared';
 
 export interface ListRunsFilter {
+  graphId?: string;
   status?: RunStatus;
   kind?: string;
   limit?: number;

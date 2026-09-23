@@ -98,7 +98,14 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
     try {
       const raw = await readFile(SNAPSHOT_PATH, 'utf8');
       const snap = JSON.parse(raw) as Snapshot;
-      for (const r of snap.runs) runs.set(r.id, r);
+      for (const r of snap.runs) {
+        const input = r.input && typeof r.input === 'object' ? r.input : null;
+        const inputGraphId =
+          input && !Array.isArray(input) && typeof input.graphId === 'string'
+            ? input.graphId
+            : undefined;
+        runs.set(r.id, r.graphId || !inputGraphId ? r : { ...r, graphId: inputGraphId });
+      }
       for (const s of snap.steps) {
         steps.set(s.id, s);
         stepSeq.set(s.runId, Math.max(stepSeq.get(s.runId) ?? 0, s.seq));
@@ -142,6 +149,7 @@ export function createMemoryStore(opts: { persistToDisk?: boolean } = {}): Store
     },
     async listRuns(filter: ListRunsFilter = {}) {
       let list = [...runs.values()];
+      if (filter.graphId) list = list.filter((r) => r.graphId === filter.graphId);
       if (filter.status) list = list.filter((r) => r.status === filter.status);
       if (filter.kind) list = list.filter((r) => r.kind === filter.kind);
       list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)); // newest first

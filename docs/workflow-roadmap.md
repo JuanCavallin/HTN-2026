@@ -274,6 +274,12 @@ Acceptance: a run and its baseline populate both columns; comparing a prior run 
 works; reload/restart preserves the pair; missing metrics are not rendered as zero;
 zero-delegation workflows are measured normally, without a delegation penalty.
 
+Progress: graph lineage now has a top-level `Run.graphId`, a SQLite index with an
+idempotent backfill from existing JSON run bodies, and a graphId filter shared by the
+API and memory store. Existing step, egress, result, and run-input records are already
+durable, so no second metrics store is needed. Typecheck passed. Live compare refresh,
+explicit previous-run selection, and pair metadata remain to implement.
+
 ## Unified graph presentation (P2, deliberately last)
 
 Owner: Person 4. Share graph identity, layout and node styles between authoring and

@@ -45,11 +45,8 @@ export interface OptimizeGraphResult {
 
 /** Terminal runs of `kind`, for this graph, newest first, most-recent-first-ish limit applied. */
 async function terminalRunsForGraph(kind: string, graphId: string): Promise<Run[]> {
-  const candidates = await listRuns({ kind, limit: RUN_SCAN_LIMIT });
-  return candidates
-    .filter((run) => isTerminal(run.status))
-    .filter((run) => (run.input as { graphId?: string }).graphId === graphId)
-    .slice(0, RECENT_RUNS_LIMIT);
+  const candidates = await listRuns({ kind, graphId, limit: RUN_SCAN_LIMIT });
+  return candidates.filter((run) => isTerminal(run.status)).slice(0, RECENT_RUNS_LIMIT);
 }
 
 interface PerRunData {

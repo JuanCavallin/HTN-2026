@@ -15,6 +15,7 @@ export const createRunRequestSchema = z.object({
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>;
 
 export const listRunsQuerySchema = z.object({
+  graphId: z.string().min(1).optional(),
   status: z
     .enum(['pending', 'running', 'awaiting_approval', 'paused', 'succeeded', 'failed', 'cancelled'])
     .optional(),

@@ -128,6 +128,26 @@ export function createSqliteStore(path: string): SqliteStore {
     CREATE INDEX IF NOT EXISTS mcp_connections_name ON mcp_connections(name);
   `);
 
+  // Additive run-lineage migration. Older databases stored graphId only inside
+  // the JSON body/input; backfill the indexed column without losing that data.
+  const runColumns = db.prepare('PRAGMA table_info(runs)').all() as { name: string }[];
+  if (!runColumns.some((column) => column.name === 'graph_id')) {
+    db.exec('ALTER TABLE runs ADD COLUMN graph_id TEXT');
+  }
+  const unindexedRuns = db.prepare('SELECT id, body FROM runs WHERE graph_id IS NULL').all() as {
+    id: string;
+    body: string;
+  }[];
+  const updateRunGraphId = db.prepare('UPDATE runs SET graph_id = ? WHERE id = ?');
+  for (const row of unindexedRuns) {
+    const run = decode<Run>(row.body);
+    const input = run.input && typeof run.input === 'object' ? run.input : null;
+    const inputGraphId =
+      input && !Array.isArray(input) && typeof input.graphId === 'string' ? input.graphId : null;
+    updateRunGraphId.run(run.graphId ?? inputGraphId, row.id);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS runs_graph_created ON runs(graph_id, created_at DESC)');
+
   const store: SqliteStore = {
     async hydrate() {
       const row = db.prepare('SELECT COUNT(*) AS count FROM runs').get() as
@@ -149,6 +169,10 @@ export function createSqliteStore(path: string): SqliteStore {
     async listRuns(filter: ListRunsFilter = {}) {
       const clauses: string[] = [];
       const values: (string | number)[] = [];
+      if (filter.graphId) {
+        clauses.push('graph_id = ?');
+        values.push(filter.graphId);
+      }
       if (filter.status) {
         clauses.push('status = ?');
         values.push(filter.status);
@@ -404,11 +428,20 @@ export function createSqliteStore(path: string): SqliteStore {
 
 function writeRun(db: DatabaseSync, run: Run): void {
   db.prepare(
-    `INSERT INTO runs(id, status, kind, created_at, updated_at, body)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO runs(id, status, kind, created_at, updated_at, graph_id, body)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET status=excluded.status, kind=excluded.kind,
-       created_at=excluded.created_at, updated_at=excluded.updated_at, body=excluded.body`,
-  ).run(run.id, run.status, run.kind, run.createdAt, run.updatedAt, encode(run));
+       created_at=excluded.created_at, updated_at=excluded.updated_at,
+       graph_id=excluded.graph_id, body=excluded.body`,
+  ).run(
+    run.id,
+    run.status,
+    run.kind,
+    run.createdAt,
+    run.updatedAt,
+    run.graphId ?? null,
+    encode(run),
+  );
 }
 
 function writeSession(db: DatabaseSync, state: AgentSessionState): void {
