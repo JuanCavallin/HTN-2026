@@ -989,7 +989,7 @@ async function holdOpenedSession(
       // Whatever the open returned is already stale by the time anyone clicks
       // it (Browserbase signs its viewer with a short-lived token), so this is
       // only a "a viewer exists" signal. The URL is minted on demand.
-      interactive: typeof payload.liveViewUrl === 'string',
+      interactive: payload.interactive === true,
     })
     .catch(() => undefined);
 }
@@ -1099,6 +1099,7 @@ async function runHandoff(
     async (step) => {
       assertSuppliedSessionId(cfg);
       let sessionId = inherited ? (cfg.sessionId as string) : undefined;
+      let interactive = false;
 
       // A handoff opens its OWN browser only when no session was handed to it.
       // Doing that with no url means handing a person about:blank, which is
@@ -1128,6 +1129,7 @@ async function runHandoff(
           );
         }
         sessionId = opened.data.sessionId;
+        interactive = opened.data.interactive === true;
 
         // Held for the REST OF THE RUN, not this step: downstream nodes inherit
         // the authenticated session. runGraph's drain is what gives it back.
@@ -1142,19 +1144,14 @@ async function runHandoff(
         ctx.callContext({ stepId: step.id, policyRule: 'explicit-human-handoff' }),
       );
       if (!inherited) {
-        const opened = await browser.liveView?.(
-          sessionId as string,
-          ctx.callContext({ stepId: step.id, policyRule: 'handoff-live-view' }),
-        );
         await ctx.announceBrowserSession({
           sessionId: sessionId as string,
           stepId: step.id,
           nodeId: node.id,
           providerId: ctx.providerFor('browser'),
-          ...(opened?.ok && opened.data.liveViewUrl
-            ? { liveViewUrl: opened.data.liveViewUrl }
-            : {}),
-          interactive: opened?.ok === true && opened.data.interactive,
+          // Signed, interactive viewer URLs are fetched on demand by the
+          // handoff-only endpoint, never persisted in the run event stream.
+          interactive,
           ...(cfg.url ? { startUrl: cfg.url } : {}),
         });
       }

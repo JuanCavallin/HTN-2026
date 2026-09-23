@@ -27,6 +27,7 @@ export interface BrowserToolExecutor extends ToolExecutor {
 interface BrowserSession {
   providerId: 'localbrowser' | 'browserbase';
   runId: string;
+  interactive: boolean;
   url?: string;
 }
 
@@ -93,8 +94,6 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
 
       let sessionId = suppliedSessionId;
       let ownsSession = false;
-      let liveViewUrl: string | undefined;
-
       if (sessionId) {
         assertSessionProvider(sessions, sessionId, providerId, action.runId);
         assertSensitiveDestination(action.dataLabels, sessions.get(sessionId)?.url);
@@ -105,11 +104,13 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
         );
         if (!opened.ok) throw new Error('Could not open browser session: ' + opened.error.message);
         sessionId = opened.data.sessionId;
-        // Never put Browserbase's interactive debugger URL in agent/tool output.
-        // It is minted only for an explicit human handoff.
-        liveViewUrl = undefined;
         ownsSession = true;
-        sessions.set(sessionId, { providerId, url: requestedUrl, runId: action.runId });
+        sessions.set(sessionId, {
+          providerId,
+          url: requestedUrl,
+          runId: action.runId,
+          interactive: opened.data.interactive === true,
+        });
       }
 
       try {
@@ -119,7 +120,8 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
             action,
             {
               sessionId,
-              liveViewUrl: liveViewUrl ?? null,
+              liveViewUrl: null,
+              interactive: openedInteractive(sessions, sessionId),
               backend: providerId,
             },
             'Opened a ' + providerId + ' browser session.',
@@ -205,7 +207,13 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           childContext(ctx, 'browser-element-action'),
         );
         if (!performed.ok) throw new Error(performed.error.message);
-        sessions.set(sessionId, { providerId, url: performed.data.url, runId: action.runId });
+        sessions.set(sessionId, {
+          ...sessions.get(sessionId),
+          providerId,
+          url: performed.data.url,
+          runId: action.runId,
+          interactive: sessions.get(sessionId)?.interactive ?? false,
+        });
 
         return output(
           action,
@@ -312,6 +320,11 @@ function output(
     dataLabels: [...action.dataLabels],
     verified: true,
   };
+}
+
+function openedInteractive(sessions: Map<string, BrowserSession>, sessionId: string): boolean {
+  // Interactivity is trusted adapter metadata, never inferred from a URL.
+  return sessions.get(sessionId)?.interactive ?? false;
 }
 
 /** Whitelist short evidence fields; never pass a provider's whole document through. */

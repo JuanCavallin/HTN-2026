@@ -237,10 +237,11 @@ Owners: Person 4 with Person 1 and 3B. Keep the overall graph rendering redesign
    logical graph identity. Preserve truthful live/mock/fixture/replay labels.
 2. For research, show searches, tool status, evidence metadata/citations and artifacts;
    do not invent a browser view for a tool that has no visible page.
-3. For interactive browsing, obtain the existing session/page live-view URL from an
-   authorized API endpoint and embed it in the side pane. Preserve viewer identity
-   by resource, not by trace update; handle expiry/disconnection without reopening
-   the task's browser. Verify current provider embedding requirements at implementation.
+3. [x] For interactive browsing, obtain the existing session/page live-view URL from an
+       authorized API endpoint and embed it in the side pane during explicit human handoff.
+       Preserve viewer identity by resource, not by trace update; refresh expired signed URLs
+       without reopening the task's browser. Passive view-only while the agent owns the page
+       remains blocked on a provider read-only stream.
 4. Add view-only and explicit takeover/resume controls backed by server ownership,
    with an external-view fallback where embedding is unavailable. Hiding pointer
    events alone is not an authorization mechanism.

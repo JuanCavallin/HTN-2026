@@ -13,18 +13,11 @@
  * concrete callee). A viewport at that size is unreadable AND would be a
  * fourth mark competing with three that already mean something.
  *
- * WHY A LINK AND NOT AN EMBED, EVEN HERE: the live view is Browserbase's
- * DevTools fullscreen inspector -- a dense developer UI, not a clean page
- * screencast. Checked: it sends no X-Frame-Options and no CSP frame-ancestors,
- * so embedding WOULD work. It is simply the wrong call for the job. The panel
- * lives inside a 460px-tall canvas, and that is not enough room to comfortably
- * read a login form, let alone type into one -- and typing into it is the
- * entire point of a handoff. A new tab gives it the full window.
- *
- * The trade is real and it is accepted: the person leaves the page for a
- * moment. That is worth it for a step they are being asked to perform by hand.
- * If passive WATCHING (agent works, nobody types) is wanted later, an embed is
- * the right shape for that and can sit next to this rather than replace it.
+ * Browserbase's current debugger view is interactive. It is embedded only
+ * during human handoff, when server-side ownership blocks agent calls.
+ * Passive viewing while the agent owns the page needs a separate read-only stream.
+ * The session stays tied to its resource in this panel; we refresh the signed
+ * URL on demand so reconnects do not reload the viewer or create a new page.
  *
  * THE RIGHT-HAND COLUMN IS THE POINT. Anyone can screen-record a cursor moving
  * around a page. What almost nobody shows is the numbered element table the
@@ -40,7 +33,9 @@
  * ============================================================================
  */
 
+import { useEffect, useState } from 'react';
 import type { Approval, BrowserSessionRecord, Iso, Step } from '@htn/shared';
+import { api } from '../../lib/api';
 import { Badge, type Tone } from '../ui/Badge';
 import { Button } from '../ui/Button';
 
@@ -153,10 +148,37 @@ export function BrowserPanel({
   onClose: () => void;
   busy?: boolean;
 }) {
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [viewerError, setViewerError] = useState<string | null>(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
   const decisions = steps.map(decisionOf).filter((d): d is StreamedDecision => d !== null);
   const live = !session.closedAt;
-  const canEmbed = live && Boolean(session.liveViewUrl);
+  const canLoadViewer =
+    live && Boolean(handoff) && session.providerId === 'browserbase' && session.interactive;
   const lastUrl = decisions.at(-1)?.url ?? session.startUrl ?? null;
+
+  const refreshViewer = async () => {
+    setViewerLoading(true);
+    setViewerError(null);
+    try {
+      const result = await api.browserLiveView(session.runId, session.sessionId);
+      if (!result.liveViewUrl || !result.interactive) {
+        setViewerUrl(null);
+        setViewerError('The session has no current interactive viewer.');
+      } else {
+        setViewerUrl(result.liveViewUrl);
+      }
+    } catch (err) {
+      setViewerUrl(null);
+      setViewerError((err as Error).message);
+    } finally {
+      setViewerLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!handoff) setViewerUrl(null);
+  }, [handoff]);
 
   return (
     <aside className="pointer-events-auto absolute inset-y-0 right-0 z-10 flex w-[62%] min-w-[420px] flex-col border-l border-slate-700 bg-slate-950/95 shadow-2xl backdrop-blur">
@@ -189,41 +211,66 @@ export function BrowserPanel({
       <div className="flex min-h-0 flex-1">
         {/* ---- Left: the page itself, when there is one to show ---------- */}
         <div className="flex min-w-0 flex-1 flex-col border-r border-slate-800">
-          {canEmbed ? (
-            <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-              <span aria-hidden className="text-2xl">
-                🖥
-              </span>
-              <p className="max-w-[30ch] text-[12px] leading-relaxed text-slate-300">
-                The browser is open and waiting for you.
-              </p>
-              <a
-                href={session.liveViewUrl}
-                target="_blank"
-                // noopener is the one that matters: without it the opened tab
-                // gets a handle on this window via `window.opener`.
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 rounded-md bg-sky-500 px-3 py-1.5 text-sm font-medium text-slate-950 transition-colors hover:bg-sky-400"
-              >
-                Open live browser ↗
-              </a>
-              <p className="max-w-[32ch] text-[11px] leading-relaxed text-slate-600">
-                Opens in a new tab at full size. Come back here and confirm when you are done — the
-                run is holding this session open for you.
-              </p>
+          {viewerUrl && handoff ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <iframe
+                key={viewerUrl}
+                src={viewerUrl}
+                title="Interactive Browserbase session — human handoff"
+                referrerPolicy="no-referrer"
+                allow="clipboard-read; clipboard-write"
+                className="min-h-0 flex-1 border-0 bg-white"
+              />
+              <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-2.5 py-1.5">
+                <span className="text-[10px] text-amber-300">
+                  Human control · agent actions are paused
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void refreshViewer()}
+                    disabled={viewerLoading}
+                    className="text-[10px] text-sky-300 hover:text-sky-200 disabled:opacity-50"
+                  >
+                    {viewerLoading ? 'Refreshing…' : 'Refresh view'}
+                  </button>
+                  <a
+                    href={viewerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] text-sky-300 hover:text-sky-200"
+                  >
+                    Open separately ↗
+                  </a>
+                </div>
+              </div>
             </div>
           ) : (
-            <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
+            <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
               <span aria-hidden className="text-2xl opacity-40">
                 ▤
               </span>
-              <p className="text-[12px] text-slate-400">
-                {live ? 'This backend has no viewable session' : 'The session has ended'}
+              <p className="max-w-[32ch] text-[12px] text-slate-300">
+                {canLoadViewer
+                  ? 'The agent has handed control of this browser to you.'
+                  : live
+                    ? 'This backend has no viewable session.'
+                    : 'The session has ended.'}
               </p>
-              <p className="max-w-[28ch] text-[11px] leading-relaxed text-slate-600">
-                {live
-                  ? 'Local and mocked browsers never leave the machine, so there is nothing to open. The decisions are on the right.'
-                  : 'A live view cannot be reopened after a session stops. What it did is on the right.'}
+              {canLoadViewer && (
+                <Button onClick={() => void refreshViewer()} disabled={viewerLoading}>
+                  {viewerLoading ? 'Connecting…' : 'Show live browser here'}
+                </Button>
+              )}
+              {viewerError && (
+                <p className="max-w-[34ch] text-[11px] text-rose-300">{viewerError}</p>
+              )}
+              <p className="max-w-[32ch] text-[11px] leading-relaxed text-slate-600">
+                {canLoadViewer
+                  ? 'This live view can control the page, so it is available only during the human handoff. The viewer link is refreshed on demand.'
+                  : live
+                    ? 'Local and mocked browsers never leave the machine, so there is no remote viewer.'
+                    : 'The live view cannot be reopened after a session stops.'}
               </p>
             </div>
           )}
@@ -246,8 +293,8 @@ export function BrowserPanel({
                 {handoff.question}
               </p>
               <p className="mt-1.5 text-[10px] leading-relaxed text-slate-500">
-                {canEmbed
-                  ? 'Open the browser, do it there, then come back and confirm.'
+                {session.interactive
+                  ? 'Use the embedded browser, then come back and confirm when you are done.'
                   : 'Do this in your own browser, then come back and confirm.'}{' '}
                 Nothing you enter passes through this system — it is not read, not logged, and not
                 sent to a model.
