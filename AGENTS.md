@@ -170,3 +170,46 @@ pnpm format     # prettier
 CI (`.github/workflows/ci.yml`) runs `pnpm typecheck`, `pnpm test`, and `pnpm build` on
 every push/PR to `main`. `check:analytics` is deliberately excluded from CI because it
 needs a live API — run it locally against `pnpm dev:api`.
+
+## Workflow skills: Zephyr overrides
+
+These override the defaults of the shared skills at github.com/KrishP147/skills
+(`next`, `pair`, `meta-orchestrator`, `session-handoff`, `update-progress`,
+`consult-plan`, `divide`, `grill-docs`, `progress-report`) for this repo.
+Humans: read `docs/TEAM-WORKFLOW.md`; Juan: `docs/ORCHESTRATOR-GUIDE.md`.
+
+- **Board:** GitHub Project **"HTN-2026 Board", number 4, owner `KrishP147`**
+  (https://github.com/users/KrishP147/projects/4) — *not* under the repo owner.
+  Every `gh project` call uses `--owner KrishP147` and project `4`. Status field
+  id `PVTSSF_lAHOC0DEv84Bkf5ozhjQSZI` (Todo `f75ad846`, In Progress `47fc9ee4`,
+  Done `98236657`). Issues live in `JuanCavallin/HTN-2026`; `status:*` labels
+  mirror the board as the fallback.
+- **Queue order:** board Todo, sorted `phase:0` → `1` → `2` → `3` → `5`, then
+  lane A → D, then issue age. **Phase 0 is a hard gate (D5):** no `phase:1+`
+  issue starts before every `phase:0` issue is closed. Respect "Depends on: #n"
+  in issue bodies.
+- **Lanes:** `lane:A` runtime, `lane:B` policy, `lane:C` tools, `lane:D`
+  platform — file ownership is listed in `docs/backend-extension-plan.md`
+  "Four parallel lanes". Two issues in the **same** lane never run in
+  parallel; different lanes may. An orchestrator may run up to four managers
+  at once, one per lane, each in its own worktree.
+- **Plan and record:** plan = `docs/backend-extension-plan.md`; decisions =
+  `skilleddocs/decisions.md` (cite `D<k>` in briefs); grill transcripts =
+  `skilleddocs/grills/`; handoffs = `skilleddocs/handoffs/` with filename
+  prefix `zephyr-`; orchestrator ledger/scope = `skilleddocs/orchestrator/`;
+  reports = `skilleddocs/reports/`.
+- **Doc update order** (`update-progress`): tick the plan's phase table →
+  `skilleddocs/decisions.md` (only if a decision was made) → README
+  "What's next" → issue comment/close → board card.
+- **Branches:** `<name>/issue-<n>-<slug>` (Krish: `krish/`), PR into `main`,
+  merge commits, delete branch after merge. CI must be green:
+  `pnpm typecheck && pnpm test && pnpm build`. `pnpm smoke` needs a running
+  API and is a manual check. Phase 0 issues may share one PR.
+- **Interview skills unattended:** the verifier answers `consult-plan` /
+  grilling questions on the user's behalf from `skilleddocs/decisions.md` and
+  the plan, logs every Q→A as "decided for you" in the ledger and appends a
+  `D<k>` row. Anything touching live provider credentials, outbound sends, or
+  deleting data is a manual step, never decided for the user.
+- **Scope contract defaults** for `meta-orchestrator`: `execution: pair`,
+  `handoff_budget: 10`, reports folder `skilleddocs/reports/`, exclusions:
+  none, merge style: merge commit.

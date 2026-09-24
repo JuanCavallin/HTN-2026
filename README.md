@@ -205,7 +205,9 @@ Deliberately skipped: Docker, TS project references, ESLint, a state-management 
 
 ## What's next
 
-Hack the North was the start, not the finish. In progress:
+Hack the North was the start, not the finish. The post-hackathon backend plan, its
+decisions, and the board are in [docs/backend-extension-plan.md](docs/backend-extension-plan.md),
+[skilleddocs/](skilleddocs/) and [docs/TEAM-WORKFLOW.md](docs/TEAM-WORKFLOW.md). In progress:
 
 - More harness adapters (the adapter boundary already exists) so the same policy layer
   supervises any agent, not just Hermes.
