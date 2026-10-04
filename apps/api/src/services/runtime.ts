@@ -26,6 +26,7 @@ import { nowIso } from '../lib/ids.js';
 import { createProviderRegistry } from '../providers/registry.js';
 import { createOllamaBackend, ollamaModelRoutes } from '../providers/ollama/backend.js';
 import { createGeminiBackend, geminiModelRoutes } from '../providers/gemini/backend.js';
+import { createAnthropicBackend, anthropicModelRoutes } from '../providers/anthropic/backend.js';
 import type { RecordEgress } from '../providers/withEgress.js';
 import { ComposioToolCatalog } from '../providers/composio/register.js';
 import { McpConnectionManager } from '../core/mcp/connections.js';
@@ -94,6 +95,7 @@ export const modelGateway = new ModelGatewayService(
   {
     modelRoutes: (adapter) => [
       ...modelRoutesFor(adapter),
+      ...anthropicModelRoutes(config.providers.anthropic),
       ...geminiModelRoutes(config.providers.gemini),
       ...ollamaModelRoutes(config.providers.ollama),
     ],
@@ -104,7 +106,11 @@ export const modelGateway = new ModelGatewayService(
       createGeminiBackend(
         config.providers.gemini,
         recordEgress,
-        textAdapterBackend(boundTextModel),
+        createAnthropicBackend(
+          config.providers.anthropic,
+          recordEgress,
+          textAdapterBackend(boundTextModel),
+        ),
       ),
     ),
   },

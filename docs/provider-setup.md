@@ -1,8 +1,8 @@
 # Provider Setup
 
-The model side is ready locally. Ollama is the true local/private route. Gemini is the
-optional direct Google route for tool-capable agent turns; Anthropic remains the bound
-text model used for graph synthesis and redacted text completion.
+The model side is ready locally. Ollama is the true local/private route. Gemini and
+Anthropic are optional direct cloud routes for tool-capable agent turns; the bound
+Anthropic text model remains the fallback for graph synthesis and redacted completion.
 
 ## Model tiers
 
@@ -12,24 +12,33 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3:8b
 ```
 
-Gemini is the direct tool-capable model backend:
+Gemini and Anthropic are direct tool-capable model backends:
 
 ```dotenv
 GEMINI_MODE=live
 GEMINI_API_KEY=...
 GEMINI_CHEAP_MODEL=gemini-3.5-flash-lite
 GEMINI_FRONTIER_MODEL=gemini-3.8-flash
+
+# Anthropic can also serve tool-capable gateway turns. These routes are
+# public-only, like Gemini; the bound Anthropic text adapter remains the
+# fallback for graph synthesis and redacted text generation.
+ANTHROPIC_MODE=live
+ANTHROPIC_API_KEY=...
+ANTHROPIC_CHEAP_MODEL=claude-haiku-4-5-20251001
+ANTHROPIC_STANDARD_MODEL=claude-sonnet-5
+ANTHROPIC_FRONTIER_MODEL=claude-opus-5
 ```
 
-This is a direct Google route. Left at `mock` it advertises no routes at all, so nothing
-can silently fall back to it.
+Each direct cloud provider is public-only and advertises no route when left at `mock`, so
+nothing can silently fall back to it.
 
 Model ids move. `GET /api/providers` checks both configured ids against what the key can
 actually list and reports an unhealthy provider naming the missing ones, so a renamed
 model surfaces on the providers page instead of mid-demo.
 
 Jev chooses only among routes AgentOS first deems privacy-eligible. Public tool-bearing
-work may use Gemini; `secret` or `local_only` state can use only Ollama. Tool schemas are
+work may use Gemini or Anthropic; `secret` or `local_only` state can use only Ollama. Tool schemas are
 filtered by AgentOS before any backend receives them — and a
 backend that returns a tool call AgentOS did not expose that turn has the call refused,
 not executed.

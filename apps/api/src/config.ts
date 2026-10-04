@@ -100,10 +100,14 @@ const envSchema = z.object({
 
   ANTHROPIC_MODE: modeEnum.default('mock'),
   ANTHROPIC_API_KEY: optionalString,
+  ANTHROPIC_BASE_URL: optionalUrl,
+  ANTHROPIC_CHEAP_MODEL: z.string().default('claude-haiku-4-5-20251001'),
+  ANTHROPIC_STANDARD_MODEL: z.string().default('claude-sonnet-5'),
+  ANTHROPIC_FRONTIER_MODEL: z.string().default('claude-opus-5'),
 
-  // Direct Google routes are deliberately separate from the Anthropic text
-  // capability. This keeps tool-capable agent turns on Gemini while graph
-  // synthesis remains on the configured text model.
+  // Direct cloud routes are deliberately separate from the bound text
+  // capability. This keeps tool-capable agent turns on explicit provider
+  // routes while graph synthesis remains on the configured text model.
   GEMINI_MODE: modeEnum.default('mock'),
   GEMINI_API_KEY: optionalString,
   GEMINI_BASE_URL: optionalUrl,
@@ -163,7 +167,7 @@ export interface ProviderConfig {
   /** Maximum catalog candidates fetched before local policy and Jev filtering. */
   discoveryLimit?: number;
   /** Explicit model allowlist exposed to Jev. */
-  models?: { cheap: string; frontier: string };
+  models?: { cheap: string; standard?: string; frontier: string };
   /** Name of the env var that would enable live mode. Shown in health detail. */
   keyVar: string;
 }
@@ -257,7 +261,14 @@ const providers: Record<ProviderId, ProviderConfig> = {
     models: { cheap: env.OLLAMA_MODEL, frontier: env.OLLAMA_MODEL },
   }),
   mcp: resolveLocal('live', 'MCP_CONNECTIONS', {}),
-  anthropic: resolve(env.ANTHROPIC_MODE, env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY'),
+  anthropic: resolve(env.ANTHROPIC_MODE, env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY', {
+    baseUrl: env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com/v1',
+    models: {
+      cheap: env.ANTHROPIC_CHEAP_MODEL,
+      standard: env.ANTHROPIC_STANDARD_MODEL,
+      frontier: env.ANTHROPIC_FRONTIER_MODEL,
+    },
+  }),
   gemini: resolve(env.GEMINI_MODE, env.GEMINI_API_KEY, 'GEMINI_API_KEY', {
     baseUrl: env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta',
     models: { cheap: env.GEMINI_CHEAP_MODEL, frontier: env.GEMINI_FRONTIER_MODEL },

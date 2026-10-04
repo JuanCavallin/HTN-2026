@@ -72,7 +72,7 @@ function failure<T>(op: string, started: number, err: unknown): ProviderResult<T
 }
 
 export function createLiveAnthropic(cfg: ProviderConfig): TextModelAdapter {
-  const client = new Anthropic({ apiKey: cfg.apiKey });
+  const client = new Anthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseUrl });
 
   return {
     id: 'anthropic',
@@ -104,7 +104,10 @@ export function createLiveAnthropic(cfg: ProviderConfig): TextModelAdapter {
     async complete(input) {
       const started = Date.now();
       try {
-        const model = MODEL_BY_TIER[input.tier ?? 'standard'];
+        const requestedTier = input.tier ?? 'standard';
+        const model =
+          (requestedTier === 'local' ? undefined : cfg.models?.[requestedTier]) ??
+          MODEL_BY_TIER[requestedTier];
         const message = await client.messages.create({
           model,
           max_tokens: input.maxTokens ?? 1024,

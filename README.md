@@ -129,7 +129,7 @@ health as separate facts: `live` + unhealthy is not ready.
 | Generic MCP        | Any HTTP Streamable MCP server; unknown tools stay unavailable (fail-closed) | add it on `/connections`                                                  |
 | Gemini             | Direct Google cloud route for tool-capable agent turns                       | `GEMINI_API_KEY`                                                           |
 | Ollama             | Local/private model route                                                    | Ollama running                                                            |
-| Anthropic          | Bound `text.model` for graph synthesis and redacted text generation           | `ANTHROPIC_API_KEY`                                                       |
+| Anthropic          | Bound `text.model` plus direct tool-capable cloud routes for agent turns     | `ANTHROPIC_API_KEY`                                                       |
 | GPTZero            | Escalate-only check on outbound text written in your name                    | `GPTZERO_API_KEY`                                                         |
 
 Flip one `<PROVIDER>_MODE=live` at a time and confirm it at `GET /api/providers`.

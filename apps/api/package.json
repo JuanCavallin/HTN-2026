@@ -21,6 +21,7 @@
     "check:tool-broker": "tsx scripts/tool-broker.check.ts",
     "check:content-check": "tsx scripts/content-check.check.ts",
     "check:gemini": "tsx scripts/gemini-backend.check.ts",
+    "check:anthropic": "tsx scripts/anthropic-backend.check.ts",
     "check:composio-catalog": "tsx scripts/composio-catalog.check.ts",
     "check:browser-tools": "tsx scripts/browser-tools.check.ts",
     "check:providers": "tsx --env-file-if-exists=../../.env scripts/provider-wiring.check.ts",
