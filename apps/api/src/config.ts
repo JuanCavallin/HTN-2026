@@ -94,12 +94,6 @@ const envSchema = z.object({
   COMPOSIO_TOOLKITS: z.string().default(''),
   COMPOSIO_DISCOVERY_LIMIT: z.coerce.number().int().min(1).max(100).default(24),
 
-  OPENROUTER_MODE: modeEnum.default('mock'),
-  OPENROUTER_API_KEY: optionalString,
-  OPENROUTER_BASE_URL: optionalUrl,
-  OPENROUTER_CHEAP_MODEL: z.string().default('openai/gpt-5.6-luna'),
-  OPENROUTER_FRONTIER_MODEL: z.string().default('openai/gpt-5.6-sol'),
-
   OLLAMA_MODE: modeEnum.default('mock'),
   OLLAMA_BASE_URL: optionalUrl,
   OLLAMA_MODEL: z.string().default('qwen3:8b'),
@@ -107,9 +101,9 @@ const envSchema = z.object({
   ANTHROPIC_MODE: modeEnum.default('mock'),
   ANTHROPIC_API_KEY: optionalString,
 
-  // A DIRECT Google route, deliberately separate from the OpenRouter catalog.
-  // Two distinct cloud vendors is what makes route selection a real decision
-  // rather than a label, and it gives the ledger two distinct destinations.
+  // Direct Google routes are deliberately separate from the Anthropic text
+  // capability. This keeps tool-capable agent turns on Gemini while graph
+  // synthesis remains on the configured text model.
   GEMINI_MODE: modeEnum.default('mock'),
   GEMINI_API_KEY: optionalString,
   GEMINI_BASE_URL: optionalUrl,
@@ -258,13 +252,6 @@ const providers: Record<ProviderId, ProviderConfig> = {
       .filter(Boolean),
     discoveryLimit: env.COMPOSIO_DISCOVERY_LIMIT,
   }),
-  openrouter: resolve(env.OPENROUTER_MODE, env.OPENROUTER_API_KEY, 'OPENROUTER_API_KEY', {
-    baseUrl: env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1',
-    models: {
-      cheap: env.OPENROUTER_CHEAP_MODEL,
-      frontier: env.OPENROUTER_FRONTIER_MODEL,
-    },
-  }),
   ollama: resolveLocal(env.OLLAMA_MODE, 'OLLAMA_BASE_URL', {
     baseUrl: env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434',
     models: { cheap: env.OLLAMA_MODEL, frontier: env.OLLAMA_MODEL },
@@ -325,9 +312,6 @@ export function logConfigSummary(): void {
   const summary = PROVIDER_IDS.map((id) => id + '=' + providers[id].mode).join('  ');
   console.log('[config] port=' + config.port + '  mockAll=' + config.mock.all);
   console.log('[config] providers: ' + summary);
-  if (env.OPENROUTER_MODE === 'live' && providers.openrouter.mode !== 'live') {
-    console.warn('[setup] OPENROUTER_MODE=live requires OPENROUTER_API_KEY; using mock mode.');
-  }
   if (env.COMPOSIO_MODE === 'live' && providers.composio.mode !== 'live') {
     console.warn('[setup] COMPOSIO_MODE=live requires COMPOSIO_API_KEY; using mock mode.');
   }

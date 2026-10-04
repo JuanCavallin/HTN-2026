@@ -32,7 +32,7 @@ Lanes follow file ownership so four people never touch the same files in the sam
 | Lane | Owns | Files |
 |------|------|-------|
 | **A Runtime** | adapters, sessions, runs, stream, approvals waiter | `core/orchestrator.ts`, `core/sessions/*`, `core/pauseGate.ts`, `core/approvalGate.ts`, `providers/hermes/*`, `services/runs.service.ts`, `services/approvals.service.ts`, `api/runs.routes.ts`, `api/stream.routes.ts`, `api/approvals.routes.ts` |
-| **B Policy** | decisions, risk, model gateway, redaction, ledger, content check | `core/decisions/*`, `core/risk.ts`, `core/modelGateway/*`, `core/redaction.ts`, `core/ledger.ts`, `core/tools/contentCheck.ts`, `providers/jev/*`, `providers/{openrouter,gemini,ollama,anthropic}/*` |
+| **B Policy** | decisions, risk, model gateway, redaction, ledger, content check | `core/decisions/*`, `core/risk.ts`, `core/modelGateway/*`, `core/redaction.ts`, `core/ledger.ts`, `core/tools/contentCheck.ts`, `providers/jev/*`, `providers/{gemini,ollama,anthropic}/*` |
 | **C Tools** | broker, registry, browser, MCP, Composio | `core/tools/*` (except contentCheck), `core/mcp/*`, `providers/{browserbase,localbrowser,composio,mcp,gptzero}/*`, `services/toolCatalog.ts`, `api/tools.routes.ts`, `api/mcpConnections.routes.ts` |
 | **D Platform** | store, graph runtime, HTTP plumbing, tests, ops | `store/*`, `core/graph/*`, `api/{index,app,middleware}/*`, `api/graphs.routes.ts`, `services/graphs.service.ts`, `scripts/*`, `.github/*`, Dockerfile |
 
@@ -195,7 +195,7 @@ Goal: a team can leave the API running and deploy it without losing work.
   logs with request id on events, `/metrics`, `/health` that checks store + providers,
   OpenAPI from the existing zod schemas, migrate checks to `node:test`, run smoke in
   CI against an ephemeral `MOCK_ALL` server.
-- **Cost accuracy** (S): OpenRouter `usage.include`, Gemini cost, Jev cost; catalog from
+- **Cost accuracy** (S): Gemini cost, Jev cost; catalog from
   provider listing not env pairs.
 
 ## Explicitly not doing

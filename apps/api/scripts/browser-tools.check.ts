@@ -85,7 +85,7 @@ const registrations = browserToolRegistrations({
   localAvailable: true,
   browserbaseAvailable: true,
 });
-assert.equal(registrations.length, 16);
+assert.equal(registrations.length, 18);
 assert.equal(browserbaseDescriptorsAreSafe(registrations), true);
 assert.equal(
   registrations.find((item) => item.descriptor.id === 'browserbase.submit')?.descriptor
@@ -109,9 +109,13 @@ const context: ProviderCallContext = {
   stepId: 'step_browser_check',
   policyRule: 'authorized-tool-action',
 };
-const clicked = await executor.execute(action('localbrowser.click'), context);
+await executor.execute(action('localbrowser.open', { url: 'about:blank' }), context);
+const clicked = await executor.execute(
+  action('localbrowser.click', { sessionId: 'session_1' }),
+  context,
+);
 assert.equal((clicked.output as { target?: string }).target, 'Continue');
-assert.deepEqual(calls, { opened: 1, snapped: 1, performed: 1, closed: 1 });
+assert.deepEqual(calls, { opened: 1, snapped: 1, performed: 1, closed: 0 });
 
 await assert.rejects(
   executor.execute(
@@ -137,16 +141,15 @@ const uncertain = createBrowserExecutor({
   }),
 });
 await assert.rejects(
-  uncertain.execute(action('localbrowser.click'), context),
+  uncertain.execute(action('localbrowser.click', { sessionId: 'session_1' }), context),
   /below the execution threshold/,
 );
 assert.equal(calls.performed, 1, 'low-confidence target must not execute');
-assert.equal(calls.closed, 2, 'owned sessions must close on failure');
+assert.equal(calls.closed, 0, 'bound sessions are not closed by a failed action');
 
-await executor.execute(action('localbrowser.open', { url: 'about:blank' }), context);
-assert.equal(calls.closed, 2, 'an explicitly opened session stays available during the run');
+assert.equal(calls.closed, 0, 'an explicitly opened session stays available during the run');
 await executor.closeRunSessions(context.runId, context);
-assert.equal(calls.closed, 3, 'run cleanup releases explicitly opened sessions');
+assert.equal(calls.closed, 1, 'run cleanup releases explicitly opened sessions');
 
 console.log(
   'PASS: browser tools use trusted descriptors, protect sensitive destinations, resolve bounded targets, and release sessions.',
@@ -157,6 +160,7 @@ function action(
   overrides: {
     url?: string;
     instruction?: string;
+    sessionId?: string;
     dataLabels?: ToolAction['dataLabels'];
   } = {},
 ): ToolAction {
@@ -169,6 +173,7 @@ function action(
     operation: toolId,
     arguments: {
       goal: 'Click Continue',
+      ...(overrides.sessionId ? { sessionId: overrides.sessionId } : {}),
       ...(overrides.url ? { url: overrides.url } : {}),
       ...(overrides.instruction ? { instruction: overrides.instruction } : {}),
     },

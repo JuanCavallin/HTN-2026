@@ -30,7 +30,6 @@ own. All teammates then share one quota, so do not leave runs looping.
 | **Browserbase** — cloud browser, the 3-worker swarm.                                                        | `BROWSERBASE_MODE=live` `BROWSERBASE_API_KEY=bb_live_…` `BROWSERBASE_PROJECT_ID=…`          | Yes                        | browserbase.com → Settings. Booth gives 100 browser-hours.                                  |
 | **Anthropic** — the redacted cloud summary step.                                                            | `ANTHROPIC_MODE=live` `ANTHROPIC_API_KEY=sk-ant-…`                                          | Yes                        | console.anthropic.com → API keys.                                                           |
 | **Composio** — Gmail send (the irreversible action that triggers approval).                                 | `COMPOSIO_MODE=live` `COMPOSIO_API_KEY=ak_…` `COMPOSIO_AUTH_CONFIG_ID=ac_…` `COMPOSIO_USER_ID=agentos-demo-user` `COMPOSIO_TOOL_SLUGS=GMAIL_SEND_EMAIL` | Yes, Gmail already connected | platform.composio.dev → project → API key, plus a **Gmail auth config** (its id is `ac_…`). |
-| **OpenRouter** — cheap + frontier cloud model routes for the agent.                                         | `OPENROUTER_MODE=live` `OPENROUTER_API_KEY=sk-or-…`                                         | Yes                        | openrouter.ai → Keys.                                                                       |
 | **GPTZero** — scores outbound text before it is sent. _Sponsor prize._                                      | `GPTZERO_MODE=live` `GPTZERO_API_KEY=…`                                                     | **No key yet**             | GPTZero booth / gptzero.me → API. Until then leave `GPTZERO_MODE=mock`.                     |
 | **Gemini** — second cloud model vendor. _MLH prize; Devpost also wants the project number._                 | `GEMINI_MODE=live` `GEMINI_API_KEY=…`                                                       | **No key yet**             | aistudio.google.com → Get API key. Note the project **number** for Devpost.                 |
 | **Sentry** — tracing + logs. _Sponsor prize._                                                               | `SENTRY_DSN=https://…ingest.sentry.io/…`                                                    | **No DSN yet**             | sentry.io → new Node project → Client Keys (DSN).                                           |
@@ -121,6 +120,6 @@ BROWSER_MAX_SESSIONS=2        # raise to 3 if you want all three swarm workers a
 - Never commit `.env`; never paste keys into Devpost, slides, or a screen share. `/connections`
   and `/api/providers` never display key values, so they are safe to show.
 - The team keys have been pasted into chat. **Rotate all of them after the event**
-  (Anthropic, OpenRouter, Browserbase, Composio, Vercel AI Gateway).
+  (Anthropic, Gemini, Browserbase, Composio, Vercel AI Gateway).
 - MCP servers added on `/connections` take the **name** of an env var for their auth header,
   never the secret itself; put the value in `.env`.

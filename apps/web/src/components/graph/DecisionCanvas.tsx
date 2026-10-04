@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   Handle,
@@ -48,7 +48,36 @@ type DecisionData = Record<string, unknown> & {
   junction: boolean;
 };
 
-function DecisionNode({ data }: NodeProps<Node<DecisionData>>) {
+/** Explicit, rather than inferred from the memo below -- inferring it from its own
+ *  producer is a TS circularity error, since the cache and the producer reference
+ *  each other's element type. */
+type FlowNode = Node<DecisionData>;
+interface FlowEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+  animated: boolean;
+  type: string;
+  pathOptions: { borderRadius: number };
+  style: {
+    stroke: string;
+    strokeWidth: number;
+    strokeDasharray?: string;
+    opacity: number;
+  };
+  labelStyle: { fill: string; fontSize: number };
+  labelBgStyle: { fill: string };
+}
+
+/**
+ * memo() only helps if `data` is REFERENCE-STABLE when nothing meaningful changed --
+ * see the stabilizeNodes() cache below, which is what actually makes that true. Without
+ * it, `buildTrace` hands every node a brand-new `data` object literal on the run page's
+ * 500ms clock tick regardless of whether that node's own fields moved, and memo's default
+ * shallow-equal on `data` would still see a new reference and re-render anyway.
+ */
+const DecisionNode = memo(function DecisionNode({ data }: NodeProps<Node<DecisionData>>) {
   const { item, onSelect, selected, paused, onPath, junction } = data;
   const active = item.status === 'running';
   const classes = [
@@ -139,7 +168,7 @@ function DecisionNode({ data }: NodeProps<Node<DecisionData>>) {
       <Handle type="source" position={Position.Right} />
     </div>
   );
-}
+});
 
 const NODE_TYPES = { decision: DecisionNode };
 
@@ -165,9 +194,19 @@ function CanvasControls({ signature }: { signature: string }) {
 
   useEffect(() => {
     if (!follow) return;
-    // The graph grows. Easing the viewport is the difference between "a node arrived" and
-    // "the picture jumped"; under reduced motion we snap instead.
-    refit();
+    // DEBOUNCED, not immediate. A newly-added node has no measured width/height until
+    // React Flow renders and observes it, so fitting synchronously on the same tick a
+    // node arrives computes its bounding box from whatever WAS already measured --
+    // typically just the node that was already on screen. A quiet run (one event every
+    // few seconds) never notices; a busy agent_task can emit a dozen session/tool
+    // lifecycle events within a second (Hermes retries, Jev's per-turn tool selection),
+    // and each one retriggered an ANIMATED fit before the previous one's target nodes
+    // were even measured -- the animation kept retargeting mid-flight and settled on
+    // whatever partial set happened to be ready, which reads as "the graph collapsed to
+    // one node". Waiting for the burst to go quiet, then fitting once, is the fix: it
+    // gives React Flow a render pass to measure everything that just arrived first.
+    const timer = window.setTimeout(refit, 180);
+    return () => window.clearTimeout(timer);
   }, [signature, follow, refit]);
 
   // Entering or leaving fullscreen, and collapsing either pane, both change the space the
@@ -263,52 +302,128 @@ export function DecisionCanvas({
     return counts;
   }, [trace.edges]);
 
-  const nodes = useMemo(
-    () =>
-      trace.nodes.map((item) => ({
-        id: item.id,
-        position: item.position,
-        type: 'decision',
-        // Node identity is the trace id and never changes when a node materializes, so
-        // React Flow transitions the element instead of remounting it.
-        data: {
-          item,
-          selected: selected === item.id,
-          onSelect,
-          paused,
-          onPath: onPath.has(item.id),
-          junction: (degree.get(item.id) ?? 0) > 2,
-        },
-      })),
-    [trace.nodes, selected, onSelect, paused, onPath, degree],
-  );
+  // REFERENCE STABILITY, not just memoization. Workspace.tsx rebuilds `trace` on a 500ms
+  // clock tick so running-step durations stay live -- that hands every node and edge a
+  // brand-new object literal every tick, EVEN ONES WHOSE FIELDS DID NOT CHANGE, because
+  // `buildTrace` has no memory of its previous call. React Flow (and DecisionNode's memo()
+  // below) can only skip work by REFERENCE equality, so a same-content-different-object
+  // node forces a full re-render and re-measure of every card and every edge path twice a
+  // second, which is what reads as "glitchy" -- connections redrawing, cards repainting,
+  // and newly-added nodes fighting that churn for a stable measurement before fitView
+  // (see CanvasControls) can settle on them.
+  //
+  // The fix mirrors the fitView debounce: coalesce redundant work. Each node/edge gets a
+  // content SIGNATURE built only from the fields that affect what's drawn; when a new
+  // trace's signature for an id matches the previous one, the OLD object is reused
+  // verbatim, so memo()'s default shallow-equal on `data` actually bails out. Only nodes
+  // whose visible state genuinely changed pay for a re-render.
+  const nodeCache = useRef(new Map<string, { sig: string; node: FlowNode }>());
 
-  const edges = useMemo(
-    () =>
-      trace.edges.map((edge) => {
-        const target = trace.nodes.find((node) => node.id === edge.target);
-        const source = trace.nodes.find((node) => node.id === edge.source);
-        const active = target?.status === 'running' && source?.status === 'succeeded';
-        const done = target?.status === 'succeeded' && source?.status === 'succeeded';
-        const ghost = !!source?.planned || !!target?.planned;
-        const lit = onPath.has(edge.source) && onPath.has(edge.target);
-        return {
-          ...edge,
-          animated: active && !paused,
-          type: 'smoothstep',
-          pathOptions: { borderRadius: 18 },
-          style: {
-            stroke: done ? 'var(--edge-done)' : active ? 'var(--edge-active)' : 'var(--edge-idle)',
-            strokeWidth: active ? 1.8 : done ? 1.3 : 1,
-            strokeDasharray: ghost ? '3 5' : undefined,
-            opacity: ghost ? 0.42 : lit ? 1 : 0.35,
-          },
-          labelStyle: { fill: '#b1b8b2', fontSize: 11 },
-          labelBgStyle: { fill: 'var(--canvas)' },
-        };
-      }),
-    [trace.edges, trace.nodes, paused, onPath],
-  );
+  const nodes = useMemo(() => {
+    const next = new Map<string, { sig: string; node: FlowNode }>();
+    const list = trace.nodes.map((item) => {
+      const isSelected = selected === item.id;
+      const isOnPath = onPath.has(item.id);
+      const isJunction = (degree.get(item.id) ?? 0) > 2;
+      const sig = [
+        item.status,
+        item.planned,
+        item.unplanned,
+        item.revised,
+        item.label,
+        item.route,
+        item.detail,
+        item.tokens,
+        item.costCents,
+        // Rounded: a running node's exact millisecond count changes every tick even
+        // though the DISPLAYED value (formatDuration) only moves once a second.
+        item.durationMs === undefined ? 'u' : Math.round(item.durationMs / 1000),
+        item.position.x,
+        item.position.y,
+        isSelected,
+        paused,
+        isOnPath,
+        isJunction,
+      ].join('|');
+
+      const cached = nodeCache.current.get(item.id);
+      const entry =
+        cached?.sig === sig
+          ? cached
+          : {
+              sig,
+              node: {
+                id: item.id,
+                position: item.position,
+                type: 'decision',
+                // Node identity is the trace id and never changes when a node materializes,
+                // so React Flow transitions the element instead of remounting it.
+                data: {
+                  item,
+                  selected: isSelected,
+                  onSelect,
+                  paused,
+                  onPath: isOnPath,
+                  junction: isJunction,
+                },
+              },
+            };
+      next.set(item.id, entry);
+      return entry.node;
+    });
+    // Replace, not mutate: entries for nodes that dropped out of the trace (there are none
+    // today -- nothing is ever removed -- but a future change to buildTrace should not leak
+    // this cache unbounded) are simply not carried into `next`.
+    nodeCache.current = next;
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onSelect is stable per mount;
+    // including it would defeat the cache on every parent render.
+  }, [trace.nodes, selected, paused, onPath, degree]);
+
+  const edgeCache = useRef(new Map<string, { sig: string; edge: FlowEdge }>());
+
+  const edges = useMemo(() => {
+    const next = new Map<string, { sig: string; edge: FlowEdge }>();
+    const list = trace.edges.map((edge) => {
+      const target = trace.nodes.find((node) => node.id === edge.target);
+      const source = trace.nodes.find((node) => node.id === edge.source);
+      const active = target?.status === 'running' && source?.status === 'succeeded';
+      const done = target?.status === 'succeeded' && source?.status === 'succeeded';
+      const ghost = !!source?.planned || !!target?.planned;
+      const lit = onPath.has(edge.source) && onPath.has(edge.target);
+      const sig = [active, done, ghost, lit, paused, edge.label].join('|');
+
+      const cached = edgeCache.current.get(edge.id);
+      const entry =
+        cached?.sig === sig
+          ? cached
+          : {
+              sig,
+              edge: {
+                ...edge,
+                animated: active && !paused,
+                type: 'smoothstep',
+                pathOptions: { borderRadius: 18 },
+                style: {
+                  stroke: done
+                    ? 'var(--edge-done)'
+                    : active
+                      ? 'var(--edge-active)'
+                      : 'var(--edge-idle)',
+                  strokeWidth: active ? 1.8 : done ? 1.3 : 1,
+                  strokeDasharray: ghost ? '3 5' : undefined,
+                  opacity: ghost ? 0.42 : lit ? 1 : 0.35,
+                },
+                labelStyle: { fill: '#b1b8b2', fontSize: 11 },
+                labelBgStyle: { fill: 'var(--canvas)' },
+              },
+            };
+      next.set(edge.id, entry);
+      return entry.edge;
+    });
+    edgeCache.current = next;
+    return list;
+  }, [trace.edges, trace.nodes, paused, onPath]);
 
   // A tool that was offered but not called is neither planned work nor reported work, so it
   // is counted on its own rather than inflating either number.

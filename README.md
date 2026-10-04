@@ -64,7 +64,7 @@ flowchart LR
   J --> H["Agent harness (Hermes over ACP)"]
   H -- model calls --> MG["/v1 model gateway"]
   H -- tool calls --> TG["/mcp tool gateway"]
-  MG --> M["Ollama / OpenRouter / Gemini"]
+  MG --> M["Ollama / Gemini / Anthropic"]
   TG --> B[Exact-action broker]
   B -- reversible --> T["Browserbase, local Chrome, Composio, MCP servers"]
   B -- irreversible --> A[Human approval]
@@ -76,9 +76,10 @@ flowchart LR
 1. `POST /api/runs {kind, input}` returns immediately; execution streams over
    `GET /api/runs/:id/stream` (SSE with `Last-Event-ID` replay, persisted to SQLite).
 2. Input is scanned locally; sensitive spans are pinned local and replaced with placeholders.
-3. **Jev** narrows tool families → tools, and picks a route on two axes (`private`/`cloud` ×
-   `low`/`high`). Below its confidence threshold or past its time budget, a deterministic
-   rule decides instead. Every decision event records its `source`.
+3. **Jev** makes one task-level tool grant and picks a route on two axes (`private`/`cloud` ×
+   `low`/`high`). The grant is passed as a hard bound to Hermes and the model gateway; each
+   exact action is still authorized independently. Below its confidence threshold or past
+   its time budget, a deterministic rule decides instead. Every decision event records its `source`.
 4. The harness runs behind Zephyr's own **model gateway** (`/v1`, OpenAI-compatible) and
    **MCP gateway** (`/mcp`), so it cannot reach a model or tool it was not handed.
 5. The **broker** authorizes the _exact_ proposed action. Irreversible actions, and outbound
@@ -126,9 +127,9 @@ health as separate facts: `live` + unhealthy is not ready.
 | Local Chrome       | The private browser route: local-only data never reaches the cloud           | Chrome installed, `LOCALBROWSER_MODE=live`                                |
 | Composio           | 1000+ app tools with delegated OAuth; Gmail send is reviewed as irreversible | `COMPOSIO_API_KEY`, `COMPOSIO_AUTH_CONFIG_ID`                             |
 | Generic MCP        | Any HTTP Streamable MCP server; unknown tools stay unavailable (fail-closed) | add it on `/connections`                                                  |
-| OpenRouter, Gemini | Cloud model routes behind the model gateway                                  | `OPENROUTER_API_KEY`, `GEMINI_API_KEY`                                    |
+| Gemini             | Direct Google cloud route for tool-capable agent turns                       | `GEMINI_API_KEY`                                                           |
 | Ollama             | Local/private model route                                                    | Ollama running                                                            |
-| Anthropic          | Bound `text.model` for redacted summarisation                                | `ANTHROPIC_API_KEY`                                                       |
+| Anthropic          | Bound `text.model` for graph synthesis and redacted text generation           | `ANTHROPIC_API_KEY`                                                       |
 | GPTZero            | Escalate-only check on outbound text written in your name                    | `GPTZERO_API_KEY`                                                         |
 
 Flip one `<PROVIDER>_MODE=live` at a time and confirm it at `GET /api/providers`.

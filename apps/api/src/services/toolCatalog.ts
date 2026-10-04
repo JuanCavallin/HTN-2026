@@ -65,8 +65,22 @@ async function fromToolbox(conversationId: string): Promise<ToolCatalogEntry[]> 
 }
 
 export async function listToolCatalog(conversationId: string): Promise<ToolCatalogEntry[]> {
+  const cached = catalogCache;
+  if (cached && cached.expiresAt > Date.now()) return cached.tools.map((tool) => ({ ...tool }));
+
   const [registry, toolbox] = await Promise.all([fromRegistry(), fromToolbox(conversationId)]);
 
   const known = new Set(registry.map((tool) => tool.name));
-  return [...registry, ...toolbox.filter((tool) => !known.has(tool.name))];
+  const tools = [...registry, ...toolbox.filter((tool) => !known.has(tool.name))];
+  catalogCache = { tools, expiresAt: Date.now() + 30_000 };
+  return tools.map((tool) => ({ ...tool }));
+}
+
+/** Catalog metadata changes much less often than chat messages. A short TTL
+ * removes repeated provider-list calls while still picking up new MCP/Composio
+ * connections without a process restart. */
+let catalogCache: { tools: ToolCatalogEntry[]; expiresAt: number } | undefined;
+
+export function invalidateToolCatalogCache(): void {
+  catalogCache = undefined;
 }

@@ -23,6 +23,7 @@ import {
   agentGraphSchema,
   delegationOf,
   type AgentGraph,
+  type DecisionAdapter,
   type GraphDelegation,
   type TextModelAdapter,
 } from '@htn/shared';
@@ -36,12 +37,16 @@ import { newId, nowIso } from '../../lib/ids.js';
 export interface SynthesisDependencies {
   listTools(conversationId: string): Promise<ToolCatalogEntry[]>;
   complete: TextModelAdapter['complete'];
+  /** Optional Jev preflight; Jev selects a mode but never writes graph content. */
+  decide?: DecisionAdapter['decide'];
 }
 
 export interface SynthesisRequest {
   conversationId: string;
   request: string;
   currentGraph: AgentGraph | null;
+  /** Set by the cheap Jev preflight; callers may provide a deterministic hint in tests. */
+  modeHint?: 'direct' | 'dispatch' | 'adaptive';
 }
 
 export class SynthesisError extends Error {
@@ -109,7 +114,10 @@ export async function synthesiseGraph(
     tools.length === 0 ? '(empty -- synthesis will avoid naming tools)' : '',
   );
 
-  const system = buildSynthesisSystemPrompt(tools);
+  const modeHint = args.modeHint ?? (await chooseSynthesisMode(args, tools, deps));
+  debug(args.conversationId, 'preflight mode:', modeHint);
+
+  const system = buildSynthesisSystemPrompt(tools, modeHint);
 
   let repairHint: string | undefined;
 
@@ -123,11 +131,13 @@ export async function synthesiseGraph(
         prompt: buildSynthesisUserPrompt({
           request: args.request,
           currentGraph: args.currentGraph,
+          modeHint,
           repairHint,
         }),
-        // Planning a workflow is the one genuinely frontier-tier task here.
-        tier: 'frontier',
-        maxTokens: 4096,
+        // Simple direct plans do not need the frontier route. Adaptive plans
+        // retain the larger budget because subagent goals and bounds need detail.
+        tier: modeHint === 'direct' ? 'standard' : 'frontier',
+        maxTokens: modeHint === 'direct' ? 3072 : 4096,
         json: true,
       },
       {
@@ -229,6 +239,16 @@ export async function synthesiseGraph(
       continue;
     }
 
+    const unknownTools = unknownGraphTools(parsed.data, new Set(tools.map((tool) => tool.name)));
+    if (unknownTools.length > 0) {
+      repairHint =
+        'The graph named tool ids that are not in the current trusted catalog: ' +
+        unknownTools.join(', ') +
+        '. Use only the exact catalog ids shown in the system prompt, or remove the tool node.';
+      debug(args.conversationId, 'attempt', attempt, 'REJECTED: unknown tool ids', unknownTools);
+      continue;
+    }
+
     const graph = withPreservedPositions(parsed.data, args.currentGraph);
 
     // Delegation is descriptive telemetry, never a minimum quota for admission.
@@ -265,6 +285,69 @@ export async function synthesiseGraph(
     repairHint,
   );
   throw new SynthesisError('Could not produce a valid graph in two attempts', { repairHint });
+}
+
+function unknownGraphTools(graph: AgentGraph, catalog: Set<string>): string[] {
+  const referenced = new Set<string>();
+  for (const node of graph.nodes) {
+    const config = node.config as Record<string, unknown>;
+    if (node.type === 'tool' || node.type === 'submit') {
+      if (typeof config.tool === 'string') referenced.add(config.tool);
+    }
+    if (node.type === 'dispatch') {
+      for (const tool of Array.isArray(config.candidateTools) ? config.candidateTools : []) {
+        if (typeof tool === 'string') referenced.add(tool);
+      }
+      if (config.args && typeof config.args === 'object' && !Array.isArray(config.args)) {
+        for (const tool of Object.keys(config.args as object)) referenced.add(tool);
+      }
+    }
+    if (node.type === 'agent_task') {
+      for (const tool of Array.isArray(config.availableTools) ? config.availableTools : []) {
+        if (typeof tool === 'string') referenced.add(tool);
+      }
+      for (const tool of Array.isArray(config.toolCeiling) ? config.toolCeiling : []) {
+        if (typeof tool === 'string') referenced.add(tool);
+      }
+    }
+    if (node.type === 'swarm' && typeof config.workerTool === 'string') {
+      referenced.add(config.workerTool);
+    }
+  }
+  return [...referenced].filter((tool) => !catalog.has(tool)).sort();
+}
+
+async function chooseSynthesisMode(
+  args: SynthesisRequest,
+  tools: ToolCatalogEntry[],
+  deps: SynthesisDependencies,
+): Promise<'direct' | 'dispatch' | 'adaptive'> {
+  const text = args.request.toLowerCase();
+  const adaptiveSignal = /adapt|investigat|research|browse|sign[ -]?in|login|compare|follow|if .*then|until|figure out|agent|observe|iterate/.test(
+    text,
+  );
+  const dispatchSignal = /choose|select|either|one of|route|best (?:tool|option)|depending/.test(text);
+  const deterministic = adaptiveSignal ? 'adaptive' : dispatchSignal ? 'dispatch' : 'direct';
+  if (!deps.decide || tools.length === 0) return deterministic;
+
+  try {
+    const result = await deps.decide(
+      {
+        question:
+          'Which execution shape best fits this workflow request? Choose direct for known fixed steps, dispatch for a runtime choice among known tools, or adaptive for an observe-reason-act loop.',
+        options: ['direct', 'dispatch', 'adaptive'],
+        evidence:
+          'Request: ' + args.request.slice(0, 1200) + '\nCatalog: ' + tools.map((tool) => tool.name).join(', '),
+      },
+      { runId: args.conversationId, policyRule: 'graph-synthesis-preflight' },
+    );
+    if (result.ok && ['direct', 'dispatch', 'adaptive'].includes(result.data.choice)) {
+      return result.data.choice as 'direct' | 'dispatch' | 'adaptive';
+    }
+  } catch (error) {
+    debug(args.conversationId, 'preflight unavailable; deterministic hint:', String(error));
+  }
+  return deterministic;
 }
 
 /**

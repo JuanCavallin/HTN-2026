@@ -2,12 +2,6 @@ import assert from 'node:assert/strict';
 import { createOllamaBackend, ollamaModelRoutes } from '../src/providers/ollama/backend.js';
 import { create as createOllama } from '../src/providers/ollama/index.js';
 import { create as createComposio } from '../src/providers/composio/index.js';
-import { config } from '../src/config.js';
-import {
-  createOpenRouterBackend,
-  openRouterModelRoutes,
-} from '../src/providers/openrouter/backend.js';
-import { create as createOpenRouter } from '../src/providers/openrouter/index.js';
 
 const ollamaConfig = {
   mode: 'live' as const,
@@ -84,41 +78,5 @@ const tools = await composio.listTools({
 });
 assert.equal(tools.ok, true);
 assert.ok(tools.ok && tools.data.some((tool) => tool.name === 'GMAIL_SEND_EMAIL'));
-
-if (process.env.OPENROUTER_LIVE_CHECK === '1') {
-  const cfg = config.providers.openrouter;
-  assert.equal(cfg.mode, 'live', 'OPENROUTER_LIVE_CHECK requires OPENROUTER_MODE=live and a key');
-  const openRouterHealth = await createOpenRouter(cfg).health();
-  assert.equal(
-    openRouterHealth.ok,
-    true,
-    openRouterHealth.ok ? undefined : openRouterHealth.error.message,
-  );
-  const cloudRoutes = openRouterModelRoutes(cfg);
-  assert.equal(cloudRoutes.length, 2);
-  const cloudEgress: unknown[] = [];
-  const cloud = createOpenRouterBackend(
-    cfg,
-    async (event) => {
-      cloudEgress.push(event);
-    },
-    {
-      async complete() {
-        throw new Error('unexpected OpenRouter fallback');
-      },
-    },
-  );
-  const cloudCompletion = await cloud.complete(
-    {
-      route: cloudRoutes[0]!,
-      messages: [{ role: 'user', content: 'Reply with only OK.' }],
-      tools: [],
-      maxTokens: 32,
-    },
-    { runId: 'openrouter_live_check', policyRule: 'provider-wiring-check' },
-  );
-  assert.ok(cloudCompletion.actualModel);
-  assert.equal(cloudEgress.length, 1);
-}
 
 console.log('provider wiring check: ok (ollama=' + ollamaConfig.models.cheap + ')');

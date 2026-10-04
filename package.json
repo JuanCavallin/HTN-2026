@@ -43,5 +43,8 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "dependencies": {
+    "@google/genai": "^2.23.0"
   }
 }

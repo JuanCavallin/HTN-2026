@@ -214,6 +214,17 @@ export const agentTaskNodeSchema = nodeVariant(
     availableTools: z.array(z.string()).default([]),
     /** Hard capability ceiling, unlike discovery candidates. [] means no tools. */
     toolCeiling: z.array(z.string().min(1)).optional(),
+    /** Hard server-side resources for this task; values are whole graph references. */
+    resourceBindings: z
+      .object({
+        browserSession: z
+          .string()
+          .regex(/^\{\{\s*[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*\s*\}\}$/, {
+            message: 'Browser resource bindings must be whole {{node.path}} references',
+          })
+          .optional(),
+      })
+      .optional(),
     /** Run-local mutable transcript identity. Omission creates an isolated task. */
     contextScope: z
       .object({
@@ -250,6 +261,7 @@ export const agentTaskNodeSchema = nodeVariant(
     maxPolls: z.number().int().min(1).max(2000).optional(),
     inactivityTimeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
     maxDurationMs: z.number().int().min(1000).max(1_800_000).optional(),
+    maxTurns: z.number().int().min(1).max(20).optional(),
     maxFailedToolCalls: z.number().int().min(0).max(100).optional(),
   }),
 );

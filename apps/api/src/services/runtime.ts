@@ -24,13 +24,13 @@ import { registerBrowserTools } from '../core/tools/index.js';
 import { SessionStateService } from '../core/sessions/service.js';
 import { nowIso } from '../lib/ids.js';
 import { createProviderRegistry } from '../providers/registry.js';
-import { createOpenRouterBackend, openRouterModelRoutes } from '../providers/openrouter/backend.js';
 import { createOllamaBackend, ollamaModelRoutes } from '../providers/ollama/backend.js';
 import { createGeminiBackend, geminiModelRoutes } from '../providers/gemini/backend.js';
 import type { RecordEgress } from '../providers/withEgress.js';
 import { ComposioToolCatalog } from '../providers/composio/register.js';
 import { McpConnectionManager } from '../core/mcp/connections.js';
 import { store } from '../store/index.js';
+import { invalidateToolCatalogCache } from './toolCatalog.js';
 
 export const bus = new RunBus((runId, event) => store.appendEvent(runId, event));
 
@@ -94,23 +94,17 @@ export const modelGateway = new ModelGatewayService(
   {
     modelRoutes: (adapter) => [
       ...modelRoutesFor(adapter),
-      ...openRouterModelRoutes(config.providers.openrouter),
       ...geminiModelRoutes(config.providers.gemini),
       ...ollamaModelRoutes(config.providers.ollama),
     ],
-    // Each backend handles only its own route and delegates the rest, so the
-    // chain order is irrelevant to correctness and adding a vendor is one link.
+    // Each backend handles only its own route and delegates the rest.
     backend: createOllamaBackend(
       config.providers.ollama,
       recordEgress,
       createGeminiBackend(
         config.providers.gemini,
         recordEgress,
-        createOpenRouterBackend(
-          config.providers.openrouter,
-          recordEgress,
-          textAdapterBackend(boundTextModel),
-        ),
+        textAdapterBackend(boundTextModel),
       ),
     ),
   },
@@ -250,6 +244,7 @@ export async function refreshComposioTools(): Promise<
   Awaited<ReturnType<ComposioToolCatalog['bootstrapReviewed']>>
 > {
   const report = await composioToolCatalog.bootstrapReviewed();
+  invalidateToolCatalogCache();
   if (report.registered.length > 0) {
     console.log('[composio] registered: ' + report.registered.join(', '));
   }

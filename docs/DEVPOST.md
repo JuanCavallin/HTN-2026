@@ -144,7 +144,7 @@ of zod schemas that both sides import, so the event stream is one contract.
 `hermes` `jev` `typesafe-ai` `vercel-ai-sdk` `vercel-ai-gateway` `browserbase` `stagehand`
 `playwright` `composio` `gptzero` `anthropic-claude`
 
-Swap in `gemini`, `openrouter`, `ollama` or `sentry` for the last tags if you claim those
+Swap in `gemini`, `ollama` or `sentry` for the last tags if you claim those
 prizes — tags should match the prize list.
 
 ## "Did you implement a generative AI model or API in your hack this weekend?"
@@ -155,7 +155,7 @@ Yes. Zephyr is a control plane _for_ generative AI, and uses it in three ways:
    placeholders, so the cloud model never sees the raw values.
 2. **Hermes (Nous Research)** is the agent harness that plans and proposes tool calls. Its
    model calls go through Zephyr's OpenAI-compatible gateway, which routes each one to
-   **Ollama** (local/private), **OpenRouter** (cheap or frontier cloud) or **Google Gemini**
+   **Ollama** (local/private) or **Google Gemini** (tool-capable cloud)
    based on the data's privacy label and the difficulty of the step.
 3. **GPTZero's** detection API scores outbound text the agent writes in the user's name
    before it is sent, and can force a human review.

@@ -30,7 +30,9 @@ export interface CreateSessionStateInput {
   budget: SessionBudget;
   candidateModelRouteIds?: string[];
   candidateToolIds?: string[];
+  taskToolIds?: string[];
   toolCeiling?: string[];
+  boundBrowserSessionId?: string;
   contextScopeId?: string;
 }
 
@@ -122,6 +124,8 @@ export class SessionStateService {
       context: [],
       candidateModelRouteIds: input.candidateModelRouteIds ?? [],
       candidateToolIds: input.candidateToolIds ?? [],
+      taskToolIds: input.taskToolIds,
+      boundBrowserSessionId: input.boundBrowserSessionId,
       selectedToolIds: [],
       budget: input.budget,
       createdAt: at,

@@ -53,10 +53,10 @@ async function main() {
     'browserbase',
     'localbrowser',
     'composio',
-    'openrouter',
     'ollama',
     'mcp',
     'anthropic',
+    'gemini',
     'gptzero',
   ];
   check(

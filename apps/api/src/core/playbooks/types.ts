@@ -65,6 +65,8 @@ export interface RedactionOutput {
 
 export interface AgentTaskSpec {
   toolCeiling?: string[];
+  /** Hard resources bound by the graph, kept out of model-visible context. */
+  resourceBindings?: { browserSession?: string };
   contextScope?: { id: string; mode: 'fresh' | 'continue' };
   contextProvenance?: string[];
   /** Step label shown in the timeline. */

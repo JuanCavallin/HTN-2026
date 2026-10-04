@@ -1,23 +1,18 @@
 # Provider Setup
 
-The model side is ready locally. OpenRouter and Ollama are both enabled in the ignored
-root `.env`; provider health reports both live. OpenRouter is cloud-only. Ollama is the
-true local/private route.
+The model side is ready locally. Ollama is the true local/private route. Gemini is the
+optional direct Google route for tool-capable agent turns; Anthropic remains the bound
+text model used for graph synthesis and redacted text completion.
 
 ## Model tiers
 
 ```dotenv
-OPENROUTER_MODE=live
-OPENROUTER_API_KEY=...
-OPENROUTER_CHEAP_MODEL=openai/gpt-5.6-luna
-OPENROUTER_FRONTIER_MODEL=openai/gpt-5.6-sol
-
 OLLAMA_MODE=live
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3:8b
 ```
 
-Gemini is a **third** model backend and a second cloud vendor:
+Gemini is the direct tool-capable model backend:
 
 ```dotenv
 GEMINI_MODE=live
@@ -26,18 +21,16 @@ GEMINI_CHEAP_MODEL=gemini-3.5-flash-lite
 GEMINI_FRONTIER_MODEL=gemini-3.8-flash
 ```
 
-This is a direct Google route, not Gemini-via-OpenRouter, and the distinction is the
-point: it is a different destination in the egress ledger, a different bill and a
-different failure domain. Left at `mock` it advertises no routes at all, so nothing can
-silently fall back to it.
+This is a direct Google route. Left at `mock` it advertises no routes at all, so nothing
+can silently fall back to it.
 
 Model ids move. `GET /api/providers` checks both configured ids against what the key can
 actually list and reports an unhealthy provider naming the missing ones, so a renamed
 model surfaces on the providers page instead of mid-demo.
 
-Jev chooses only among routes AgentOS first deems privacy-eligible. Public work may use
-either OpenRouter tier or either Gemini tier; `secret` or `local_only` state can use only
-Ollama. Tool schemas are filtered by AgentOS before any backend receives them — and a
+Jev chooses only among routes AgentOS first deems privacy-eligible. Public tool-bearing
+work may use Gemini; `secret` or `local_only` state can use only Ollama. Tool schemas are
+filtered by AgentOS before any backend receives them — and a
 backend that returns a tool call AgentOS did not expose that turn has the call refused,
 not executed.
 

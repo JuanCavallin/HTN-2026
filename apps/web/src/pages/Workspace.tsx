@@ -661,9 +661,12 @@ export function LiveRunWorkspace() {
     setBusy(true);
     setError('');
     try {
-      // A follow-up is a new supervised run, not an edit of this one.
-      const { run } = await api.startAgentTask(text);
-      navigate('/runs/' + run.id);
+      const conversationId = (await api.createConversation(graph?.id)).conversation.id;
+      const result = await api.sendMessage(conversationId, text);
+      const { run } = await api.runGraph(result.graph.id);
+      navigate('/runs/' + run.id, {
+        state: { conversation: result.conversation, graph: result.graph },
+      });
       return true;
     } catch (issue) {
       setError(issue instanceof Error ? issue.message : 'Could not start your follow-up.');
@@ -834,7 +837,7 @@ export function LiveRunWorkspace() {
           }
           hint={
             terminal
-              ? 'A follow-up starts a new supervised run. This one stays as it is.'
+              ? 'A follow-up edits this workflow and reruns it. This run stays as it is.'
               : 'Follow-ups unlock when this run finishes. Use the approval or cancel controls to intervene.'
           }
         />

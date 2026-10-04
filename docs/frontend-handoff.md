@@ -18,7 +18,7 @@ flowchart TD
   API --> HERMES["Hermes ACP harness"]
   HERMES -->|"model request"| MODEL["AgentOS model gateway"]
   MODEL --> JEV["Jev bounded decisions"]
-  MODEL --> ROUTES["OpenRouter cloud or Ollama local"]
+  MODEL --> ROUTES["Gemini cloud or Ollama local"]
   HERMES -->|"tool call"| MCP["AgentOS MCP gateway"]
   MCP --> POLICY["Exact-action policy + approval"]
   POLICY --> TOOLS["Composio, generic MCP, or browser executor"]
@@ -48,7 +48,7 @@ Working now:
 - Hermes ACP integration without modifying Hermes core;
 - Jev model, tool, risk, and completion decisions with deterministic fallbacks;
 - per-model-call routing through the AgentOS OpenAI-compatible gateway;
-- OpenRouter cloud routes and Ollama local/private routes;
+- Gemini cloud routes and Ollama local/private routes;
 - reviewed tool registry and exact-action broker;
 - AgentOS-owned MCP surface for Hermes;
 - Composio discovery, Gmail OAuth state, and live email execution;
@@ -79,7 +79,7 @@ The dashboard should do five things:
 
 The frontend must not:
 
-- call Hermes, Jev, OpenRouter, Ollama, Composio, Browserbase, or an upstream MCP server
+- call Hermes, Jev, Gemini, Ollama, Composio, Browserbase, or an upstream MCP server
   directly;
 - select a model/tool or decide risk/completion itself;
 - put API keys, OAuth tokens, or MCP header values in browser state or local storage;

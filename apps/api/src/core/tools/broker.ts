@@ -114,7 +114,9 @@ export class ToolBroker {
     if (!registered) {
       throw new ToolBrokerError('TOOL_NOT_REGISTERED', 'Unknown tool: ' + request.toolId);
     }
-    const exactArguments = deepFreeze(structuredClone(request.arguments));
+    const exactArguments = deepFreeze(
+      bindBrowserResource(session, registered.descriptor.id, request.arguments),
+    );
     this.assertSelected(session, registered.descriptor);
     this.assertAvailable(registered.descriptor);
     this.assertScopes(registered);
@@ -511,6 +513,49 @@ export class ToolBroker {
 
 function mergeLabels(base: DataLabel[], additions: DataLabel[]): DataLabel[] {
   return [...new Set<DataLabel>([...base, ...additions])];
+}
+
+/**
+ * A graph can bind one browser resource to an agent task. This is a server-side
+ * capability binding: it is injected into the exact action before validation
+ * and authorization, so a model cannot omit it, replace it, or open a second
+ * browser and silently continue there.
+ */
+function bindBrowserResource(
+  session: AgentSessionState,
+  toolId: string,
+  argumentsValue: Json,
+): Json {
+  const bound = session.boundBrowserSessionId;
+  const isBrowser = toolId.startsWith('browserbase.') || toolId.startsWith('localbrowser.');
+  if (bound === undefined || !isBrowser) {
+    return structuredClone(argumentsValue);
+  }
+  if (bound.trim().length === 0) {
+    throw new ToolBrokerError('TOOL_NOT_SELECTED', 'The browser resource binding is empty.');
+  }
+
+  const operation = toolId.slice(toolId.lastIndexOf('.') + 1);
+  if (operation === 'open' || operation === 'search' || operation === 'read') {
+    throw new ToolBrokerError(
+      'TOOL_NOT_SELECTED',
+      'This agent task is bound to an existing browser session; ' + operation + ' cannot create or use a separate session.',
+    );
+  }
+  if (!argumentsValue || typeof argumentsValue !== 'object' || Array.isArray(argumentsValue)) {
+    throw new ToolBrokerError('TOOL_ARGUMENTS_INVALID', 'Bound browser actions require object arguments.');
+  }
+
+  const args = structuredClone(argumentsValue) as Record<string, Json>;
+  const supplied = args.sessionId;
+  if (supplied !== undefined && supplied !== bound) {
+    throw new ToolBrokerError(
+      'TOOL_NOT_SELECTED',
+      'Browser action attempted to use a session outside the task resource binding.',
+    );
+  }
+  args.sessionId = bound;
+  return args;
 }
 
 function compactSummary(value: string): string {

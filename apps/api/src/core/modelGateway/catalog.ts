@@ -1,8 +1,7 @@
 import type { ModelRoute, TextModelAdapter } from '@htn/shared';
 
 /**
- * Logical routes backed by the currently-bound text model capability. OpenRouter
- * can replace this catalog later without changing the gateway or Hermes wiring.
+ * Logical routes backed by the currently-bound text model capability.
  */
 export function modelRoutesFor(adapter: TextModelAdapter): ModelRoute[] {
   if (adapter.mode !== 'live') {

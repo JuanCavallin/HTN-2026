@@ -14,7 +14,6 @@ export type ProviderId =
   | 'browserbase' // cloud browser automation
   | 'localbrowser' // local browser automation for private/local-only work
   | 'composio' // SaaS tools + OAuth brokering
-  | 'openrouter' // multi-model cloud inference gateway
   | 'ollama' // local/private model runtime
   | 'mcp' // user-configured upstream MCP connections
   | 'anthropic' // frontier text model
@@ -27,7 +26,6 @@ export const PROVIDER_IDS = [
   'browserbase',
   'localbrowser',
   'composio',
-  'openrouter',
   'ollama',
   'mcp',
   'anthropic',

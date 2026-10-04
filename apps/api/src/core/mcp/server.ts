@@ -27,9 +27,12 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const session = await deps.sessions.requireGatewayTurn(deps.binding);
+    const allowedIds = new Set(session.taskToolIds ?? session.candidateToolIds);
     const registered = (await deps.registry.list()).filter(
       (tool) =>
         isExecutable(tool) &&
+        allowedIds.has(tool.descriptor.id) &&
+        (!session.boundBrowserSessionId || !isSeparateBrowserOperation(tool.descriptor.id)) &&
         (session.toolCeiling === undefined || session.toolCeiling.includes(tool.descriptor.id)),
     );
     return { tools: registered.map(toMcpTool) };
@@ -67,6 +70,13 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
   });
 
   return server;
+}
+
+function isSeparateBrowserOperation(toolId: string): boolean {
+  return (
+    (toolId.startsWith('browserbase.') || toolId.startsWith('localbrowser.')) &&
+    ['open', 'search', 'read'].includes(toolId.slice(toolId.lastIndexOf('.') + 1))
+  );
 }
 
 function isExecutable(tool: RegisteredTool): boolean {

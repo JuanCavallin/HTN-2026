@@ -77,7 +77,7 @@ export interface ChatModelBackendResult {
   estimatedCostCents?: number;
 }
 
-/** The OpenRouter workstream implements this seam without changing the gateway. */
+/** Provider-specific tool-capable backends implement this seam. */
 export interface ChatModelBackend {
   complete(input: ChatModelBackendInput, ctx: ProviderCallContext): Promise<ChatModelBackendResult>;
 }
@@ -143,13 +143,18 @@ export class ModelGatewayService {
     };
 
     const requestedToolNames = extractToolNames(request.tools ?? []);
+    const taskGrant = session.taskToolIds ?? session.candidateToolIds;
     const requestTools = await this.resolveRequestedTools(
       request.tools ?? [],
-      session.candidateToolIds.filter(
+      taskGrant.filter(
         (id) => session.toolCeiling === undefined || session.toolCeiling.includes(id),
       ),
     );
-    const trustedDescriptors = requestTools.map((tool) => tool.registered.descriptor);
+    const trustedDescriptors = requestTools
+      .map((tool) => tool.registered.descriptor)
+      .filter((descriptor) =>
+        session.boundBrowserSessionId ? !isSeparateBrowserOperation(descriptor.id) : true,
+      );
     if (
       session.candidateToolIds.length > 0 &&
       requestedToolNames.length > 0 &&
@@ -164,13 +169,20 @@ export class ModelGatewayService {
           JSON.stringify(requestedToolNames),
       );
     }
-    const selectedTools = await this.selectTools(
-      decisionState,
-      trustedDescriptors,
-      callContext,
-      session.runId,
-      session.stepId,
-    );
+    // The task-level Jev grant is already the hard capability decision passed
+    // into Hermes. Re-running family/tool Jev on every gateway turn adds
+    // latency and can only narrow a set that is already bounded. Preserve the
+    // legacy per-turn selector for sessions created before taskToolIds existed.
+    const selectedTools =
+      session.taskToolIds !== undefined
+        ? trustedDescriptors
+        : await this.selectTools(
+            decisionState,
+            trustedDescriptors,
+            callContext,
+            session.runId,
+            session.stepId,
+          );
     const selectedIds = new Set(selectedTools.map((descriptor) => descriptor.id));
     const selectedRequestTools = requestTools.filter((tool) =>
       selectedIds.has(tool.registered.descriptor.id),
@@ -217,16 +229,14 @@ export class ModelGatewayService {
     const modelCallId = newId('chatcmpl');
     await this.sessions.requireGatewayTurn(binding);
     // Hermes can send built-in/core schemas that are not AgentOS capabilities.
-    // Those must not erase the outer Jev selection: candidateToolIds is the
-    // task-level authority used to validate later model turns. Only update it
-    // after this request contains at least one trusted AgentOS tool.
+    // Those must not erase the outer Jev selection. The task grant remains
+    // immutable; only the selected descriptor versions are updated here.
     const trustedToolBearingRequest = trustedDescriptors.length > 0;
     await this.sessions.recordRouting(session.id, {
       candidateModelRouteIds: modelCandidates.map((route) => route.id),
       selectedModelRouteId: selectedRoute.id,
       ...(trustedToolBearingRequest
         ? {
-            candidateToolIds: trustedDescriptors.map((descriptor) => descriptor.id),
             selectedToolIds: selectedTools.map((descriptor) => descriptor.id),
             selectedToolVersions: Object.fromEntries(
               selectedTools.map((descriptor) => [descriptor.id, descriptor.version]),
@@ -461,6 +471,13 @@ export class ModelGatewayService {
       },
     });
   }
+}
+
+function isSeparateBrowserOperation(toolId: string): boolean {
+  return (
+    (toolId.startsWith('browserbase.') || toolId.startsWith('localbrowser.')) &&
+    ['open', 'search', 'read'].includes(toolId.slice(toolId.lastIndexOf('.') + 1))
+  );
 }
 
 function summarizeMessage(

@@ -11,7 +11,6 @@ import type {
   Capability,
   CapabilityMap,
   CompletionDecision,
-  ControlDecisionOperation,
   DataLabel,
   DecisionState,
   Json,
@@ -51,6 +50,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+type CachedTaskRoute = {
+  privacy: ScheduleDecision['privacy'];
+  intelligence: ScheduleDecision['intelligence'];
+  privacyConfidence: number;
+  intelligenceConfidence: number;
+  modelTier: ScheduleDecision['modelTier'];
+  exposedTools: string[];
+  confidence: number;
+  rationale?: string;
+};
+
 export interface OrchestratorDeps {
   store: Store;
   bus: RunBus;
@@ -88,6 +98,7 @@ import { KeyedLock } from './locks.js';
 export class Orchestrator {
   private readonly inFlight = new Map<string, AbortController>();
   private readonly contextLocks = new KeyedLock();
+  private readonly taskRouteCache = new Map<string, { expiresAt: number; data: CachedTaskRoute }>();
 
   constructor(private readonly deps: OrchestratorDeps) {}
 
@@ -612,6 +623,15 @@ export class Orchestrator {
               : spec.toolCeiling === undefined
                 ? priorState.toolCeiling
                 : spec.toolCeiling.filter((id) => priorState.toolCeiling!.includes(id));
+          if (
+            priorState?.boundBrowserSessionId &&
+            spec.resourceBindings?.browserSession &&
+            priorState.boundBrowserSessionId !== spec.resourceBindings.browserSession
+          ) {
+            throw new Error('A continued agent context cannot switch its bound browser session.');
+          }
+          const boundBrowserSessionId =
+            spec.resourceBindings?.browserSession ?? priorState?.boundBrowserSessionId;
           // 1. Search and normalize only task-relevant provider tools. Private
           //    objectives use an explicitly sanitized query; secret/local-only
           //    objectives never leave the machine for catalog discovery.
@@ -665,7 +685,6 @@ export class Orchestrator {
           let availableTools = [...new Set([...spec.availableTools, ...discoveredIds])];
           if (ceiling !== undefined)
             availableTools = availableTools.filter((id) => ceiling.includes(id));
-          let selectedBeforeLegacyRoute = availableTools;
           if (this.deps.toolRegistry) {
             const resolved = await this.deps.toolRegistry.resolve(availableTools);
 
@@ -752,42 +771,31 @@ export class Orchestrator {
             }
 
             availableTools = descriptors.map((descriptor) => descriptor.id);
-            selectedBeforeLegacyRoute = await selectTaskTools(
-              descriptors,
-              decisionState,
-              decisionService,
-              buildCallContext({ stepId: step.id, policyRule: 'task-tool-selection' }),
-              async (operation, candidateIds, selectedIds, confidence, reasonCodes) => {
-                await bus.emit(runId, {
-                  type: 'control.decided',
-                  decision: {
-                    id: newId('ctl'),
-                    runId,
-                    stepId: step.id,
-                    operation,
-                    candidateIds,
-                    selectedIds,
-                    confidence,
-                    reasonCodes,
-                    source: decisionSource(reasonCodes),
-                    at: nowIso(),
-                  },
-                });
-              },
-            );
           }
 
-          // The legacy route call still provides the coarse privacy/tier fields
-          // used by ScheduleDecision. It can only narrow the already selected
-          // registry IDs and is skipped for unsanitized remote state.
+          // Jev makes the one task-level capability decision. Its exposedTools
+          // result is the hard grant passed to Hermes, not advisory context.
+          // The model gateway may narrow a single turn, but can never widen it.
           const decider = provider('decision');
-          const routed =
-            decider.mode !== 'live' || decisionState.sanitizedForRemote
+          const routeCacheKey =
+            decisionState.sanitizedForRemote && availableTools.length > 0
+              ? JSON.stringify({
+                  task: decisionState.taskSummary,
+                  labels: decisionState.dataLabels,
+                  tools: availableTools,
+                  ceiling,
+                })
+              : undefined;
+          const cachedRoute = routeCacheKey ? this.getCachedTaskRoute(routeCacheKey) : undefined;
+          const routed = cachedRoute
+            ? { ok: true as const, data: cachedRoute }
+            : decider.mode !== 'live' || decisionState.sanitizedForRemote
               ? await decider.route(
-                  { task: decisionState.taskSummary, availableTools: selectedBeforeLegacyRoute },
+                  { task: decisionState.taskSummary, availableTools },
                   buildCallContext({ stepId: step.id, policyRule: 'subtask-routing' }),
                 )
               : null;
+          if (routeCacheKey && routed?.ok) this.cacheTaskRoute(routeCacheKey, routed.data);
 
           // FAIL CLOSED, not open — docs/agentos-design.md is explicit:
           // "Routing... failures fail closed; failure never exposes all
@@ -799,7 +807,7 @@ export class Orchestrator {
             ? {
                 ...routed.data,
                 exposedTools: routed.data.exposedTools.filter((toolId) =>
-                  selectedBeforeLegacyRoute.includes(toolId),
+                  availableTools.includes(toolId),
                 ),
               }
             : {
@@ -829,7 +837,9 @@ export class Orchestrator {
             intelligenceConfidence: routeResult.intelligenceConfidence,
             modelTier: routeResult.modelTier,
             availableTools,
-            exposedTools: routeResult.exposedTools,
+            exposedTools: priorState?.taskToolIds
+              ? routeResult.exposedTools.filter((id) => priorState.taskToolIds!.includes(id))
+              : routeResult.exposedTools,
             confidence: routeResult.confidence,
             escalated: false,
             rule: routed?.ok ? 'jev-routed' : 'route-failed-safe-local',
@@ -851,8 +861,10 @@ export class Orchestrator {
               (labels.every((label) => label === 'public') ? spec.goal : undefined),
             dataLabels: labels,
             budget: { stepsRemaining: maxTurns },
-            candidateToolIds: decision.exposedTools,
+            candidateToolIds: availableTools,
+            taskToolIds: decision.exposedTools,
             toolCeiling: ceiling,
+            boundBrowserSessionId,
             contextScopeId: spec.contextScope?.id,
           };
           const sessionState = priorState
@@ -1219,6 +1231,26 @@ export class Orchestrator {
 
     return ctx;
   }
+
+  private getCachedTaskRoute(key: string): CachedTaskRoute | undefined {
+    const cached = this.taskRouteCache.get(key);
+    if (!cached || cached.expiresAt <= Date.now()) {
+      if (cached) this.taskRouteCache.delete(key);
+      return undefined;
+    }
+    return { ...cached.data, exposedTools: [...cached.data.exposedTools] };
+  }
+
+  private cacheTaskRoute(key: string, data: CachedTaskRoute): void {
+    if (this.taskRouteCache.size >= 128) {
+      const oldest = this.taskRouteCache.keys().next().value;
+      if (oldest) this.taskRouteCache.delete(oldest);
+    }
+    this.taskRouteCache.set(key, {
+      data: { ...data, exposedTools: [...data.exposedTools] },
+      expiresAt: Date.now() + 5 * 60_000,
+    });
+  }
 }
 
 function eligibleTaskTools(descriptors: ToolDescriptor[], state: DecisionState): ToolDescriptor[] {
@@ -1235,57 +1267,6 @@ function requiresExternalAction(goal: string): boolean {
   return /^(?:please\s+)?(?:send|email|message|reply|forward|post|publish|submit|create|update|delete|remove|invite|schedule|book|purchase|pay|transfer)\b/i.test(
     goal.trim(),
   );
-}
-
-async function selectTaskTools(
-  descriptors: ToolDescriptor[],
-  state: DecisionState,
-  decisions: DecisionService,
-  ctx: ProviderCallContext,
-  emit: (
-    operation: ControlDecisionOperation,
-    candidateIds: string[],
-    selectedIds: string[],
-    confidence: number,
-    reasonCodes: string[],
-  ) => Promise<void>,
-): Promise<string[]> {
-  const families = [...new Set(descriptors.map((descriptor) => descriptor.family))];
-  const familyDecision = await decisions.selectToolFamilies(state, families, ctx);
-  await emit(
-    'select_tool_families',
-    families,
-    familyDecision.selectedFamilies,
-    average(Object.values(familyDecision.confidences)),
-    familyDecision.reasonCodes,
-  );
-  const selectedFamilies = new Set(familyDecision.selectedFamilies);
-  const narrowed = descriptors.filter((descriptor) => selectedFamilies.has(descriptor.family));
-  const toolDecision = await decisions.selectTools(state, narrowed, ctx);
-  await emit(
-    'select_tools',
-    narrowed.map((descriptor) => descriptor.id),
-    toolDecision.selectedToolIds,
-    average(Object.values(toolDecision.confidences)),
-    toolDecision.reasonCodes,
-  );
-  const selectedIds = new Set(toolDecision.selectedToolIds);
-  return narrowed.filter((descriptor) => selectedIds.has(descriptor.id)).map((tool) => tool.id);
-}
-
-function average(values: number[]): number {
-  if (values.length === 0) return 1;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function decisionSource(reasonCodes: string[]): 'jev' | 'deterministic' | 'fallback' {
-  if (reasonCodes.some((reason) => reason.includes('fallback') || reason.includes('fail-closed'))) {
-    return 'fallback';
-  }
-  if (reasonCodes.some((reason) => reason.includes('deterministic') || reason.startsWith('no-'))) {
-    return 'deterministic';
-  }
-  return 'jev';
 }
 
 /** Best-effort conversion to a storable Json value. Never throws. */

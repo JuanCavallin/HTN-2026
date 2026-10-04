@@ -2,7 +2,7 @@
  * Gemini — status/health adapter.
  *
  * Completions do NOT go through here. They go through the model gateway's
- * backend seam (backend.ts), exactly like OpenRouter and Ollama, because the
+ * backend seam (backend.ts), exactly like Ollama, because the
  * gateway owns route selection, tool filtering and the model lifecycle trace.
  * This adapter exists so the provider shows up on the providers page with a
  * real credential check rather than an assumption.

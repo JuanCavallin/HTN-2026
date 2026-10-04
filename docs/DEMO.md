@@ -106,7 +106,7 @@ Full key-by-key setup, installs and a pre-flight checklist: **[DEMO-KEYS.md](DEM
 | Private browser     | Chrome installed, `LOCALBROWSER_MODE=live`, `LOCALBROWSER_CHANNEL=chrome` |
 | Real agent (Hermes) | `uv` + a `hermes-agent` checkout at `HERMES_CWD` **on that machine**      |
 | Email via Composio  | `COMPOSIO_API_KEY`, `COMPOSIO_AUTH_CONFIG_ID`, Gmail connected            |
-| Model routes        | `OPENROUTER_API_KEY` / `GEMINI_API_KEY` / Ollama running                  |
+| Model routes        | `GEMINI_API_KEY` for tool turns / Ollama running                           |
 | Outbound-text check | `GPTZERO_API_KEY`, `GPTZERO_MODE=live`                                    |
 
 `HERMES_CWD` is an absolute path, so a shared `.env` will not work across laptops. If the

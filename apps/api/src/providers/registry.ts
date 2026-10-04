@@ -25,7 +25,6 @@ import { create as createJev } from './jev/index.js';
 import { create as createBrowserbase } from './browserbase/index.js';
 import { create as createLocalBrowser } from './localbrowser/index.js';
 import { create as createComposio } from './composio/index.js';
-import { create as createOpenRouter } from './openrouter/index.js';
 import { create as createOllama } from './ollama/index.js';
 import { create as createMcp } from './mcp/index.js';
 import { create as createAnthropic } from './anthropic/index.js';
@@ -40,7 +39,6 @@ const FACTORIES: Record<ProviderId, Factory> = {
   browserbase: createBrowserbase,
   localbrowser: createLocalBrowser,
   composio: createComposio,
-  openrouter: createOpenRouter,
   ollama: createOllama,
   mcp: createMcp,
   anthropic: createAnthropic,

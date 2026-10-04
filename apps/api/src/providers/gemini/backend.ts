@@ -2,15 +2,8 @@
  * Gemini — direct Google backend for the AgentOS model gateway.
  *
  * ============================================================================
- * WHY A DIRECT ROUTE WHEN OPENROUTER ALREADY PROXIES GEMINI.
- *
- * Because a route is a privacy and cost claim, not a model name. An OpenRouter
- * route is egress to OpenRouter, whatever model sits behind it; this is egress
- * to Google. They are different destinations in the ledger, they bill
- * differently, and they fail independently. Collapsing them would make
- * "which vendor saw this context" unanswerable, and that question is the
- * product. Two real cloud vendors is also what makes route selection an actual
- * decision for Jev rather than a label on a single path.
+ * This is a direct Google route. A route is a privacy and cost claim, not just
+ * a model name, so the egress ledger records Google as the actual destination.
  * ---------------------------------------------------------------------------
  * THE WIRE TRANSLATION, AND WHY IT IS NOT A PASS-THROUGH.
  *
@@ -29,19 +22,14 @@
  *      (`additionalProperties`, `$schema`, `default`). They are stripped rather
  *      than passed through, because a 400 here reads like a model failure.
  *
- * SECURITY, same rule as the OpenRouter backend: a returned function call whose
+ * SECURITY: a returned function call whose
  * name AgentOS did not expose this turn is rejected, not executed. The gateway
  * filters which tools the model may see; this enforces that it cannot invent
  * one anyway.
  *
- * ONE TOOL CALL PER TURN, also to match OpenRouter. That backend sends
- * `parallel_tool_calls: false`, so every downstream consumer — the broker, the
- * approval gate, the trace — has only ever been exercised with a single call
- * per turn. Gemini has no equivalent request flag, so the constraint is applied
+ * ONE TOOL CALL PER TURN. Gemini has no equivalent request flag, so the constraint is applied
  * to the RESPONSE instead: extras are dropped and warned about rather than fed
  * into a path that has never seen them. Silently passing two through would make
- * the Gemini route behave differently from the OpenRouter one, for reasons a
- * demo would surface at the worst possible moment.
  * ---------------------------------------------------------------------------
  * VERIFIED: endpoint shape, auth header and model ids confirmed against
  * Google's published API docs and Sept-2026 release notes. NOT exercised
@@ -136,7 +124,7 @@ function route(id: string, modelId: string, costTier: 'cheap' | 'frontier'): Mod
     supportsTools: true,
     // Cloud egress to a third party. Until a retention agreement is represented
     // in the route, only explicitly public state may take this path — same
-    // constraint the OpenRouter routes carry, for the same reason.
+    // Cloud routes are public-only until a retention policy is represented.
     allowedDataLabels: ['public'],
     enabled: true,
   };
@@ -282,7 +270,7 @@ export function toGeminiTools(tools: OpenAiTool[]): unknown[] {
  * Convert Gemini function calls into the gateway's OpenAI-shaped tool calls.
  *
  * Throws on a name AgentOS did not expose this turn. That is the same rule the
- * OpenRouter backend enforces and it is not optional: tool exposure is the
+ * model backends enforce and it is not optional: tool exposure is the
  * boundary, so a model naming something outside it is a failure, not a request.
  */
 export function parseToolCalls(

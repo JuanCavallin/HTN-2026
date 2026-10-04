@@ -500,6 +500,10 @@ async function callToolGated(
   // answer for a Composio name -- fall through to the toolbox below.
   if (brokered) {
     await holdOpenedSession(ctx, args.stepId, brokered.output, args.toolArgs, args.lease);
+    if (args.tool.endsWith('.close')) {
+      const closed = args.toolArgs.sessionId;
+      if (typeof closed === 'string') args.lease?.release(closed);
+    }
     return brokered.output;
   }
 
@@ -805,6 +809,16 @@ async function runAgentTaskNode(
     );
   }
 
+  const browserSession = cfg.resourceBindings?.browserSession;
+  if (cfg.resourceBindings && Object.hasOwn(cfg.resourceBindings, 'browserSession')) {
+    if (typeof browserSession !== 'string' || browserSession.trim().length === 0) {
+      throw new Error(
+        'browserSession resource binding did not resolve to a non-empty session id. ' +
+          'No replacement browser session will be opened.',
+      );
+    }
+  }
+
   const task = await ctx.runAgentTask({
     label: node.label,
     nodeId: node.id,
@@ -812,6 +826,8 @@ async function runAgentTaskNode(
     context: agentContext(node, scope, graph),
     availableTools: cfg.availableTools,
     toolCeiling: cfg.toolCeiling,
+    resourceBindings:
+      browserSession !== undefined ? { browserSession } : undefined,
     contextScope: cfg.contextScope,
     dataLabels: cfg.dataLabels,
     contextProvenance:
@@ -820,6 +836,7 @@ async function runAgentTaskNode(
         : Object.values(node.config.contextInputs),
     pollIntervalMs: cfg.pollIntervalMs,
     maxPolls: cfg.maxPolls,
+    maxTurns: cfg.maxTurns,
     maxDurationMs: cfg.maxDurationMs,
     maxFailedToolCalls: cfg.maxFailedToolCalls,
   });

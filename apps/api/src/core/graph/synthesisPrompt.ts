@@ -118,13 +118,19 @@ STRUCTURE
   only direct predecessor outputs are passed, not all ancestors or sibling branches.
   Every explicit binding is required: a missing/skipped source blocks the task.
   These are data bindings, not privacy declassification or shared-session handles.
+  When a browser session must stay on the same page, add
+  resourceBindings: {"browserSession": "{{open_node.result.sessionId}}"}.
+  This is a hard server-side browser capability binding: the adaptive agent remains
+  general about clicks and fields, but cannot open, search, read, or switch to another
+  browser session. Do not copy the session id into the goal or context.
 - Put "background": true on a node whose failure should not abort the run.
 - agent_task's "harness" field is validated against every known provider id,
   but only "hermes" is actually wired to run one today. OMIT "harness"
   entirely (it then defaults correctly), or set it to "hermes" explicitly --
   never any other value, even if it sounds like a better fit for the task
   (e.g. a browsing-heavy goal does NOT mean "browserbase" here). Setting
-  anything else validates fine and then fails when the graph actually runs.
+  anything else validates fine and then fails when the graph actually runs. Set
+  maxTurns, maxDurationMs, and maxFailedToolCalls for every adaptive task.
 
 SAFETY
 
@@ -208,7 +214,10 @@ function webLookupRules(tools: ToolCatalogEntry[]): string {
   ].join('\n');
 }
 
-export function buildSynthesisSystemPrompt(tools: ToolCatalogEntry[]): string {
+export function buildSynthesisSystemPrompt(
+  tools: ToolCatalogEntry[],
+  modeHint?: 'direct' | 'dispatch' | 'adaptive',
+): string {
   const toolList = tools
     .map((t) => '  ' + t.name + (t.group ? ' [' + t.group + ']' : '') + ' — ' + t.description)
     .join('\n');
@@ -223,6 +232,18 @@ export function buildSynthesisSystemPrompt(tools: ToolCatalogEntry[]): string {
     '',
     SHAPE_RULES,
     '',
+    ...(modeHint
+      ? [
+          'PREFLIGHT EXECUTION HINT: ' + modeHint + '.',
+          modeHint === 'direct'
+            ? 'Prefer fixed tool/decide steps; use agent_task only if the request truly requires feedback.'
+            : modeHint === 'dispatch'
+              ? 'Prefer dispatch when one known tool must be selected at runtime; do not add an agent loop just to choose.'
+              : 'Prefer one bounded agent_task for the adaptive observe-reason-act portion, with explicit maxTurns, maxDurationMs, and maxFailedToolCalls.',
+          'This is a planning hint, not a schema exception. The generated graph must still fit the request and validate.',
+          '',
+        ]
+      : []),
     ...(webRules ? [webRules, ''] : []),
     'AVAILABLE TOOLS (use only these names, exactly as written):',
     toolList ||
@@ -255,8 +276,13 @@ export function buildSynthesisUserPrompt(args: {
   currentGraph: AgentGraph | null;
   /** Appended after a rejected attempt so the retry can repair rather than guess. */
   repairHint?: string;
+  modeHint?: 'direct' | 'dispatch' | 'adaptive';
 }): string {
   const parts: string[] = [];
+
+  if (args.modeHint) {
+    parts.push('Jev preflight recommends the execution shape `' + args.modeHint + '`; use it as a hint, not as a substitute for reasoning.', '');
+  }
 
   if (args.currentGraph) {
     parts.push(

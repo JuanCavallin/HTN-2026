@@ -14,5 +14,6 @@ export function synthesiseGraph(args: SynthesisRequest): Promise<SynthesisResult
   return synthesise(args, {
     listTools: listToolCatalog,
     complete: (input, context) => providers.provider('text.model').complete(input, context),
+    decide: (input, context) => providers.provider('decision').decide(input, context),
   });
 }

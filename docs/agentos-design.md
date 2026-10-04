@@ -43,7 +43,7 @@ AgentOS API + Outer Run Controller ↔ Canonical Session State ↔ Trace/Metrics
                                   ├─ model request → AgentOS Model Gateway
                                   │                   ├─ local privacy/policy eligibility
                                   │                   ├─ Jev model + tool selection
-                                  │                   └─ OpenRouter or local model
+                                  │                   └─ Gemini, Anthropic or local model
                                   │
                                   └─ tool call → AgentOS MCP Tool Gateway
                                                       ├─ exact-action policy/approval
@@ -94,16 +94,17 @@ Cost and privacy are separate. A `ModelRoute` identifies:
 | Identity       | `providerId` and `modelId`           |
 
 The demo therefore supports local/private, privacy-constrained cloud, cloud/cheap, and
-cloud/frontier routes. OpenRouter is the cloud model catalog and gateway; it supplies a
+cloud/frontier routes. Gemini supplies the direct tool-capable cloud route while Anthropic
+supplies the bound text-model route; the model gateway supplies a
 mixture of vendors and model families rather than implying use of OpenAI models. Hermes
 speaks an OpenAI-compatible request format to AgentOS only as a wire protocol.
 
 Truly local/private inference goes directly to an approved local endpoint such as
-Ollama or vLLM. An OpenRouter route may require zero-data-retention, no-training, or a
+Ollama or vLLM. A cloud route may require zero-data-retention, no-training, or a
 provider allowlist, but it is still cloud egress and must never be labeled local. A
-`local_only` step may never silently escalate to OpenRouter or another cloud provider.
+`local_only` step may never silently escalate to Gemini, Anthropic, or another cloud provider.
 
-A `ScheduleDecision` contains the selected route, selected tool IDs, context scope,
+A `ScheduleDecision` contains the selected route, the task-level Jev tool grant, context scope,
 provisional action policy (`auto`, `verify`, `ask_user`, or `deny`), confidence, and
 typed reason codes. Jev receives sanitized session summaries and short tool metadata,
 not credential values, raw secrets, or every full schema.
@@ -159,6 +160,15 @@ explanation.
 
 If Jev is remote, local-only state is never sent to it; AgentOS uses a sanitized summary
 or a deterministic/local completion check instead.
+
+The task-level tool grant is a hard boundary, not prompt context: AgentOS stores the
+pre-Jev candidates separately, passes only Jev's exposed IDs into Hermes, and makes the
+model gateway and MCP server intersect every later request with that immutable grant.
+The broker still authorizes every exact action and pins descriptor versions. A browser
+resource binding is similarly server-side: `resourceBindings.browserSession` pins an
+agent task to one existing session without putting its ID into the goal or transcript.
+Data `contextInputs`, shared harness memory, and resource ownership are separate
+contracts; one never implies another.
 
 ### Tools, actions, and events
 
@@ -235,7 +245,7 @@ approval before outreach.
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Harness       | A task submitted in the AgentOS UI starts and completes one Hermes run without modifying Hermes core                                                        |
 | Tools         | 50+ registered/simulated schemas reduce to 3–8; unknown or unselected calls are blocked                                                                     |
-| Models        | OpenRouter supplies multiple cloud model families, a separate true local route remains available, and one run demonstrates a verification-driven escalation |
+| Models        | Gemini supplies the direct tool-capable cloud route, Anthropic supplies graph/text generation, and a separate true local route remains available |
 | Context       | One canonical state supports model switching while preserving labels and provenance                                                                         |
 | Completion    | At each outer-loop checkpoint Jev returns `done`, `continue`, or `blocked`; verified `done` stops the Hermes run and failed verification continues it       |
 | Safety        | One side effect demonstrates approve, reject, and revised-payload paths with reauthorization                                                                |
@@ -268,9 +278,10 @@ the seam between the two tracks, and the files each one owns.
 - **Authorization before execution.** Person 3's executor calls Person 2's
   `authorize_action` with the exact `ToolAction` before every run and executes only on
   an allow. A failed or missing check blocks execution.
-- **Tool selection.** Jev (Person 2) chooses tool families and the final set. Person 3's
-  `select_tool_metadata` retrieves candidates within the chosen families from the
-  registry.
+- **Tool selection.** Jev (Person 2) chooses the task-level final set from trusted
+  candidates. AgentOS passes that grant into Hermes and the model/MCP gateways; the
+  broker remains the final exact-action authority. Repeated gateway turns may narrow the
+  request but never widen the task grant.
 - **Browser destination.** Person 2's policy decides whether a step may use Browserbase.
   Local-only data never goes there, per the safety invariants. Person 3 implements both
   Browserbase and the local-browser path and uses whichever policy allows. If policy

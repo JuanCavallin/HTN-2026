@@ -92,6 +92,7 @@ async function main(): Promise<void> {
     dataLabels: ['public'],
     budget: { stepsRemaining: 2 },
     candidateToolIds: ['browser.search', 'untrusted.delete_everything'],
+    taskToolIds: ['browser.search'],
   });
   await sessions.beginTurn(state.id);
   const credentials = sessions.issueGatewayCredentials(state.id);
@@ -143,7 +144,8 @@ async function main(): Promise<void> {
   assert.ok(persisted);
   assert.equal(persisted.contextVersion, 2);
   assert.equal(persisted.context.length, 3);
-  assert.deepEqual(persisted.candidateToolIds, ['browser.search']);
+  assert.deepEqual(persisted.candidateToolIds, ['browser.search', 'untrusted.delete_everything']);
+  assert.deepEqual(persisted.taskToolIds, ['browser.search']);
   assert.deepEqual(persisted.selectedToolIds, ['browser.search']);
   assert.deepEqual(persisted.selectedToolVersions, { 'browser.search': '1' });
   assert.deepEqual(persisted.activeToolExposureGrant?.selectedToolVersions, {
@@ -169,7 +171,7 @@ async function main(): Promise<void> {
     decisionsLogged.map((event) =>
       event.event.type === 'control.decided' ? event.event.decision.operation : '',
     ),
-    ['select_tool_families', 'select_tools', 'select_model'],
+    ['select_model'],
   );
 
   const grantId = persisted.activeToolExposureGrant?.id;

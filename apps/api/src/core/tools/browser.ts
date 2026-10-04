@@ -55,6 +55,17 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
               childContext(ctx, 'browser-run-release'),
             );
             if (!closed.ok) throw new Error(closed.error.message);
+          } catch (error) {
+            // Graph teardown and orchestrator teardown are intentionally both
+            // best-effort. A graph may already have released this same browser
+            // through the provider wrapper; that is an idempotent close, not a
+            // resource leak or a run failure.
+            if (
+              !(error instanceof Error) ||
+              !error.message.includes('Browser session is not owned by this run')
+            ) {
+              throw error;
+            }
           } finally {
             sessions.delete(sessionId);
           }

@@ -172,6 +172,7 @@ function fixture() {
             closed.push(sessionId);
             return { ok: true, data: null, meta };
           },
+          async setOwnership() {},
         };
       if (capability === 'decision')
         return {

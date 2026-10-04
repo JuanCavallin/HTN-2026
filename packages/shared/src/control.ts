@@ -214,6 +214,10 @@ export interface AgentSessionState {
   candidateModelRouteIds: string[];
   selectedModelRouteId?: string;
   candidateToolIds: string[];
+  /** Immutable Jev-selected task grant. A model turn may narrow this set, never widen it. */
+  taskToolIds?: string[];
+  /** Server-side resource binding; never included in model context by default. */
+  boundBrowserSessionId?: string;
   selectedToolIds: string[];
   /** Descriptor versions exposed on the latest model request, pinned against TOCTOU changes. */
   selectedToolVersions?: Record<string, string>;
