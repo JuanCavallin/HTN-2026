@@ -278,6 +278,75 @@ async function main(): Promise<void> {
   await assert.rejects(() => sessions.resolveGatewayToken(secondCredentials.model, 'model'));
   assert.ok(!JSON.stringify(await store.listSessionStates()).includes(credentials.model));
 
+  // Per-turn tool budget: Hermes ACP never caps a turn itself, so the gateway
+  // withholds tools once a turn has spent its budget, forcing a text report.
+  {
+    let budgetTools: unknown[] = [];
+    let budgetMessages: unknown[] = [];
+    const budgeted = new ModelGatewayService(decisions, sessions, model, catalog, bus, {
+      modelRoutes: () => [TOOL_ROUTE],
+      maxToolCallsPerTurn: 1,
+      backend: {
+        async complete(input) {
+          budgetTools = input.tools;
+          budgetMessages = input.messages;
+          return {
+            text: '',
+            toolCalls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'mcp__agentos__browser_search', arguments: '{"query":"x"}' },
+              },
+            ],
+            tokensIn: 1,
+            tokensOut: 1,
+          };
+        },
+      },
+    });
+    const looping = await sessions.create({
+      runId: 'gateway_budget',
+      stepId: 'gateway_budget_step',
+      harness: 'hermes',
+      objective: 'Search public sources.',
+      sanitizedObjective: 'Search public sources.',
+      dataLabels: ['public'],
+      budget: { stepsRemaining: 3 },
+      candidateToolIds: ['browser.search'],
+      taskToolIds: ['browser.search'],
+    });
+    await sessions.beginTurn(looping.id);
+    const loopingCredentials = sessions.issueGatewayCredentials(looping.id);
+    const searchRequest = {
+      messages: [{ role: 'user', content: 'Search public sources.' }],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'mcp__agentos__browser_search', parameters: { type: 'object' } },
+        },
+      ],
+    };
+    const callLooping = async () =>
+      budgeted.complete(
+        searchRequest,
+        await sessions.resolveGatewayToken(loopingCredentials.model, 'model'),
+      );
+
+    const first = await callLooping();
+    assert.equal(budgetTools.length, 1, 'the first call in a turn is offered its tools');
+    assert.equal(first.toolCalls.length, 1);
+
+    const second = await callLooping();
+    assert.equal(budgetTools.length, 0, 'a spent turn must not be offered tools');
+    assert.deepEqual(second.toolCalls, [], 'tool calls are stripped once the budget is spent');
+    assert.match(JSON.stringify(budgetMessages.at(-1)), /Tool budget for this turn is used up/);
+
+    await sessions.beginTurn(looping.id);
+    await callLooping();
+    assert.equal(budgetTools.length, 1, 'a new turn gets a fresh tool budget');
+  }
+
   console.log('model gateway check: ok');
 }
 

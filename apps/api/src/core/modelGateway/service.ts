@@ -85,12 +85,33 @@ export interface ChatModelBackend {
 export interface ModelGatewayOptions {
   modelRoutes?: (adapter: TextModelAdapter) => ModelRoute[];
   backend?: ChatModelBackend;
+  /** Tool calls the model may make in one harness turn before it must report. */
+  maxToolCallsPerTurn?: number;
 }
+
+const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 8;
+
+/**
+ * Hermes's ACP adapter builds every agent with an unlimited per-prompt
+ * iteration budget and ignores `agent.max_turns`, so one turn could chain
+ * tool calls until the wall-clock budget ran out (35 calls in a single
+ * 7-minute turn, observed live). The orchestrator's completion judge only runs
+ * BETWEEN turns, so it never got a say. Once a turn spends its budget, the
+ * next model call gets no tools and this instruction, the model answers in
+ * text, Hermes ends the turn, and the judge decides whether to continue.
+ */
+const TOOL_BUDGET_EXHAUSTED_INSTRUCTION =
+  'Tool budget for this turn is used up; tools are unavailable until the next turn. ' +
+  'Do not call tools. Reply now with what you have found so far: the concrete results, ' +
+  'their sources, and what is still missing.';
 
 export class ModelGatewayService {
   private readonly calls = new KeyedLock();
   private readonly routes: ModelRoute[];
   private readonly backend: ChatModelBackend;
+  private readonly maxToolCallsPerTurn: number;
+  /** Tool calls made per `${sessionStateId}:${turn}`. In memory: a turn never outlives the process. */
+  private readonly turnToolCalls = new Map<string, number>();
 
   constructor(
     private readonly decisionService: DecisionService,
@@ -102,6 +123,7 @@ export class ModelGatewayService {
   ) {
     this.routes = (options.modelRoutes ?? modelRoutesFor)(model);
     this.backend = options.backend ?? textAdapterBackend(model);
+    this.maxToolCallsPerTurn = options.maxToolCallsPerTurn ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
   }
 
   listModels(): ModelRoute[] {
@@ -268,18 +290,29 @@ export class ModelGatewayService {
       messageCount: messages.length,
     });
 
+    const turnKey = binding.sessionStateId + ':' + binding.turn.toString();
+    const turnBudgetSpent =
+      selectedToolSchemas.length > 0 &&
+      (this.turnToolCalls.get(turnKey) ?? 0) >= this.maxToolCallsPerTurn;
     let completed: ChatModelBackendResult;
     try {
       await this.sessions.requireGatewayTurn(binding);
       completed = await this.backend.complete(
         {
           route: selectedRoute,
-          messages,
-          tools: selectedToolSchemas,
+          messages: turnBudgetSpent
+            ? [...messages, { role: 'system', content: TOOL_BUDGET_EXHAUSTED_INSTRUCTION }]
+            : messages,
+          tools: turnBudgetSpent ? [] : selectedToolSchemas,
           maxTokens: request.max_completion_tokens ?? request.max_tokens,
         },
         callContext,
       );
+      if (turnBudgetSpent) completed = { ...completed, toolCalls: [] };
+      const madeCalls = completed.toolCalls?.length ?? 0;
+      if (madeCalls > 0) {
+        this.turnToolCalls.set(turnKey, (this.turnToolCalls.get(turnKey) ?? 0) + madeCalls);
+      }
     } catch (error) {
       if (trustedToolBearingRequest) await this.sessions.clearToolExposure(session.id);
       await this.emitModelLifecycle({

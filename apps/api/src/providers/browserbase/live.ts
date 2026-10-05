@@ -308,6 +308,39 @@ async function bbGet<T>(apiKey: string, path: string): Promise<T | null> {
 }
 
 /**
+ * Why Browserbase refused a session. Stagehand catches the API error and
+ * rethrows a bare "Failed to create a Browserbase session", which hid a 402
+ * "Free plan browser minutes limit reached" for a whole debugging session.
+ * Runs ONLY after a failed create: a refused create costs nothing, and the
+ * rare one that now succeeds (a transient failure) is released at once.
+ */
+async function explainCreateFailure(apiKey: string, projectId: string): Promise<string | null> {
+  try {
+    const res = await fetch(BROWSERBASE_API + '/sessions', {
+      method: 'POST',
+      headers: { 'X-BB-API-Key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    const body = (await res.json().catch(() => ({}))) as { id?: string; message?: string };
+    if (res.ok) {
+      if (body.id) {
+        await fetch(BROWSERBASE_API + '/sessions/' + body.id, {
+          method: 'POST',
+          headers: { 'X-BB-API-Key': apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId, status: 'REQUEST_RELEASE' }),
+          signal: AbortSignal.timeout(8_000),
+        }).catch(() => undefined);
+      }
+      return 'transient; a retry may succeed';
+    }
+    return 'Browserbase HTTP ' + res.status + (body.message ? ': ' + body.message : '');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The live-view URL and the session's region.
  *
  * BEST EFFORT BY DESIGN: a missing URL costs the UI a live view, while a thrown
@@ -634,6 +667,19 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         // A half-launched browser is a RUNNING Browserbase session nobody holds
         // an id for. Release it here or it burns a slot until it times out.
         await browser?.close().catch(() => {});
+        if (err instanceof Error && err.name === 'BrowserbaseSessionError') {
+          const reason = await explainCreateFailure(cfg.apiKey, cfg.projectId);
+          if (reason) {
+            return failure(
+              'openSession',
+              started,
+              new Error(err.message + ' (' + reason + ')'),
+              BROWSERBASE_API_DESTINATION,
+              // Quota and auth refusals do not clear on retry.
+              /HTTP 40[0-3]/.test(reason) ? 'AUTH' : 'UPSTREAM',
+            );
+          }
+        }
         return failure('openSession', started, err);
       }
     },
