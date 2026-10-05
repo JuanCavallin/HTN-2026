@@ -20,6 +20,7 @@ import type {
   OpenAiMessage,
   OpenAiTool,
 } from '../../core/modelGateway/service.js';
+import { isBoundTextRoute } from '../../core/modelGateway/catalog.js';
 import { newId } from '../../lib/ids.js';
 import type { RecordEgress } from '../withEgress.js';
 
@@ -71,7 +72,9 @@ export function createAnthropicBackend(
 ): ChatModelBackend {
   return {
     async complete(input, ctx) {
-      if (input.route.providerId !== 'anthropic') return fallback.complete(input, ctx);
+      if (input.route.providerId !== 'anthropic' || isBoundTextRoute(input.route)) {
+        return fallback.complete(input, ctx);
+      }
       if (cfg.mode !== 'live' || !cfg.apiKey) {
         throw new Error('Anthropic route selected while ANTHROPIC_MODE is not live.');
       }

@@ -7,6 +7,7 @@ import type {
   GatewayToolCall,
   OpenAiMessage,
 } from '../../core/modelGateway/service.js';
+import { isBoundTextRoute } from '../../core/modelGateway/catalog.js';
 import { newId } from '../../lib/ids.js';
 import type { RecordEgress } from '../withEgress.js';
 
@@ -27,7 +28,9 @@ export function createOllamaBackend(
 ): ChatModelBackend {
   return {
     async complete(input, ctx) {
-      if (input.route.providerId !== 'ollama') return fallback.complete(input, ctx);
+      if (input.route.providerId !== 'ollama' || isBoundTextRoute(input.route)) {
+        return fallback.complete(input, ctx);
+      }
       if (cfg.mode !== 'live')
         throw new Error('Ollama route selected while OLLAMA_MODE is not live.');
       return completeLocal(cfg, input, ctx, recordEgress);

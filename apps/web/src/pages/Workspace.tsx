@@ -763,7 +763,8 @@ export function LiveRunWorkspace() {
                   />
                 );
               })}
-            {view.run?.error && (
+            {/* A failed run's summary is usually the error message itself. */}
+            {view.run?.error && view.run.error.message !== view.run.summary && (
               <p className="error-note" role="alert">
                 {view.run.error.message}
               </p>

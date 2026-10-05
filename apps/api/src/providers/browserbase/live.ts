@@ -342,9 +342,10 @@ function sameUrl(a: string, b: string): boolean {
  * WHICH TAB the live view should show.
  *
  * The top-level `debuggerFullscreenUrl` points at the session's FIRST page,
- * and that is the wrong one whenever a start URL was given: openSession calls
- * `context.newPage(startUrl)`, which leaves page 0 sitting on about:blank and
- * puts the real page second. Measured on a live session -- page 0
+ * and that was the wrong one when openSession called `context.newPage(startUrl)`,
+ * which left page 0 on about:blank and put the real page second. openSession
+ * now navigates page 0 instead, but a site can still open popups or new tabs,
+ * so the selection stays. Measured on a live session -- page 0
  * `about:blank`, page 1 `https://example.com/` -- so someone following the
  * handoff link landed on a blank tab and had no idea why.
  *
@@ -586,7 +587,13 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         stagehand = await Stagehand.create({ browser, ...modelOptions() });
 
         if (input.startUrl) {
-          await browser.context.newPage(input.startUrl);
+          // Navigate the session's existing first tab. newPage(startUrl) left
+          // that tab on about:blank and opened a second one, so the live view,
+          // the human at a handoff, and the agent could each end up on a
+          // different tab.
+          const [first] = await browser.context.pages();
+          if (first) await first.goto(input.startUrl);
+          else await browser.context.newPage(input.startUrl);
         }
 
         const remoteSessionId = browser.sessionId;
