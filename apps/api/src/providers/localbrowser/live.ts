@@ -486,6 +486,25 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
       }
     },
 
+    async navigate(input, _ctx) {
+      const started = Date.now();
+      const handle = sessions.get(input.sessionId);
+      if (!handle) {
+        return failure('navigate', started, new Error('Unknown sessionId'), 'BAD_INPUT');
+      }
+      try {
+        handle.snapshot = undefined;
+        await handle.page.goto(input.url, { waitUntil: 'domcontentloaded' });
+        return {
+          ok: true as const,
+          data: { url: handle.page.url() },
+          meta: meta('navigate', started, LOCAL_BROWSER_DESTINATION),
+        };
+      } catch (err) {
+        return failure('navigate', started, err);
+      }
+    },
+
     async extract<T = unknown>(
       input: { sessionId: string; instruction: string },
       _ctx: ProviderCallContext,
@@ -500,7 +519,9 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
         // CSS scope; empty means the whole body.
         const scope = input.instruction.trim();
         const text = scope
-          ? await handle.page.locator(scope).first().innerText()
+          ? // Short wait: a scope that is absent (no <main>) should fall back
+            // fast, not hold the tool for Playwright's 30s default.
+            await handle.page.locator(scope).first().innerText({ timeout: 2_000 })
           : await handle.page.locator('body').innerText();
         return {
           ok: true as const,

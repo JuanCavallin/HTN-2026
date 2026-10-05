@@ -77,6 +77,12 @@ const envSchema = z.object({
   BROWSERBASE_PROJECT_ID: optionalString,
   LOCALBROWSER_MODE: modeEnum.default('mock'),
   LOCALBROWSER_CHANNEL: optionalString,
+  // Cost ceilings for every agent_task, applied at run time (saved graphs keep
+  // validating; an over-generous node is clamped and the clamp is logged).
+  // Worst case per task = AGENT_MAX_TURNS x AGENT_MAX_TOOL_CALLS_PER_TURN calls.
+  AGENT_MAX_TURNS: z.coerce.number().int().positive().default(4),
+  AGENT_MAX_DURATION_MS: z.coerce.number().int().positive().default(300_000),
+  AGENT_MAX_TOOL_CALLS_PER_TURN: z.coerce.number().int().positive().default(8),
   BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
   BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
@@ -306,6 +312,11 @@ export const config = Object.freeze({
     dsn: env.SENTRY_DSN,
     tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
     release: env.SENTRY_RELEASE,
+  },
+  agent: {
+    maxTurns: env.AGENT_MAX_TURNS,
+    maxDurationMs: env.AGENT_MAX_DURATION_MS,
+    maxToolCallsPerTurn: env.AGENT_MAX_TOOL_CALLS_PER_TURN,
   },
   browser: {
     maxSessions: env.BROWSER_MAX_SESSIONS,

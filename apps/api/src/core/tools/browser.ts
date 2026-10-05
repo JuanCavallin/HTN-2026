@@ -38,11 +38,79 @@ interface BrowserSession {
  */
 export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExecutor {
   const sessions = new Map<string, BrowserSession>();
+  /**
+   * One reusable session per run and backend for stateless public research.
+   * A session per search/read cost a Browserbase session each (35 in one
+   * 7-minute run, each billed at least a minute), which exhausted the plan.
+   * Released with the run's other sessions by closeRunSessions.
+   */
+  const researchPool = new Map<string, string>();
+  /** Serializes navigate+read on a pooled session so concurrent calls cannot interleave. */
+  const poolTails = new Map<string, Promise<unknown>>();
+
+  function withPoolLock<T>(key: string, action: () => Promise<T>): Promise<T> {
+    const previous = poolTails.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(action);
+    poolTails.set(key, next);
+    void next.finally(() => {
+      if (poolTails.get(key) === next) poolTails.delete(key);
+    }).catch(() => undefined);
+    return next;
+  }
+
+  async function pooledResearch(
+    adapter: BrowserAdapter,
+    providerId: BrowserSession['providerId'],
+    action: ToolAction,
+    operation: string,
+    url: string,
+    ctx: ProviderCallContext,
+  ): Promise<ToolExecutionOutput> {
+    const key = action.runId + ':' + providerId;
+    return withPoolLock(key, async () => {
+      let sessionId = researchPool.get(key);
+      if (sessionId && adapter.navigate) {
+        const moved = await adapter.navigate(
+          { sessionId, url },
+          childContext(ctx, 'browser-research-navigate'),
+        );
+        if (!moved.ok) {
+          // Expired or broken (Browserbase times idle sessions out): replace it.
+          await adapter
+            .closeSession(sessionId, childContext(ctx, 'browser-session-release'))
+            .catch(() => undefined);
+          sessions.delete(sessionId);
+          researchPool.delete(key);
+          sessionId = undefined;
+        }
+      }
+      if (!sessionId) {
+        const opened = await adapter.openSession(
+          { startUrl: url },
+          childContext(ctx, 'browser-session-open'),
+        );
+        if (!opened.ok) throw new Error('Could not open browser session: ' + opened.error.message);
+        sessionId = opened.data.sessionId;
+        researchPool.set(key, sessionId);
+      }
+      sessions.set(sessionId, {
+        providerId,
+        url,
+        runId: action.runId,
+        interactive: false,
+      });
+      return researchOutput(adapter, sessionId, action, operation, ctx);
+    });
+  }
 
   return {
     ref: BROWSER_EXECUTOR_REF,
 
     async closeRunSessions(runId, ctx) {
+      // The pooled sessions are in `sessions` too and are closed below.
+      for (const key of [...researchPool.keys()]) {
+        if (key.startsWith(runId + ':')) researchPool.delete(key);
+      }
       const owned = [...sessions.entries()].filter(([, session]) => session.runId === runId);
       await Promise.all(
         owned.map(async ([sessionId, session]) => {
@@ -103,6 +171,16 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
       const requestedUrl = requestedStartUrl(operation, args);
       assertSensitiveDestination(action.dataLabels, requestedUrl);
 
+      const research = operation === 'search' || operation === 'read' || operation === 'extract';
+      if (research) {
+        if (operation === 'search') requiredString(args, 'query');
+        else requiredString(args, 'instruction');
+      }
+      const publicOnly = action.dataLabels.every((label) => label === 'public');
+      if (research && !suppliedSessionId && requestedUrl && publicOnly && adapter.navigate) {
+        return pooledResearch(adapter, providerId, action, operation, requestedUrl, ctx);
+      }
+
       let sessionId = suppliedSessionId;
       let ownsSession = false;
       if (sessionId) {
@@ -139,32 +217,8 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           );
         }
 
-        if (operation === 'search' || operation === 'read' || operation === 'extract') {
-          // Validated for the schema, but NOT forwarded: adapter.extract reads
-          // `instruction` as an optional CSS scope, so natural language here
-          // became document.querySelector("Return concise search results…"),
-          // which throws in the page and surfaced as an opaque "Uncaught".
-          // Bounded whole-page text is the evidence; the agent already knows
-          // what it is looking for.
-          if (operation === 'search') requiredString(args, 'query');
-          else requiredString(args, 'instruction');
-          const extracted = await adapter.extract<Json>(
-            { sessionId, instruction: operation === 'search' ? SEARCH_RESULTS_SCOPE : '' },
-            childContext(ctx, 'browser-read'),
-          );
-          if (!extracted.ok) throw new Error(extracted.error.message);
-          const publicOnly = action.dataLabels.every((label) => label === 'public');
-          const evidence = publicOnly ? boundedEvidence(extracted.data) : { available: true };
-          return output(
-            action,
-            evidence,
-            operation === 'search'
-              ? 'Completed stateless browser research search.'
-              : operation === 'read'
-                ? 'Read a page as bounded stateless research evidence.'
-                : 'Extracted bounded evidence from the existing browser page.',
-            publicOnly ? evidence : undefined,
-          );
+        if (research) {
+          return await researchOutput(adapter, sessionId, action, operation, ctx);
         }
 
         const table = await snapshot(adapter, sessionId, deps.maxElements, ctx);
@@ -261,6 +315,58 @@ function providerFor(toolId: string): BrowserSession['providerId'] {
 
 /** CSS scope of the result list on the search page requestedStartUrl opens. */
 const SEARCH_RESULTS_SCOPE = '#links';
+/** Below this, a scoped read is treated as missing and the whole page is read instead. */
+const MIN_SCOPED_EVIDENCE_CHARS = 200;
+
+/**
+ * Read a research page as bounded evidence. The agent's natural-language
+ * `instruction` is validated but NOT forwarded: adapter.extract reads it as a
+ * CSS scope, and natural language there threw inside the page ("Uncaught").
+ *
+ * The focused region is tried first (search results, then <main>), whole page
+ * second. Whole-page text on a store spent the evidence budget on site
+ * navigation, so prices never reached the agent and it searched product
+ * after product looking for them.
+ */
+async function researchOutput(
+  adapter: BrowserAdapter,
+  sessionId: string,
+  action: ToolAction,
+  operation: string,
+  ctx: ProviderCallContext,
+): Promise<ToolExecutionOutput> {
+  const scopes = operation === 'search' ? [SEARCH_RESULTS_SCOPE, ''] : ['main', ''];
+  let extracted: Awaited<ReturnType<BrowserAdapter['extract']>> | undefined;
+  for (const scope of scopes) {
+    extracted = await adapter.extract<Json>(
+      { sessionId, instruction: scope },
+      childContext(ctx, 'browser-read'),
+    );
+    if (extracted.ok && evidenceTextLength(extracted.data) >= MIN_SCOPED_EVIDENCE_CHARS) break;
+  }
+  if (!extracted?.ok) throw new Error(extracted?.error.message ?? 'Browser read failed.');
+  const publicOnly = action.dataLabels.every((label) => label === 'public');
+  const evidence = publicOnly ? boundedEvidence(extracted.data as Json) : { available: true };
+  return output(
+    action,
+    evidence,
+    operation === 'search'
+      ? 'Completed stateless browser research search.'
+      : operation === 'read'
+        ? 'Read a page as bounded stateless research evidence.'
+        : 'Extracted bounded evidence from the existing browser page.',
+    publicOnly ? evidence : undefined,
+  );
+}
+
+function evidenceTextLength(value: unknown): number {
+  if (typeof value === 'string') return value.trim().length;
+  if (value && typeof value === 'object' && 'text' in value) {
+    const text = (value as { text?: unknown }).text;
+    return typeof text === 'string' ? text.trim().length : 0;
+  }
+  return 0;
+}
 
 function requestedStartUrl(operation: string, args: Record<string, Json>): string | undefined {
   const explicit = optionalString(args, 'url');

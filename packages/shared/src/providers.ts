@@ -270,6 +270,15 @@ export interface BrowserAdapter extends ProviderAdapter {
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<T>>;
   closeSession(sessionId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
+  /**
+   * Point an open session's page at a new URL. Optional: lets stateless
+   * research reuse one session instead of opening (and paying for) one per
+   * call. Callers without it fall back to a session per call.
+   */
+  navigate?(
+    input: { sessionId: string; url: string },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<{ url: string }>>;
 
   /**
    * Mint a CURRENT viewer URL for a running session.

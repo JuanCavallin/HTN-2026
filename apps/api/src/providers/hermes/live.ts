@@ -45,7 +45,8 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, resolve } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 import type { AgentRuntimeAdapter, ProviderErrorCode, ProviderResult } from '@htn/shared';
@@ -151,6 +152,12 @@ export function createLiveHermes(cfg: ProviderConfig): AgentRuntimeAdapter {
   };
 }
 
+/** The Hermes profile directory: explicit, or derived from the gateway URL (see prepareProfile). */
+function profileDirFor(cfg: ProviderConfig): string {
+  const profileKey = (cfg.baseUrl ?? '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return cfg.profileDir ?? resolve(process.cwd(), '.data/hermes-agentos-' + profileKey);
+}
+
 function createHermesProcess(cfg: ProviderConfig): AgentRuntimeAdapter {
   const tasks = new Map<string, TaskRecord>();
   let connection: acp.ClientConnection | null = null;
@@ -183,9 +190,7 @@ function createHermesProcess(cfg: ProviderConfig): AgentRuntimeAdapter {
     // Deriving the directory from the gateway URL makes that collision
     // impossible instead of merely unlikely. An explicit HERMES_PROFILE_DIR
     // still wins, for anyone who wants one shared profile on purpose.
-    const profileKey = cfg.baseUrl.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-    const profileDir =
-      cfg.profileDir ?? resolve(process.cwd(), '.data/hermes-agentos-' + profileKey);
+    const profileDir = profileDirFor(cfg);
     await mkdir(profileDir, { recursive: true });
     const configYaml = [
       'model:',
@@ -411,7 +416,15 @@ function createHermesProcess(cfg: ProviderConfig): AgentRuntimeAdapter {
 
         // Best-effort only — see file header limit #1. Never treat this as
         // an enforced boundary.
-        const request = conn.agent.buildSession(cfg.cwd as string).toRequest();
+        // The SESSION cwd is an empty directory outside any git repo, not the
+        // Hermes checkout. Hermes injects AGENTS.md/CLAUDE.md from the git root
+        // down to the session cwd into EVERY model call: with the checkout as
+        // cwd that was Hermes's own 31k-char developer guide, ~8k tokens per
+        // call that no AgentOS task needs. The process still starts in
+        // cfg.cwd, which `uv run` requires.
+        const workDir = resolve(tmpdir(), 'agentos-hermes-work', basename(profileDirFor(cfg)));
+        await mkdir(workDir, { recursive: true });
+        const request = conn.agent.buildSession(workDir).toRequest();
         request._meta = { enabled_toolsets: requestedTools };
         const session = await conn.agent.buildSession(request).start();
 

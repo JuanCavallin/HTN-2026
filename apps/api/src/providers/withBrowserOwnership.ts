@@ -78,6 +78,7 @@ export function withBrowserOwnership(adapter: BrowserAdapter): BrowserAdapter {
           'openSession',
           'act',
           'extract',
+          'navigate',
           'closeSession',
           'liveView',
           'snapshot',

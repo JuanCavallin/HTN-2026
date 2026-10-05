@@ -91,6 +91,12 @@ export interface OrchestratorDeps {
   localToolCandidates?: () => Promise<string[]>;
   /** Release resources only after the run and all its graph branches have settled. */
   releaseRunResources?: (input: { runId: string; stepId: string }) => Promise<void>;
+  /**
+   * Cost ceilings applied to every agent task at run time. A node asking for
+   * more is clamped (and the clamp logged) instead of being rejected, so saved
+   * graphs keep running. Absent means no ceiling.
+   */
+  agentCeilings?: { maxTurns: number; maxDurationMs: number };
 }
 
 import { KeyedLock } from './locks.js';
@@ -589,16 +595,41 @@ export class Orchestrator {
         // (~8s) default was sized for the mock and would cancel a real,
         // healthy call almost immediately.
         const pollIntervalMs = spec.pollIntervalMs ?? 1500;
-        // Both undefined by default -- no wall-clock or failure ceiling beyond
-        // maxPolls/maxTurns unless the graph author opts in.
-        const maxDurationMs = spec.maxDurationMs;
+        const ceilings = this.deps.agentCeilings;
+        // A node's budget, clamped to the run-wide cost ceiling. Synthesised
+        // graphs asked for 12-14 turns and 7-10 minutes per research task;
+        // with no per-turn cap in Hermes that became 35 tool calls for one
+        // question. Clamped rather than rejected so saved graphs keep running.
+        const maxDurationMs =
+          ceilings && (spec.maxDurationMs ?? Infinity) > ceilings.maxDurationMs
+            ? ceilings.maxDurationMs
+            : spec.maxDurationMs;
+        const maxTurns = Math.min(spec.maxTurns ?? 3, ceilings?.maxTurns ?? Infinity);
+        if (
+          ceilings &&
+          ((spec.maxTurns ?? 0) > maxTurns || (spec.maxDurationMs ?? 0) > (maxDurationMs ?? 0))
+        ) {
+          await ctx.log(
+            'info',
+            'Agent task "' +
+              spec.label +
+              '" budget clamped to the cost ceiling: ' +
+              maxTurns.toString() +
+              ' turns, ' +
+              Math.round((maxDurationMs ?? 0) / 1000).toString() +
+              's (node asked for ' +
+              (spec.maxTurns ?? 3).toString() +
+              ' turns, ' +
+              Math.round((spec.maxDurationMs ?? 0) / 1000).toString() +
+              's).',
+          );
+        }
         // An explicit wall-clock budget sizes the per-turn poll budget too.
         // Otherwise the fixed 60s default cut a healthy multi-tool research
         // turn off at ~61s of a 600s maxDurationMs (observed live).
         const maxPolls =
           spec.maxPolls ??
           (maxDurationMs !== undefined ? Math.ceil(maxDurationMs / pollIntervalMs) : 40);
-        const maxTurns = spec.maxTurns ?? 3;
         const maxFailedToolCalls = spec.maxFailedToolCalls;
         const startedAt = Date.now();
         let sessionStateId: string | undefined;

@@ -706,6 +706,26 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
       }
     },
 
+    async navigate(input, _ctx) {
+      const started = Date.now();
+      const handle = sessions.get(input.sessionId);
+      if (!handle) {
+        return failure('navigate', started, new Error('Unknown sessionId'), null, 'BAD_INPUT');
+      }
+      try {
+        handle.snapshot = undefined;
+        const page = await activePage(handle);
+        await page.goto(input.url);
+        return {
+          ok: true as const,
+          data: { url: await page.url() },
+          meta: meta('navigate', started, handle.destination),
+        };
+      } catch (err) {
+        return failure('navigate', started, err, handle.destination);
+      }
+    },
+
     async extract<T = unknown>(
       input: { sessionId: string; instruction: string },
       _ctx: ProviderCallContext,

@@ -151,8 +151,74 @@ assert.equal(calls.closed, 0, 'an explicitly opened session stays available duri
 await executor.closeRunSessions(context.runId, context);
 assert.equal(calls.closed, 1, 'run cleanup releases explicitly opened sessions');
 
+// Pooled research: stateless public searches/reads in one run share ONE
+// session (a session per call exhausted the Browserbase plan), reads prefer
+// the focused region, and a dead pooled session is replaced, not fatal.
+{
+  const pool = { opened: 0, navigated: 0, closed: 0, scopes: [] as string[], failNavigate: false };
+  const pooledAdapter: BrowserAdapter = {
+    ...adapter,
+    async openSession() {
+      pool.opened += 1;
+      return { ok: true, data: { sessionId: 'pooled_' + pool.opened }, meta: meta('openSession') };
+    },
+    async navigate(input) {
+      pool.navigated += 1;
+      if (pool.failNavigate) return { ok: false, error: failure('expired'), meta: meta('navigate') };
+      return { ok: true, data: { url: input.url }, meta: meta('navigate') };
+    },
+    async extract<T>(input: { sessionId: string; instruction: string }) {
+      pool.scopes.push(input.instruction);
+      // No <main> on this page: the scoped read is thin, the whole page is not.
+      const text = input.instruction === 'main' ? '' : 'Product page. Price $120. In stock. '.repeat(10);
+      return { ok: true, data: { text } as T, meta: meta('extract') };
+    },
+    async closeSession() {
+      pool.closed += 1;
+      return { ok: true, data: null, meta: meta('closeSession') };
+    },
+  };
+  const pooled = createBrowserExecutor({
+    provider: () => pooledAdapter,
+    decide: async () => {
+      throw new Error('not used');
+    },
+  });
+  const research = (toolId: string, args: Record<string, string>): ToolAction => ({
+    ...action(toolId),
+    arguments: args,
+  });
+
+  await pooled.execute(research('localbrowser.search', { query: 'black running shoes' }), context);
+  const read = await pooled.execute(
+    research('localbrowser.read', { url: 'https://example.com/p/1', instruction: 'price' }),
+    context,
+  );
+  assert.equal(pool.opened, 1, 'research calls in one run share a single session');
+  assert.equal(pool.navigated, 1, 'the second call navigates the pooled session');
+  assert.equal(pool.closed, 0, 'the pooled session stays open between calls');
+  assert.deepEqual(pool.scopes.slice(-2), ['main', ''], 'a thin <main> falls back to the page');
+  assert.match(JSON.stringify(read.output), /Price \$120/);
+
+  pool.failNavigate = true;
+  await pooled.execute(
+    research('localbrowser.read', { url: 'https://example.com/p/2', instruction: 'price' }),
+    context,
+  );
+  assert.equal(pool.opened, 2, 'a pooled session that cannot navigate is replaced');
+  assert.equal(pool.closed, 1, 'the dead pooled session is released');
+
+  await pooled.closeRunSessions(context.runId, context);
+  assert.equal(pool.closed, 2, 'run cleanup releases the pooled session');
+
+  const secret = { ...research('localbrowser.read', { url: 'https://example.com', instruction: 'x' }) };
+  const opensBefore = pool.opened;
+  await pooled.execute({ ...secret, dataLabels: ['private'] }, context);
+  assert.equal(pool.opened, opensBefore + 1, 'non-public research is never pooled');
+}
+
 console.log(
-  'PASS: browser tools use trusted descriptors, protect sensitive destinations, resolve bounded targets, and release sessions.',
+  'PASS: browser tools use trusted descriptors, protect sensitive destinations, resolve bounded targets, release sessions, and pool public research.',
 );
 
 function action(

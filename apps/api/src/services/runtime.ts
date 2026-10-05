@@ -93,6 +93,7 @@ export const modelGateway = new ModelGatewayService(
   toolRegistry,
   bus,
   {
+    maxToolCallsPerTurn: config.agent.maxToolCallsPerTurn,
     modelRoutes: (adapter) => [
       ...modelRoutesFor(adapter),
       ...anthropicModelRoutes(config.providers.anthropic),
@@ -119,6 +120,7 @@ export const modelGateway = new ModelGatewayService(
 export const orchestrator = new Orchestrator({
   store,
   bus,
+  agentCeilings: { maxTurns: config.agent.maxTurns, maxDurationMs: config.agent.maxDurationMs },
   provider: (capability) => providers.provider(capability),
   providerFor: (capability) => providers.bindings()[capability],
   decisionService,
