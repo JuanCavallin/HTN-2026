@@ -52,11 +52,16 @@ export function ApprovalPanel({
   /**
    * Mint a viewer URL and open it. The window is opened FIRST, synchronously,
    * because a popup opened inside an await is a popup the browser blocks.
+   *
+   * No 'noopener' feature here: with it, window.open returns null, so the
+   * pre-opened tab could never be navigated and the fallback below opened a
+   * SECOND window. Severing the opener by hand gives the same isolation.
    */
   const openLiveView = async () => {
     setOpening(true);
     setError(null);
-    const tab = window.open('', '_blank', 'noopener,noreferrer');
+    const tab = window.open('about:blank', '_blank');
+    if (tab) tab.opener = null;
     try {
       const { liveViewUrl, pageUrl } = await api.browserLiveView(
         approval.runId,
