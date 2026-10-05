@@ -490,12 +490,15 @@ function summarizeMessage(
   dataLabels: DataLabel[];
   tokenEstimate: number;
 } {
-  const text = contentText(message.content);
-  const summary = compactSummary(text);
   const role =
     message.role === 'system' || message.role === 'assistant' || message.role === 'tool'
       ? message.role
       : 'user';
+  const text =
+    role === 'tool'
+      ? unwrapHermesToolEnvelope(contentText(message.content))
+      : contentText(message.content);
+  const summary = compactSummary(text);
   const trustedToolEntry =
     role === 'tool'
       ? [...session.context]
@@ -522,6 +525,23 @@ function summarizeMessage(
     dataLabels,
     tokenEstimate: Math.ceil(text.length / 4),
   };
+}
+
+/**
+ * Hermes wraps external tool results in a fixed prompt-injection envelope
+ * (hermes-agent/agent/tool_dispatch_helpers.py `_maybe_wrap_untrusted`) before
+ * echoing them back. Unwrapped, the body is byte-identical to the MCP result,
+ * so it can match the broker's trusted entry. Without this every browser
+ * result was labelled local_only, which then spread to the whole session and
+ * blocked every cloud route ("No policy-eligible model route is available").
+ *
+ * Unwrapping grants nothing on its own: the body must still equal a summary
+ * AgentOS recorded as public, or it gets local_only as before.
+ */
+const HERMES_TOOL_ENVELOPE = /^<untrusted_tool_result source="[^"\n]*">\n[^\n]*\n\n([\s\S]*)\n<\/untrusted_tool_result>$/;
+
+function unwrapHermesToolEnvelope(text: string): string {
+  return HERMES_TOOL_ENVELOPE.exec(text)?.[1] ?? text;
 }
 
 function contentText(content: unknown): string {
