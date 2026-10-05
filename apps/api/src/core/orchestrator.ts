@@ -589,11 +589,16 @@ export class Orchestrator {
         // (~8s) default was sized for the mock and would cancel a real,
         // healthy call almost immediately.
         const pollIntervalMs = spec.pollIntervalMs ?? 1500;
-        const maxPolls = spec.maxPolls ?? 40;
-        const maxTurns = spec.maxTurns ?? 3;
         // Both undefined by default -- no wall-clock or failure ceiling beyond
         // maxPolls/maxTurns unless the graph author opts in.
         const maxDurationMs = spec.maxDurationMs;
+        // An explicit wall-clock budget sizes the per-turn poll budget too.
+        // Otherwise the fixed 60s default cut a healthy multi-tool research
+        // turn off at ~61s of a 600s maxDurationMs (observed live).
+        const maxPolls =
+          spec.maxPolls ??
+          (maxDurationMs !== undefined ? Math.ceil(maxDurationMs / pollIntervalMs) : 40);
+        const maxTurns = spec.maxTurns ?? 3;
         const maxFailedToolCalls = spec.maxFailedToolCalls;
         const startedAt = Date.now();
         let sessionStateId: string | undefined;
@@ -998,7 +1003,19 @@ export class Orchestrator {
               await sleep(pollIntervalMs);
             }
 
-            if (!turnCompleted) break;
+            if (!turnCompleted) {
+              if (pollAttempts >= maxPolls) {
+                await ctx.log(
+                  'warn',
+                  'Agent task ' +
+                    taskId +
+                    ' was still working when its per-turn poll budget ran out (' +
+                    Math.round((maxPolls * pollIntervalMs) / 1000).toString() +
+                    's); stopping. Raise maxDurationMs or maxPolls on the node.',
+                );
+              }
+              break;
+            }
 
             await bus.emit(runId, {
               type: 'harness.turn',

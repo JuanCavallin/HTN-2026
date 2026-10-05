@@ -7,6 +7,7 @@
  */
 
 import type {
+  AgentGraph,
   AgentSessionState,
   Approval,
   EgressEvent,
@@ -21,6 +22,8 @@ import { isTerminal, stripPiiValue } from '@htn/shared';
 import { pauseRun as gatePauseRun, resumeRun as gateResumeRun } from '../core/pauseGate.js';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
 import { GraphNotFoundError } from './graphs.service.js';
+import { listToolCatalog } from './toolCatalog.js';
+import { formatPreflightIssues, graphPreflightIssues } from '../core/graph/preflight.js';
 import { newId, nowIso } from '../lib/ids.js';
 import type { ListRunsFilter } from '../store/types.js';
 import { bus, orchestrator, store } from './runtime.js';
@@ -33,6 +36,37 @@ export class ValidationError extends Error {
   ) {
     super(message);
     this.name = 'ValidationError';
+  }
+}
+
+/**
+ * Re-check a SAVED graph against the current schema, tool catalog and ref
+ * rules before it runs. Graphs are validated when authored, but can go stale
+ * as the code changes; without this a stale graph failed mid-run, sometimes
+ * after a paid browser session was already open. Only issues certain to break
+ * the run block it; warnings are logged and the run proceeds.
+ */
+async function assertGraphRunnable(graph: AgentGraph): Promise<void> {
+  let catalog: Set<string> | null = null;
+  try {
+    catalog = new Set((await listToolCatalog('sys_graph_preflight')).map((tool) => tool.name));
+  } catch {
+    // An unreadable catalog must not block every run; the tool check is skipped.
+  }
+  const issues = graphPreflightIssues(graph, catalog);
+  const blocking = issues.filter((issue) => issue.severity === 'error');
+  const warnings = issues.filter((issue) => issue.severity === 'warning');
+  if (warnings.length > 0) {
+    console.warn('[graph-preflight] ' + graph.id + ': ' + formatPreflightIssues(warnings));
+  }
+  if (blocking.length > 0) {
+    throw new ValidationError(
+      'Graph "' +
+        graph.name +
+        '" cannot run against the current code: ' +
+        formatPreflightIssues(blocking),
+      { issues: blocking },
+    );
   }
 }
 
@@ -80,6 +114,7 @@ export async function createRun(args: {
     const requested = input as { graphId: string; graphSnapshot?: unknown };
     const graph = await store.getGraph(requested.graphId);
     if (!graph) throw new GraphNotFoundError(requested.graphId);
+    await assertGraphRunnable(graph);
     input = { ...requested, graphSnapshot: graph } as Json;
   }
 

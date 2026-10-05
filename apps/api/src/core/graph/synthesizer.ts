@@ -33,6 +33,7 @@ import {
   type ToolCatalogEntry,
 } from './synthesisPrompt.js';
 import { newId, nowIso } from '../../lib/ids.js';
+import { unknownGraphTools } from './preflight.js';
 
 export interface SynthesisDependencies {
   listTools(conversationId: string): Promise<ToolCatalogEntry[]>;
@@ -285,36 +286,6 @@ export async function synthesiseGraph(
     repairHint,
   );
   throw new SynthesisError('Could not produce a valid graph in two attempts', { repairHint });
-}
-
-function unknownGraphTools(graph: AgentGraph, catalog: Set<string>): string[] {
-  const referenced = new Set<string>();
-  for (const node of graph.nodes) {
-    const config = node.config as Record<string, unknown>;
-    if (node.type === 'tool' || node.type === 'submit') {
-      if (typeof config.tool === 'string') referenced.add(config.tool);
-    }
-    if (node.type === 'dispatch') {
-      for (const tool of Array.isArray(config.candidateTools) ? config.candidateTools : []) {
-        if (typeof tool === 'string') referenced.add(tool);
-      }
-      if (config.args && typeof config.args === 'object' && !Array.isArray(config.args)) {
-        for (const tool of Object.keys(config.args as object)) referenced.add(tool);
-      }
-    }
-    if (node.type === 'agent_task') {
-      for (const tool of Array.isArray(config.availableTools) ? config.availableTools : []) {
-        if (typeof tool === 'string') referenced.add(tool);
-      }
-      for (const tool of Array.isArray(config.toolCeiling) ? config.toolCeiling : []) {
-        if (typeof tool === 'string') referenced.add(tool);
-      }
-    }
-    if (node.type === 'swarm' && typeof config.workerTool === 'string') {
-      referenced.add(config.workerTool);
-    }
-  }
-  return [...referenced].filter((tool) => !catalog.has(tool)).sort();
 }
 
 async function chooseSynthesisMode(
