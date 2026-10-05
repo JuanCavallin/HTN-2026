@@ -72,7 +72,13 @@ function failure<T>(op: string, started: number, err: unknown): ProviderResult<T
 }
 
 export function createLiveAnthropic(cfg: ProviderConfig): TextModelAdapter {
-  const client = new Anthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseUrl });
+  // cfg.baseUrl ends in /v1 for the direct Messages backend (backend.ts), but
+  // the SDK appends /v1/messages itself; passing it through hit /v1/v1/messages
+  // and every synthesis call 404'd with a bare "Not found".
+  const client = new Anthropic({
+    apiKey: cfg.apiKey,
+    baseURL: cfg.baseUrl?.replace(/\/v1\/?$/, ''),
+  });
 
   return {
     id: 'anthropic',
