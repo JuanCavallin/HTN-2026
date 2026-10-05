@@ -542,18 +542,17 @@ const HERMES_TOOL_ENVELOPE = /^<untrusted_tool_result source="[^"\n]*">\n[^\n]*\
 
 function unwrapHermesToolEnvelope(text: string): string {
   const body = HERMES_TOOL_ENVELOPE.exec(text)?.[1] ?? text;
-  // A failed MCP call comes back as exactly {"error": "<our error text>"}; the
-  // MCP server records that text as a trusted entry (core/mcp/server.ts).
+  // Hermes re-encodes an MCP call's text as exactly {"result": "<text>"} on
+  // success or {"error": "<text>"} on failure. The inner text is what AgentOS
+  // recorded (broker for results, core/mcp/server.ts for errors).
   try {
     const parsed: unknown = JSON.parse(body);
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed) &&
-      Object.keys(parsed).length === 1 &&
-      typeof (parsed as { error?: unknown }).error === 'string'
-    ) {
-      return (parsed as { error: string }).error;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const keys = Object.keys(parsed);
+      const value = (parsed as Record<string, unknown>)[keys[0] ?? ''];
+      if (keys.length === 1 && (keys[0] === 'result' || keys[0] === 'error')) {
+        if (typeof value === 'string') return value;
+      }
     }
   } catch {
     // Not JSON: an ordinary tool result.

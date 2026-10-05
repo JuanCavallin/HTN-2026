@@ -229,6 +229,17 @@ async function main(): Promise<void> {
     'a Hermes error echo of a trusted public tool error must not taint the session',
   );
 
+  // A successful call comes back as {"result": "<MCP text>"}, the exact shape
+  // seen live once search started returning results.
+  await call({
+    messages: [{ role: 'tool', content: JSON.stringify({ result: trustedResult }) }],
+  });
+  assert.deepEqual(
+    (await sessions.get(state.id))?.dataLabels,
+    ['public'],
+    'a Hermes result echo of a trusted public tool result must not taint the session',
+  );
+
   await call({
     messages: [{ role: 'tool', content: 'Untrusted raw tool output.' }],
   });

@@ -149,7 +149,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           if (operation === 'search') requiredString(args, 'query');
           else requiredString(args, 'instruction');
           const extracted = await adapter.extract<Json>(
-            { sessionId, instruction: '' },
+            { sessionId, instruction: operation === 'search' ? SEARCH_RESULTS_SCOPE : '' },
             childContext(ctx, 'browser-read'),
           );
           if (!extracted.ok) throw new Error(extracted.error.message);
@@ -259,6 +259,9 @@ function providerFor(toolId: string): BrowserSession['providerId'] {
   throw new Error('Unknown browser provider for tool: ' + toolId);
 }
 
+/** CSS scope of the result list on the search page requestedStartUrl opens. */
+const SEARCH_RESULTS_SCOPE = '#links';
+
 function requestedStartUrl(operation: string, args: Record<string, Json>): string | undefined {
   const explicit = optionalString(args, 'url');
   if (explicit) return normalizeBrowserUrl(explicit);
@@ -268,7 +271,10 @@ function requestedStartUrl(operation: string, args: Record<string, Json>): strin
   }
   if (operation !== 'search') return undefined;
   const query = requiredString(args, 'query');
-  return 'https://www.google.com/search?q=' + encodeURIComponent(query);
+  // Google bot-checks automated browsers (measured on Browserbase: an empty
+  // results page or 'Verifying your request'). DuckDuckGo's HTML endpoint is
+  // server-rendered and answered reliably; its results live in #links.
+  return 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
 }
 
 function normalizeBrowserUrl(value: string): string {

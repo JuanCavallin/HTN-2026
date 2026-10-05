@@ -639,6 +639,22 @@ export function LiveRunWorkspace() {
   // boundary, so the server is the only thing that knows when it took effect.
   const runPaused = view.run?.status === 'paused';
 
+  // A pending approval or handoff blocks the whole run, but the panel sits in
+  // the lane and was easy to miss below the fold or in a background tab. Bring
+  // it into view and flag the tab title until it is decided.
+  const pendingApprovals = view.approvals.filter((approval) => approval.status === 'pending');
+  const firstPendingId = pendingApprovals[0]?.id;
+  const approvalsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!firstPendingId) return;
+    approvalsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const previous = document.title;
+    document.title = '● Action needed · ' + previous;
+    return () => {
+      document.title = previous;
+    };
+  }, [firstPendingId]);
+
   useEffect(() => {
     if (terminal) return;
     const timer = window.setInterval(() => setNow(Date.now()), 500);
@@ -748,9 +764,8 @@ export function LiveRunWorkspace() {
                         'Waiting for a backend update')}
               </WorkingStatus>
             )}
-            {view.approvals
-              .filter((approval) => approval.status === 'pending')
-              .map((approval) => {
+            <div ref={approvalsRef}>
+              {pendingApprovals.map((approval) => {
                 // A handoff approval carries the id of a browser session the
                 // run is holding open. Passing its URL through is what turns
                 // "approve this" into "here is the browser, go and do it".
@@ -763,6 +778,7 @@ export function LiveRunWorkspace() {
                   />
                 );
               })}
+            </div>
             {/* A failed run's summary is usually the error message itself. */}
             {view.run?.error && view.run.error.message !== view.run.summary && (
               <p className="error-note" role="alert">
