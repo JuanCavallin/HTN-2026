@@ -10,6 +10,7 @@ import type { GatewayTurnBinding, SessionStateService } from '../sessions/servic
 import { ToolBrokerError, type ToolBroker } from '../tools/broker.js';
 import type { RegisteredTool, ToolRegistry } from '../tools/registry.js';
 import { modelToolText } from '../tools/executors.js';
+import { compactSummary } from '../modelGateway/service.js';
 
 export interface AgentOsMcpServerDependencies {
   registry: ToolRegistry;
@@ -44,8 +45,10 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
       return toolError('TOOL_NOT_REGISTERED', 'Unknown or unavailable AgentOS tool.');
     }
 
+    let sessionId: string | undefined;
     try {
       const session = await deps.sessions.requireGatewayTurn(deps.binding);
+      sessionId = session.id;
       const result = await deps.broker.execute({
         sessionStateId: session.id,
         expectedTurn: deps.binding.turn,
@@ -64,8 +67,12 @@ export function createAgentOsMcpServer(deps: AgentOsMcpServerDependencies): Serv
         ],
       } satisfies CallToolResult;
     } catch (error) {
-      if (error instanceof ToolBrokerError) return toolError(error.code, error.message);
-      return toolError('TOOL_GATEWAY_FAILED', 'AgentOS refused the tool call.');
+      if (!(error instanceof ToolBrokerError)) {
+        return toolError('TOOL_GATEWAY_FAILED', 'AgentOS refused the tool call.');
+      }
+      const failed = toolError(error.code, error.message);
+      if (sessionId) await recordTrustedError(deps.sessions, sessionId, failed);
+      return failed;
     }
   });
 
@@ -106,6 +113,29 @@ function toMcpTool(registered: RegisteredTool): Tool {
 function toJsonArguments(value: Record<string, unknown> | undefined): Json {
   if (!value) return {};
   return JSON.parse(JSON.stringify(value)) as Json;
+}
+
+/**
+ * Record a broker error as a trusted public tool result, so the model gateway
+ * can match Hermes's echo of it. Without this, one failed call in a public
+ * session was labelled local_only, which spread to the session and blocked
+ * every cloud model for the rest of the run, including later graph nodes.
+ * Only for all-public sessions: a non-public session's error may carry its
+ * data, so its echo stays local_only (the fail-safe default).
+ */
+async function recordTrustedError(
+  sessions: SessionStateService,
+  sessionId: string,
+  failed: CallToolResult,
+): Promise<void> {
+  const session = await sessions.get(sessionId);
+  if (!session || !session.dataLabels.every((label) => label === 'public')) return;
+  const [first] = failed.content;
+  if (first?.type !== 'text') return;
+  const summary = compactSummary(first.text);
+  await sessions.appendContext(sessionId, [
+    { role: 'tool', summary, sanitizedSummary: summary, dataLabels: ['public'] },
+  ]);
 }
 
 function toolError(code: string, message: string): CallToolResult {

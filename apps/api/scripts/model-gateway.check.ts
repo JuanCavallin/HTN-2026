@@ -214,6 +214,21 @@ async function main(): Promise<void> {
     'a Hermes-wrapped echo of a trusted public tool result must not taint the session',
   );
 
+  // A failed call comes back from Hermes as {"error": "<MCP error text>"}; the
+  // MCP server records that text as trusted for public sessions.
+  const trustedError = 'TOOL_EXECUTION_FAILED: Search backend timed out.';
+  await sessions.appendContext(state.id, [
+    { role: 'tool', summary: trustedError, sanitizedSummary: trustedError, dataLabels: ['public'] },
+  ]);
+  await call({
+    messages: [{ role: 'tool', content: JSON.stringify({ error: trustedError }) }],
+  });
+  assert.deepEqual(
+    (await sessions.get(state.id))?.dataLabels,
+    ['public'],
+    'a Hermes error echo of a trusted public tool error must not taint the session',
+  );
+
   await call({
     messages: [{ role: 'tool', content: 'Untrusted raw tool output.' }],
   });

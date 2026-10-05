@@ -541,7 +541,24 @@ function summarizeMessage(
 const HERMES_TOOL_ENVELOPE = /^<untrusted_tool_result source="[^"\n]*">\n[^\n]*\n\n([\s\S]*)\n<\/untrusted_tool_result>$/;
 
 function unwrapHermesToolEnvelope(text: string): string {
-  return HERMES_TOOL_ENVELOPE.exec(text)?.[1] ?? text;
+  const body = HERMES_TOOL_ENVELOPE.exec(text)?.[1] ?? text;
+  // A failed MCP call comes back as exactly {"error": "<our error text>"}; the
+  // MCP server records that text as a trusted entry (core/mcp/server.ts).
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Object.keys(parsed).length === 1 &&
+      typeof (parsed as { error?: unknown }).error === 'string'
+    ) {
+      return (parsed as { error: string }).error;
+    }
+  } catch {
+    // Not JSON: an ordinary tool result.
+  }
+  return body;
 }
 
 function contentText(content: unknown): string {
@@ -561,7 +578,7 @@ function contentText(content: unknown): string {
   return content == null ? '' : JSON.stringify(content);
 }
 
-function compactSummary(text: string): string {
+export function compactSummary(text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized) return '(empty message)';
   return normalized.length <= 320 ? normalized : normalized.slice(0, 317) + '...';

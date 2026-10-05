@@ -140,12 +140,16 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
         }
 
         if (operation === 'search' || operation === 'read' || operation === 'extract') {
-          const instruction =
-            operation === 'search'
-              ? 'Return concise search results for: ' + requiredString(args, 'query')
-              : requiredString(args, 'instruction');
+          // Validated for the schema, but NOT forwarded: adapter.extract reads
+          // `instruction` as an optional CSS scope, so natural language here
+          // became document.querySelector("Return concise search results…"),
+          // which throws in the page and surfaced as an opaque "Uncaught".
+          // Bounded whole-page text is the evidence; the agent already knows
+          // what it is looking for.
+          if (operation === 'search') requiredString(args, 'query');
+          else requiredString(args, 'instruction');
           const extracted = await adapter.extract<Json>(
-            { sessionId, instruction },
+            { sessionId, instruction: '' },
             childContext(ctx, 'browser-read'),
           );
           if (!extracted.ok) throw new Error(extracted.error.message);
