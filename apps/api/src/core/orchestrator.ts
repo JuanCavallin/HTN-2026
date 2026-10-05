@@ -796,6 +796,19 @@ export class Orchestrator {
                 )
               : null;
           if (routeCacheKey && routed?.ok) this.cacheTaskRoute(routeCacheKey, routed.data);
+          if (routed && !routed.ok && availableTools.length > 0) {
+            // Without this the run just shows an agent that never calls a
+            // tool; the reason (e.g. a Jev AUTH failure) was invisible.
+            await ctx.log(
+              'warn',
+              'Subtask "' +
+                spec.label +
+                '" runs with NO tools: Jev routing failed (' +
+                routed.error.code +
+                '): ' +
+                routed.error.message,
+            );
+          }
 
           // FAIL CLOSED, not open — docs/agentos-design.md is explicit:
           // "Routing... failures fail closed; failure never exposes all
