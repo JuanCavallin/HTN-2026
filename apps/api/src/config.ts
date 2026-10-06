@@ -91,10 +91,12 @@ const envSchema = z.object({
     .transform((v) => !/^(0|false|no|off)$/i.test(v)),
   // Cost ceilings for every agent_task, applied at run time (saved graphs keep
   // validating; an over-generous node is clamped and the clamp is logged).
-  // Worst case per task = AGENT_MAX_TURNS x AGENT_MAX_TOOL_CALLS_PER_TURN calls.
-  AGENT_MAX_TURNS: z.coerce.number().int().positive().default(4),
+  // An agent task is ONE Hermes run, re-run only when the agent or its model
+  // could not be reached: worst case per task =
+  // (1 + AGENT_NETWORK_RETRIES) x AGENT_MAX_TOOL_CALLS_PER_TURN tool calls.
   AGENT_MAX_DURATION_MS: z.coerce.number().int().positive().default(300_000),
   AGENT_MAX_TOOL_CALLS_PER_TURN: z.coerce.number().int().positive().default(8),
+  AGENT_NETWORK_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
   BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
   BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
@@ -346,9 +348,9 @@ export const config = Object.freeze({
     release: env.SENTRY_RELEASE,
   },
   agent: {
-    maxTurns: env.AGENT_MAX_TURNS,
     maxDurationMs: env.AGENT_MAX_DURATION_MS,
     maxToolCallsPerTurn: env.AGENT_MAX_TOOL_CALLS_PER_TURN,
+    networkRetries: env.AGENT_NETWORK_RETRIES,
   },
   browser: {
     backend: env.BROWSER_BACKEND,

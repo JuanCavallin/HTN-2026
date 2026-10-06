@@ -20,6 +20,10 @@ import { ToolBroker } from '../core/tools/broker.js';
 import { InMemoryToolExecutorRegistry } from '../core/tools/executors.js';
 import { InMemoryToolRegistry } from '../core/tools/registry.js';
 import { registerCoreLocalTools } from '../core/tools/local.js';
+import { registerDocumentTools } from '../core/tools/documents.js';
+import { registerSearchTool } from '../core/tools/search.js';
+import { credentials } from './credentials.js';
+import { resolveBrowserSessionProvider } from '../providers/withBrowserOwnership.js';
 import { registerBrowserTools } from '../core/tools/index.js';
 import { SessionStateService } from '../core/sessions/service.js';
 import { nowIso } from '../lib/ids.js';
@@ -69,8 +73,39 @@ export const toolBroker = new ToolBroker(
   },
 );
 registerCoreLocalTools(toolRegistry, toolExecutors, sessionStateService);
+registerDocumentTools(toolRegistry, toolExecutors, { mode: config.mock.all ? 'mock' : 'live' });
+registerSearchTool(toolRegistry, toolExecutors, {
+  browser: () => providers.provider('browser'),
+  recordEgress,
+});
 export const browserTools = registerBrowserTools(toolRegistry, toolExecutors, {
   provider: (capability) => providers.provider(capability),
+  byId: (id) => providers.byId(id) as import('@htn/shared').BrowserAdapter,
+  // Sessions an agent opens through its tools reach the run's browser panel
+  // the same way a graph node's do.
+  onSession: async (event) => {
+    if (event.phase === 'closed') {
+      await bus.emit(event.runId, {
+        type: 'browser.session.closed',
+        runId: event.runId,
+        sessionId: event.sessionId,
+        at: nowIso(),
+      });
+      return;
+    }
+    await bus.emit(event.runId, {
+      type: 'browser.session.opened',
+      session: {
+        runId: event.runId,
+        sessionId: event.sessionId,
+        ...(event.stepId ? { stepId: event.stepId } : {}),
+        providerId: event.providerId,
+        interactive: event.interactive,
+        mode: event.mode,
+        openedAt: nowIso(),
+      },
+    });
+  },
 });
 export const composioToolCatalog = new ComposioToolCatalog(
   providers.provider('toolbox'),
@@ -93,6 +128,19 @@ export const modelGateway = new ModelGatewayService(
   toolRegistry,
   bus,
   {
+    routeAvailable: (route, ctx) => {
+      if (
+        !config.mock.all &&
+        config.providers.hermes.mode === 'live' &&
+        route.modelId.startsWith('mock-')
+      )
+        return false;
+      return (
+        config.mock.all ||
+        route.deployment === 'local' ||
+        credentials.available({ runId: ctx.runId, providerId: route.providerId, purpose: 'model' })
+      );
+    },
     maxToolCallsPerTurn: config.agent.maxToolCallsPerTurn,
     modelRoutes: (adapter) => [
       ...modelRoutesFor(adapter),
@@ -111,7 +159,9 @@ export const modelGateway = new ModelGatewayService(
           config.providers.anthropic,
           recordEgress,
           textAdapterBackend(boundTextModel),
+          credentials,
         ),
+        credentials,
       ),
     ),
   },
@@ -120,9 +170,16 @@ export const modelGateway = new ModelGatewayService(
 export const orchestrator = new Orchestrator({
   store,
   bus,
-  agentCeilings: { maxTurns: config.agent.maxTurns, maxDurationMs: config.agent.maxDurationMs },
+  agentCeilings: {
+    maxDurationMs: config.agent.maxDurationMs,
+    networkRetries: config.agent.networkRetries,
+  },
   provider: (capability) => providers.provider(capability),
   providerFor: (capability) => providers.bindings()[capability],
+  browserForSession: (sessionId, runId) =>
+    providers.byId(
+      resolveBrowserSessionProvider(sessionId, runId),
+    ) as import('@htn/shared').BrowserAdapter,
   decisionService,
   sessionStateService,
   toolRegistry,
@@ -138,8 +195,10 @@ export const orchestrator = new Orchestrator({
       .filter(
         (tool) =>
           tool.descriptor.availability === 'available' &&
-          (tool.descriptor.providerId === 'localbrowser' ||
-            tool.descriptor.providerId === 'browserbase'),
+          (tool.descriptor.id === 'web.search' ||
+            tool.descriptor.transport === 'local' ||
+            tool.descriptor.providerId === 'browserbase' ||
+            tool.descriptor.providerId === 'browserless'),
       )
       .map((tool) => tool.descriptor.id);
     return [...new Set([...mcpToolIds, ...browserToolIds])];
@@ -148,7 +207,8 @@ export const orchestrator = new Orchestrator({
     const ctx = { runId, stepId, policyRule: 'agent-task-resource-release' };
     await browserTools.closeRunSessions(runId, ctx);
     await Promise.all(
-      [providers.provider('browser'), providers.provider('browser.local')].map(async (browser) => {
+      (['browserbase', 'browserless', 'localbrowser'] as const).map(async (id) => {
+        const browser = providers.byId(id) as import('@htn/shared').BrowserAdapter;
         if (browser.releaseRun) await browser.releaseRun(runId, ctx);
       }),
     );

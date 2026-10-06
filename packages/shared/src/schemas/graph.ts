@@ -261,6 +261,10 @@ export const agentTaskNodeSchema = nodeVariant(
     maxPolls: z.number().int().min(1).max(2000).optional(),
     inactivityTimeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
     maxDurationMs: z.number().int().min(1000).max(1_800_000).optional(),
+    /**
+     * Accepted so saved graphs keep validating, and ignored: an agent task is
+     * one Hermes run, judged once by Jev, and never re-prompted for more turns.
+     */
     maxTurns: z.number().int().min(1).max(20).optional(),
     maxFailedToolCalls: z.number().int().min(0).max(100).optional(),
   }),

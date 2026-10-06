@@ -26,6 +26,12 @@ import {
 } from './eligibility.js';
 
 export interface DecisionServiceOptions {
+  /**
+   * Below this, an action-policy recommendation is escalated one step towards a
+   * human (never relaxed). It is the only confidence floor: model routes and
+   * completion verdicts follow Jev at any confidence, because overriding them
+   * re-ran agent turns that had already finished their work.
+   */
   minimumConfidence?: number;
   maximumTools?: number;
   now?: () => string;
@@ -133,14 +139,8 @@ export class DecisionService {
         reasonCodes: ['jev-returned-ineligible-model', 'deterministic-model-fallback'],
       };
     }
-    if (result.data.confidence < this.minimumConfidence) {
-      return {
-        selectedRouteId: fallback.id,
-        confidence: result.data.confidence,
-        probabilities: result.data.probabilities,
-        reasonCodes: [...result.data.reasonCodes, 'low-confidence-model-fallback'],
-      };
-    }
+    // An eligible pick stands at any confidence. Swapping a low-confidence pick
+    // for the cheapest route changed the model mid-task for no policy reason.
     return result.data;
   }
 
@@ -280,35 +280,24 @@ export class DecisionService {
       judgment = result.ok
         ? result.data
         : {
-            status: this.fallbackCompletion(checkpoint),
+            status:
+              verificationFailures.length === 0 ? 'done' : this.fallbackCompletion(checkpoint),
             confidence: 0,
             probabilities: {},
             reasonCodes: ['jev-completion-failed', 'deterministic-completion-fallback'],
           };
     }
 
-    if (
-      judgment.status === 'done' &&
-      (verificationFailures.length > 0 || judgment.confidence < this.minimumConfidence)
-    ) {
-      return {
-        ...judgment,
-        status: this.fallbackCompletion(checkpoint),
-        verified: false,
-        verificationFailures: [
-          ...verificationFailures,
-          ...(judgment.confidence < this.minimumConfidence
-            ? ['completion-confidence-too-low']
-            : []),
-        ],
-        reasonCodes: [...judgment.reasonCodes, 'done-rejected-by-verifier'],
-      };
-    }
-
+    // Jev's verdict stands at any confidence and is never rewritten. Rewriting
+    // a low-confidence or unverified `done` into `continue` bought another full
+    // agent turn that redid finished work. A failed deterministic check is
+    // reported beside the verdict (`verified: false`), not substituted for it.
+    const unverifiedDone = judgment.status === 'done' && verificationFailures.length > 0;
     return {
       ...judgment,
       verified: judgment.status === 'done' && verificationFailures.length === 0,
       verificationFailures,
+      ...(unverifiedDone ? { reasonCodes: [...judgment.reasonCodes, 'done-unverified'] } : {}),
     };
   }
 
