@@ -103,6 +103,9 @@ export function graphPreflightIssues(
     for (const ref of collectRefs(node.config)) {
       const [root, next] = ref.split('.');
       if (root === 'input' || root === undefined) continue;
+      // A swarm worker's {{item}} is bound per worker by the interpreter
+      // (workerScope in interpreter.ts), not by a node.
+      if (root === 'item' && node.type === 'swarm') continue;
       const source = byId.get(root);
       if (!source) {
         issues.push({ kind: 'ref', severity: 'error', nodeId: node.id, message: '{{' + ref + '}}: no node "' + root + '"' });

@@ -18,8 +18,13 @@ import type {
   Step,
   StoredEvent,
 } from '@htn/shared';
-import { isTerminal, stripPiiValue } from '@htn/shared';
-import { pauseRun as gatePauseRun, resumeRun as gateResumeRun } from '../core/pauseGate.js';
+import { isTerminal, stripPiiValue, type BaselineInput } from '@htn/shared';
+import { buildBaselineTask } from '../core/playbooks/baselineTask.js';
+import {
+  pauseHeldSince,
+  pauseRun as gatePauseRun,
+  resumeRun as gateResumeRun,
+} from '../core/pauseGate.js';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
 import { GraphNotFoundError } from './graphs.service.js';
 import { listToolCatalog } from './toolCatalog.js';
@@ -27,6 +32,8 @@ import { formatPreflightIssues, graphPreflightIssues } from '../core/graph/prefl
 import { newId, nowIso } from '../lib/ids.js';
 import type { ListRunsFilter } from '../store/types.js';
 import { bus, orchestrator, store } from './runtime.js';
+import { browserControlStatesForRun } from '../providers/withBrowserOwnership.js';
+import { credentials } from './credentials.js';
 
 export class ValidationError extends Error {
   readonly code = 'VALIDATION_ERROR';
@@ -89,6 +96,7 @@ export async function createRun(args: {
   kind: string;
   input: unknown;
   title?: string;
+  principalId?: string;
 }): Promise<Run> {
   const playbook = getPlaybook(args.kind);
   if (!playbook) {
@@ -117,6 +125,12 @@ export async function createRun(args: {
     await assertGraphRunnable(graph);
     input = { ...requested, graphSnapshot: graph } as Json;
   }
+  let baselineGraphName: string | undefined;
+  if (args.kind === 'baseline' || args.kind === 'baseline_agent') {
+    const resolved = await resolveBaselineInput(parsed.data as BaselineInput);
+    input = resolved.input as unknown as Json;
+    baselineGraphName = resolved.graphName;
+  }
 
   const at = nowIso();
   const parsedObject =
@@ -125,7 +139,13 @@ export async function createRun(args: {
   const run: Run = {
     id: newId('run'),
     kind: args.kind,
-    title: args.title ?? (args.kind === 'graph' ? playbookTitleFor(input) : playbook.title),
+    title:
+      args.title ??
+      (args.kind === 'graph'
+        ? playbookTitleFor(input)
+        : baselineGraphName
+          ? playbook.title + ': ' + baselineGraphName
+          : playbook.title),
     status: 'pending',
     input,
     ...(graphId ? { graphId } : {}),
@@ -133,6 +153,7 @@ export async function createRun(args: {
     updatedAt: at,
   };
 
+  credentials.bindRun(run.id, args.principalId);
   await store.createRun(run);
   await bus.emit(run.id, { type: 'run.updated', run });
 
@@ -140,6 +161,48 @@ export async function createRun(args: {
   orchestrator.start(run);
 
   return run;
+}
+
+/**
+ * Give a baseline THE GRAPH'S TASK, snapshotted at creation like a graph run
+ * snapshots its graph: the chat request that built the graph, the run's
+ * variables, and the graph's inline source text, plus the assertions and
+ * answer fields it will be judged by. See core/playbooks/baselineTask.ts.
+ */
+async function resolveBaselineInput(
+  requested: BaselineInput,
+): Promise<{ input: BaselineInput; graphName?: string }> {
+  // Older callers sent only `target`, which is the demo graph's one variable.
+  const variables =
+    Object.keys(requested.variables).length > 0
+      ? requested.variables
+      : { target: requested.target };
+  if (!requested.graphId) {
+    return { input: { ...requested, variables, promptSource: 'legacy_case_file' } };
+  }
+  const graph = await store.getGraph(requested.graphId);
+  if (!graph) throw new GraphNotFoundError(requested.graphId);
+  if (requested.prompt) {
+    return { input: { ...requested, variables }, graphName: graph.name };
+  }
+
+  const requests = (await store.listConversations())
+    .filter((conversation) => conversation.graphId === graph.id)
+    .flatMap((conversation) => conversation.messages)
+    .filter((message) => message.role === 'user')
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .map((message) => message.text);
+  const task = buildBaselineTask({ graph, requests, variables });
+  return {
+    input: {
+      ...requested,
+      variables,
+      ...task,
+      graphVersion: graph.version,
+      ...(graph.assertions ? { assertions: graph.assertions } : {}),
+    },
+    graphName: graph.name,
+  };
 }
 
 /** A graph run is more useful named after its graph than after the playbook. */
@@ -217,17 +280,51 @@ export async function pauseRun(id: string): Promise<Run | null> {
 export async function resumeRun(id: string): Promise<Run | null> {
   const run = await store.getRun(id);
   if (!run) return null;
+  if (
+    browserControlStatesForRun(id).some(
+      (state) => state.owner === 'human' || state.phase !== 'agent_running',
+    )
+  ) {
+    throw new ValidationError(
+      'Return browser control through the Action workspace before resuming the run.',
+    );
+  }
+  if ((await store.listApprovals(id)).some((approval) => approval.status === 'pending')) {
+    throw new ValidationError('Resolve pending approvals before resuming the run.');
+  }
 
+  // Written BEFORE releasing the latch: patchRun is read-modify-write, and the
+  // orchestrator's own `status: running` patch fires the moment the latch
+  // opens. Recording first means that later patch already carries the span.
+  // (A held latch implies gateResumeRun below succeeds.)
+  await closePauseSpan(id, pauseHeldSince(id));
   if (!gateResumeRun(id)) {
     throw new ValidationError('Run ' + id + ' is not paused', { status: run.status });
   }
   return run;
 }
 
+/**
+ * Record the stretch a run sat fully paused, so analytics can leave it out of
+ * the run's time (see PauseSpan). Only written once the pause actually took
+ * hold; a pause requested and released mid-drain records nothing.
+ */
+async function closePauseSpan(runId: string, heldAt: string | undefined): Promise<void> {
+  if (!heldAt) return;
+  const current = await store.getRun(runId);
+  if (!current) return;
+  const run = await store.patchRun(runId, {
+    pauses: [...(current.pauses ?? []), { at: heldAt, resumedAt: nowIso() }],
+  });
+  await bus.emit(runId, { type: 'run.updated', run });
+}
+
 export async function cancelRun(id: string): Promise<Run | null> {
   const run = await store.getRun(id);
   if (!run) return null;
 
+  // A run cancelled while paused still spent that time paused.
+  await closePauseSpan(id, pauseHeldSince(id));
   const stopped = orchestrator.cancel(id);
   if (!stopped) {
     // Not executing in this process (e.g. after a restart). Mark it terminal

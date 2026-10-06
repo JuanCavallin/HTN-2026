@@ -2,6 +2,7 @@ import type {
   AgentSessionState,
   AgentSessionStatus,
   DataLabel,
+  ModelCostTier,
   SessionBudget,
   SessionCheckpoint,
   SessionContextEntry,
@@ -34,6 +35,7 @@ export interface CreateSessionStateInput {
   toolCeiling?: string[];
   boundBrowserSessionId?: string;
   contextScopeId?: string;
+  pinnedCostTier?: ModelCostTier;
 }
 
 /**
@@ -125,6 +127,7 @@ export class SessionStateService {
       candidateModelRouteIds: input.candidateModelRouteIds ?? [],
       candidateToolIds: input.candidateToolIds ?? [],
       taskToolIds: input.taskToolIds,
+      ...(input.pinnedCostTier ? { pinnedCostTier: input.pinnedCostTier } : {}),
       boundBrowserSessionId: input.boundBrowserSessionId,
       selectedToolIds: [],
       budget: input.budget,
