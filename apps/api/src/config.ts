@@ -73,10 +73,22 @@ const envSchema = z.object({
   JEV_BASE_URL: optionalUrl,
 
   BROWSERBASE_MODE: modeEnum.default('mock'),
+  BROWSER_BACKEND: z.enum(['browserbase', 'browserless', 'localbrowser']).default('browserbase'),
+  BROWSERLESS_MODE: modeEnum.default('mock'),
+  BROWSERLESS_API_KEY: optionalString,
+  BROWSERLESS_BASE_URL: optionalUrl,
+  BROWSERLESS_SESSION_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  BROWSER_VIEWER_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  CREDENTIAL_SOURCE: z.enum(['operator', 'user']).default('user'),
+  BROWSER_CREDENTIAL_SOURCE: z.enum(['operator', 'user']).default('operator'),
   BROWSERBASE_API_KEY: optionalString,
   BROWSERBASE_PROJECT_ID: optionalString,
   LOCALBROWSER_MODE: modeEnum.default('mock'),
   LOCALBROWSER_CHANNEL: optionalString,
+  LOCALBROWSER_HEADLESS: z
+    .string()
+    .default('true')
+    .transform((v) => !/^(0|false|no|off)$/i.test(v)),
   // Cost ceilings for every agent_task, applied at run time (saved graphs keep
   // validating; an over-generous node is clamped and the clamp is logged).
   // Worst case per task = AGENT_MAX_TURNS x AGENT_MAX_TOOL_CALLS_PER_TURN calls.
@@ -90,6 +102,9 @@ const envSchema = z.object({
   BROWSER_ACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(4_000),
   BROWSER_SETTLE_MS: z.coerce.number().int().min(0).default(50),
   BROWSER_SETTLE_SELECT_MS: z.coerce.number().int().min(0).default(200),
+  WEB_SEARCH_BACKEND: z.enum(['browser', 'tavily']).default('browser'),
+  WEB_SEARCH_MODE: modeEnum.default('mock'),
+  TAVILY_API_KEY: optionalString,
 
   COMPOSIO_MODE: modeEnum.default('mock'),
   COMPOSIO_API_KEY: optionalString,
@@ -156,6 +171,7 @@ export interface ProviderConfig {
   cwd?: string;
   /** Installed Playwright browser channel (local browser only). */
   channel?: string;
+  headless?: boolean;
   /** Isolated provider profile directory (Hermes only). */
   profileDir?: string;
   /** AgentOS-owned MCP endpoint injected into the isolated Hermes profile. */
@@ -191,7 +207,15 @@ function resolve(
 ): ProviderConfig {
   let mode: ProviderMode = requested;
   if (env.MOCK_ALL) mode = 'mock';
-  else if (requested === 'live' && !apiKey) mode = 'mock';
+  else if (requested === 'live' && !apiKey) {
+    const browserKey = keyVar.startsWith('BROWSER');
+    const userSource = browserKey
+      ? (env.BROWSER_CREDENTIAL_SOURCE ?? env.CREDENTIAL_SOURCE) === 'user'
+      : ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'AI_GATEWAY_API_KEY', 'JEV_API_KEY'].includes(
+          keyVar,
+        ) && env.CREDENTIAL_SOURCE === 'user';
+    if (!userSource) mode = 'mock';
+  }
   return { mode, apiKey, keyVar, ...extra };
 }
 
@@ -235,7 +259,12 @@ function resolveLocalBrowser(): ProviderConfig {
   let mode: ProviderMode = env.LOCALBROWSER_MODE;
   if (env.MOCK_ALL) mode = 'mock';
   else if (mode === 'live' && !env.LOCALBROWSER_CHANNEL) mode = 'mock';
-  return { mode, channel: env.LOCALBROWSER_CHANNEL, keyVar: 'LOCALBROWSER_CHANNEL' };
+  return {
+    mode,
+    channel: env.LOCALBROWSER_CHANNEL,
+    headless: env.LOCALBROWSER_HEADLESS,
+    keyVar: 'LOCALBROWSER_CHANNEL',
+  };
 }
 
 const providers: Record<ProviderId, ProviderConfig> = {
@@ -248,6 +277,9 @@ const providers: Record<ProviderId, ProviderConfig> = {
   ),
   browserbase: resolve(env.BROWSERBASE_MODE, env.BROWSERBASE_API_KEY, 'BROWSERBASE_API_KEY', {
     projectId: env.BROWSERBASE_PROJECT_ID,
+  }),
+  browserless: resolve(env.BROWSERLESS_MODE, env.BROWSERLESS_API_KEY, 'BROWSERLESS_API_KEY', {
+    baseUrl: env.BROWSERLESS_BASE_URL ?? 'https://production-sfo.browserless.io',
   }),
   localbrowser: resolveLocalBrowser(),
   composio: resolve(env.COMPOSIO_MODE, env.COMPOSIO_API_KEY, 'COMPOSIO_API_KEY', {
@@ -319,6 +351,9 @@ export const config = Object.freeze({
     maxToolCallsPerTurn: env.AGENT_MAX_TOOL_CALLS_PER_TURN,
   },
   browser: {
+    backend: env.BROWSER_BACKEND,
+    viewerTimeoutMs: env.BROWSER_VIEWER_TIMEOUT_MS,
+    sessionTimeoutMs: env.BROWSERLESS_SESSION_TIMEOUT_MS,
     maxSessions: env.BROWSER_MAX_SESSIONS,
     timeoutMs: env.BROWSER_TIMEOUT_MS,
     decisionTimeoutMs: env.BROWSER_DECISION_TIMEOUT_MS,
@@ -327,7 +362,16 @@ export const config = Object.freeze({
     settleMs: env.BROWSER_SETTLE_MS,
     settleSelectMs: env.BROWSER_SETTLE_SELECT_MS,
   },
+  webSearch: {
+    backend: env.WEB_SEARCH_BACKEND,
+    mode: env.MOCK_ALL ? 'mock' : env.WEB_SEARCH_MODE,
+    apiKey: env.TAVILY_API_KEY,
+  },
   providers,
+  credentials: {
+    source: env.CREDENTIAL_SOURCE,
+    browserSource: env.BROWSER_CREDENTIAL_SOURCE ?? env.CREDENTIAL_SOURCE,
+  },
 });
 
 export function logConfigSummary(): void {

@@ -53,6 +53,7 @@
 import { browserbase, Stagehand, type StagehandBrowser } from '@browserbasehq/stagehand';
 import type {
   BrowserAdapter,
+  BrowserViewer,
   BrowserPerformResult,
   ElementRow,
   ElementTable,
@@ -62,6 +63,10 @@ import type {
 } from '@htn/shared';
 import { BROWSERBASE_API_DESTINATION, needsTarget } from '@htn/shared';
 import { config, type ProviderConfig } from '../../config.js';
+import { browserLocation, browserFailure } from '../browserSafety.js';
+import { notifyBrowserSessionClosed } from '../withBrowserOwnership.js';
+
+import { credentials, type ResolvedCredential } from '../../services/credentials.js';
 
 /**
  * The live-view URL comes from Browserbase's REST API, called directly.
@@ -96,6 +101,8 @@ interface Handle {
   startUrl?: string;
   /** Region-specific where known; approvals bind to this. */
   destination: string;
+  credential: ResolvedCredential;
+  runId: string;
   snapshot?: Snapshot;
 }
 
@@ -139,6 +146,7 @@ const COLLECT_ROWS = `(() => {
   document.querySelectorAll(SEL).forEach((el, domIndex) => {
     const style = window.getComputedStyle(el);
     const visible =
+      !el.closest('[hidden], [aria-hidden="true"]') &&
       el.getClientRects().length > 0 &&
       style.visibility !== 'hidden' &&
       style.display !== 'none' &&
@@ -156,7 +164,7 @@ const COLLECT_ROWS = `(() => {
         el.getAttribute('alt') ||
         ''
       ),
-      value: (el.value === undefined || el.value === null) ? '' : String(el.value),
+      value: (el.type === 'password' || /password|passcode|secret|token|credential|otp|mfa|one-time-code/i.test([el.name || '', el.id || '', el.getAttribute('autocomplete') || '', el.getAttribute('aria-label') || ''].join(' ')) || el.value === undefined || el.value === null) ? '' : String(el.value),
       visible,
     });
   });
@@ -268,7 +276,7 @@ function failure<T>(
     ok: false,
     error: {
       code,
-      message: err instanceof Error ? err.message : String(err),
+      message: browserFailure(err),
       retryable: code === 'UPSTREAM',
     },
     meta: meta(op, started, destination),
@@ -430,6 +438,15 @@ async function liveViewUrl(
 
 export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
   const sessions = new Map<string, Handle>();
+  credentials.onInvalidate((reference, providerId) => {
+    if (providerId !== 'browserbase') return;
+    for (const [sessionId, handle] of sessions) {
+      if (handle.credential.reference !== reference) continue;
+      sessions.delete(sessionId);
+      notifyBrowserSessionClosed(sessionId);
+      void handle.browser.close().catch(() => undefined);
+    }
+  });
 
   /**
    * `model` is OPTIONAL on Stagehand.create, and that one fact is what makes
@@ -464,8 +481,15 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
   }
 
   async function activePage(handle: Handle) {
-    const page = await handle.browser.context.activePage();
-    return page ?? (await handle.browser.context.newPage());
+    credentials.assertCurrent(handle.credential.reference, {
+      runId: handle.runId,
+      providerId: 'browserbase',
+      purpose: 'browser',
+    });
+    const page =
+      (await handle.browser.context.activePage()) ?? (await handle.browser.context.newPage());
+    await page.setViewportSize(1280, 720);
+    return page;
   }
 
   async function buildTable(
@@ -506,7 +530,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
       table: {
         snapshotId: id,
         sessionId,
-        url: await page.url(),
+        url: browserLocation(await page.url()),
         title: await page.title().catch(() => ''),
         capturedAt: new Date().toISOString(),
         rows,
@@ -547,7 +571,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
 
     async health() {
       const started = Date.now();
-      if (!cfg.apiKey || !cfg.projectId) {
+      if (config.credentials.browserSource === 'operator' && (!cfg.apiKey || !cfg.projectId)) {
         return {
           ok: false,
           error: {
@@ -580,7 +604,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
       );
     },
 
-    async openSession(input, _ctx: ProviderCallContext) {
+    async openSession(input, ctx: ProviderCallContext) {
       const started = Date.now();
 
       if (sessions.size >= config.browser.maxSessions) {
@@ -598,26 +622,27 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         );
       }
 
-      if (!cfg.apiKey || !cfg.projectId) {
-        return failure(
-          'openSession',
-          started,
-          new Error('BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID not configured'),
-          null,
-          'AUTH',
-        );
-      }
-
       let browser: StagehandBrowser | undefined;
       let stagehand: Stagehand | undefined;
+      let credential: ResolvedCredential | undefined;
       try {
-        browser = await browserbase.launch({ apiKey: cfg.apiKey, projectId: cfg.projectId });
+        credential = await credentials.require({
+          runId: ctx.runId,
+          providerId: 'browserbase',
+          purpose: 'browser',
+        });
+        const projectId = credential.metadata?.projectId;
+        if (!projectId)
+          throw new Error('Browserbase project ID is required with the browser credential.');
+        browser = await browserbase.launch({ apiKey: credential.secret, projectId });
 
         // Stagehand MUST be attached before `browser.context` is usable — the
         // handle alone raises "Browser context is unavailable". So it is
         // created here, but WITHOUT a model unless we have a key. See
         // modelOptions().
         stagehand = await Stagehand.create({ browser, ...modelOptions() });
+        const current = await browser.context.activePage();
+        if (current) await current.setViewportSize(1280, 720);
 
         if (input.startUrl) {
           // Navigate the session's existing first tab. newPage(startUrl) left
@@ -625,15 +650,17 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           // the human at a handoff, and the agent could each end up on a
           // different tab.
           const [first] = await browser.context.pages();
-          if (first) await first.goto(input.startUrl);
-          else await browser.context.newPage(input.startUrl);
+          if (first) {
+            await first.setViewportSize(1280, 720);
+            await first.goto(input.startUrl);
+          } else await browser.context.newPage(input.startUrl);
         }
 
         const remoteSessionId = browser.sessionId;
         // Capture the live-view URL NOW. sessions.debug() returns 410 Gone once
         // the session stops, so there is no second chance at this.
         const view = remoteSessionId
-          ? await liveViewUrl(cfg.apiKey, remoteSessionId, input.startUrl)
+          ? await liveViewUrl(credential.secret, remoteSessionId, input.startUrl)
           : {};
 
         const destination = view.region
@@ -647,6 +674,8 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           browser,
           stagehand,
           destination,
+          credential,
+          runId: ctx.runId,
           ...(remoteSessionId ? { remoteSessionId } : {}),
           ...(input.startUrl ? { startUrl: input.startUrl } : {}),
         });
@@ -655,11 +684,8 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           ok: true as const,
           data: {
             sessionId,
-            // `debuggerFullscreenUrl` is Browserbase's INTERACTIVE debug view,
-            // not a recording: a person can genuinely click and type in it.
-            // That is what makes a `handoff` node possible, so the flag is
-            // tied to having that exact URL and nothing else.
-            ...(view.url ? { liveViewUrl: view.url, interactive: true } : {}),
+            // Input is mediated by AgentOS's owner-checked stream bridge.
+            interactive: true,
           },
           meta: meta('openSession', started, destination),
         };
@@ -668,7 +694,9 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         // an id for. Release it here or it burns a slot until it times out.
         await browser?.close().catch(() => {});
         if (err instanceof Error && err.name === 'BrowserbaseSessionError') {
-          const reason = await explainCreateFailure(cfg.apiKey, cfg.projectId);
+          const reason = credential?.metadata?.projectId
+            ? await explainCreateFailure(credential.secret, credential.metadata.projectId)
+            : undefined;
           if (reason) {
             return failure(
               'openSession',
@@ -698,7 +726,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         const page = await handle.browser.context.activePage();
         return {
           ok: true as const,
-          data: { url: (await page?.url()) ?? '' },
+          data: { url: browserLocation((await page?.url()) ?? '') },
           meta: meta('act', started, handle.destination),
         };
       } catch (err) {
@@ -718,7 +746,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         await page.goto(input.url);
         return {
           ok: true as const,
-          data: { url: await page.url() },
+          data: { url: browserLocation(await page.url()) },
           meta: meta('navigate', started, handle.destination),
         };
       } catch (err) {
@@ -756,7 +784,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           return {
             ok: true as const,
             data: {
-              url: await page.url(),
+              url: browserLocation(await page.url()),
               title: await page.title().catch(() => ''),
               text: truncate(text ?? '', 4000),
             } as T,
@@ -832,7 +860,11 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           handle.snapshot = undefined;
           return {
             ok: true as const,
-            data: { operation: input.operation, url: await page.url(), navigated: false },
+            data: {
+              operation: input.operation,
+              url: browserLocation(await page.url()),
+              navigated: false,
+            },
             meta: meta('perform', started, handle.destination),
           };
         }
@@ -924,7 +956,7 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
           data: {
             operation: input.operation,
             index: input.index,
-            url,
+            url: browserLocation(url),
             navigated: url !== urlBefore,
           },
           meta: meta('perform', started, handle.destination),
@@ -944,30 +976,122 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
      * accepts no input; a freshly minted one for the SAME session renders the
      * live page and is interactive.
      */
-    async liveView(sessionId, _ctx) {
+    async viewer(input, _ctx) {
       const started = Date.now();
-      const handle = sessions.get(sessionId);
-      // No key means no REST call, so no viewer -- same normal, non-error state
-      // as a session we do not hold.
-      if (!handle?.remoteSessionId || !cfg.apiKey) {
-        // Not an error: a session we do not hold, or one with no remote id,
-        // simply has no viewer. The caller renders that state.
+      const handle = sessions.get(input.sessionId);
+      if (!handle)
+        return failure('viewer', started, new Error('Unknown sessionId'), null, 'BAD_INPUT');
+      try {
+        const page = await activePage(handle);
         return {
           ok: true as const,
-          data: { interactive: false },
-          meta: meta('liveView', started, handle?.destination ?? null),
+          data: {
+            providerId: 'browserbase' as const,
+            mode: 'live' as const,
+            kind: 'stream' as const,
+            owner: 'agent' as const,
+            revision: 0,
+            phase: 'agent_running' as const,
+            pageUrl: browserLocation(await page.url()),
+            interactive: input.mode === 'control',
+            canWatch: true,
+            canControl: true,
+            width: 1280,
+            height: 720,
+          },
+          meta: meta('viewer', started, handle.destination),
         };
+      } catch (err) {
+        return failure('viewer', started, err, handle.destination);
       }
-
-      const view = await liveViewUrl(cfg.apiKey, handle.remoteSessionId, handle.startUrl);
+    },
+    async liveView(sessionId, _ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure('liveView', Date.now(), new Error('Unknown sessionId'), null, 'BAD_INPUT');
+      const page = await activePage(handle);
       return {
         ok: true as const,
-        data: {
-          ...(view.url ? { liveViewUrl: view.url } : {}),
-          ...(view.pageUrl ? { pageUrl: view.pageUrl } : {}),
-          interactive: Boolean(view.url),
-        },
-        meta: meta('liveView', started, handle.destination),
+        data: { pageUrl: browserLocation(await page.url()), interactive: true },
+        meta: meta('liveView', Date.now(), handle.destination),
+      };
+    },
+    async captureFrame(sessionId, _ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure(
+          'captureFrame',
+          Date.now(),
+          new Error('Unknown sessionId'),
+          null,
+          'BAD_INPUT',
+        );
+      try {
+        const page = await activePage(handle);
+        const bytes = await page.screenshot({ type: 'jpeg', quality: 65, fullPage: false });
+        return {
+          ok: true as const,
+          data: { bytes, width: 1280, height: 720 },
+          meta: meta('captureFrame', Date.now(), handle.destination),
+        };
+      } catch (err) {
+        return failure('captureFrame', Date.now(), err, handle.destination);
+      }
+    },
+    async humanInput(input, _ctx) {
+      const handle = sessions.get(input.sessionId);
+      if (!handle)
+        return failure('humanInput', Date.now(), new Error('Unknown sessionId'), null, 'BAD_INPUT');
+      try {
+        const page = await activePage(handle);
+        const entry = input.input;
+        if (entry.type === 'click') await page.click(entry.x, entry.y);
+        else if (entry.type === 'key') await page.keyPress(entry.key);
+        else if (entry.type === 'text') await page.type(entry.text);
+        else await page.scroll(0, 0, entry.deltaX, entry.deltaY);
+        handle.snapshot = undefined;
+        return {
+          ok: true as const,
+          data: null,
+          meta: meta('humanInput', Date.now(), handle.destination),
+        };
+      } catch (err) {
+        return failure('humanInput', Date.now(), err, handle.destination);
+      }
+    },
+    async revokeControl(sessionId, _ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure(
+          'revokeControl',
+          Date.now(),
+          new Error('Unknown sessionId'),
+          null,
+          'BAD_INPUT',
+        );
+      // No provider-native interactive link is ever issued. The wrapper changes
+      // phase before drain, so every old HTTP input is rejected server-side.
+      return {
+        ok: true as const,
+        data: null,
+        meta: meta('revokeControl', Date.now(), handle.destination),
+      };
+    },
+    async invalidateSnapshot(sessionId, _ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure(
+          'invalidateSnapshot',
+          Date.now(),
+          new Error('Unknown sessionId'),
+          null,
+          'BAD_INPUT',
+        );
+      handle.snapshot = undefined;
+      return {
+        ok: true as const,
+        data: null,
+        meta: meta('invalidateSnapshot', Date.now(), handle.destination),
       };
     },
 

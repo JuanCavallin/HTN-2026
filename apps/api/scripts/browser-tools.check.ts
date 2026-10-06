@@ -93,8 +93,13 @@ assert.equal(
   'irreversible',
 );
 
+const announced: string[] = [];
 const executor = createBrowserExecutor({
   provider: () => adapter,
+  // The dashboard lists only announced sessions; an agent's `open` must be one.
+  onSession: (event) => {
+    announced.push(event.phase + ':' + event.sessionId);
+  },
   decide: async () => ({
     operation: 'CLICK',
     index: 1,
@@ -110,6 +115,7 @@ const context: ProviderCallContext = {
   policyRule: 'authorized-tool-action',
 };
 await executor.execute(action('localbrowser.open', { url: 'about:blank' }), context);
+assert.deepEqual(announced, ['opened:session_1'], 'an opened session is announced to the run');
 const clicked = await executor.execute(
   action('localbrowser.click', { sessionId: 'session_1' }),
   context,
@@ -140,16 +146,20 @@ const uncertain = createBrowserExecutor({
     rationale: 'weak match',
   }),
 });
-await assert.rejects(
-  uncertain.execute(action('localbrowser.click', { sessionId: 'session_1' }), context),
-  /below the execution threshold/,
+// Jev's pick is followed at any confidence. Refusing it sent the model back
+// to retry the same click until its tool budget ran out.
+const lowPick = await uncertain.execute(
+  action('localbrowser.click', { sessionId: 'session_1' }),
+  context,
 );
-assert.equal(calls.performed, 1, 'low-confidence target must not execute');
-assert.equal(calls.closed, 0, 'bound sessions are not closed by a failed action');
+assert.equal(calls.performed, 2, 'a low-confidence target still executes');
+assert.match(lowPick.summary, /low-confidence pick, 0\.40/);
+assert.equal(calls.closed, 0, 'bound sessions are not closed by an action');
 
 assert.equal(calls.closed, 0, 'an explicitly opened session stays available during the run');
 await executor.closeRunSessions(context.runId, context);
 assert.equal(calls.closed, 1, 'run cleanup releases explicitly opened sessions');
+assert.deepEqual(announced, ['opened:session_1', 'closed:session_1']);
 
 // Pooled research: stateless public searches/reads in one run share ONE
 // session (a session per call exhausted the Browserbase plan), reads prefer

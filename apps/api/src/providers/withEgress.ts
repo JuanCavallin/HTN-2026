@@ -80,6 +80,9 @@ export function withEgress(
             tokensIn: result?.meta?.tokensIn,
             tokensOut: result?.meta?.tokensOut,
             estimatedCostCents: result?.meta?.estimatedCostCents,
+            model: result?.meta?.model,
+            cacheReadTokens: result?.meta?.cacheReadTokens,
+            cacheWriteTokens: result?.meta?.cacheWriteTokens,
           };
           // Same numbers on the span and in the ledger, from one source, so the
           // two can never disagree about what a call cost or where it went.

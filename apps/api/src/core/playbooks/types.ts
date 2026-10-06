@@ -100,6 +100,15 @@ export interface AgentTaskSpec {
   maxDurationMs?: number;
   /** Give up once this many of the task's tool calls have failed. */
   maxFailedToolCalls?: number;
+  /**
+   * 'jev' (default): Jev picks the tools and each turn's model.
+   * 'all_tools_frontier': the BASELINE arm only. Every registered tool that
+   * passes eligibility is exposed and every turn runs on a frontier route —
+   * the "frontier model, all tools" comparison point the design spec's
+   * evaluation criterion names. Eligibility, data labels and per-action
+   * approval still apply; only the Jev narrowing is skipped.
+   */
+  routing?: 'jev' | 'all_tools_frontier';
 }
 
 export interface AgentTaskResult {
@@ -145,6 +154,8 @@ export interface PlaybookContext {
 
   /** Get a provider by capability — never by vendor name. */
   provider<C extends Capability>(capability: C): CapabilityMap[C];
+  /** Existing resources stay bound to the backend that created them. */
+  browserForSession?(sessionId: string): import('@htn/shared').BrowserAdapter;
 
   /**
    * Which vendor is currently bound to a capability.
@@ -198,6 +209,7 @@ export interface PlaybookContext {
    * around this, or a person is asked twice for one action.
    */
   callBrokeredTool(input: {
+    forceApproval?: boolean;
     dataLabels?: DataLabel[];
     stepId: string;
     toolId: string;

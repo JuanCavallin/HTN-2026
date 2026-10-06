@@ -5,11 +5,11 @@ export * from './composeText.js';
 export * from './elementTable.js';
 export * from './registry.js';
 
-import type { BrowserAdapter } from '@htn/shared';
+import type { BrowserAdapter, BrowserBackend } from '@htn/shared';
 import { config } from '../../config.js';
 import { createJevBrowserDecider } from '../../providers/jev/browserDecider.js';
 import { createBrowserExecutor } from './browser.js';
-import type { BrowserToolExecutor } from './browser.js';
+import type { BrowserExecutorDeps, BrowserToolExecutor } from './browser.js';
 import {
   createDeterministicDecider,
   createResolutionCache,
@@ -21,7 +21,9 @@ import type { InMemoryToolExecutorRegistry } from './executors.js';
 import type { InMemoryToolRegistry } from './registry.js';
 
 export interface RegisterBrowserToolsOptions {
+  byId?(providerId: BrowserBackend): BrowserAdapter;
   provider(capability: 'browser' | 'browser.local'): BrowserAdapter;
+  onSession?: BrowserExecutorDeps['onSession'];
 }
 
 /** Register the teammate browser adapters inside AgentOS's trusted broker. */
@@ -47,6 +49,13 @@ export function registerBrowserTools(
       // badges report the mode, so nothing presents a mock as a live call.
       localAvailable: config.providers.localbrowser.mode !== 'disabled',
       browserbaseAvailable: config.providers.browserbase.mode !== 'disabled',
+      browserlessAvailable: config.providers.browserless.mode !== 'disabled',
+      // Recorded so agent tasks can tell a mocked backend from a live one.
+      modes: {
+        localbrowser: executionModeOf(config.providers.localbrowser.mode),
+        browserbase: executionModeOf(config.providers.browserbase.mode),
+        browserless: executionModeOf(config.providers.browserless.mode),
+      },
     }),
   );
 
@@ -66,9 +75,15 @@ export function registerBrowserTools(
 
   const executor = createBrowserExecutor({
     provider: options.provider,
+    byId: options.byId,
     decide: decider,
     maxElements: config.browser.maxElements,
+    onSession: options.onSession,
   });
   executors.register(executor);
   return executor;
+}
+
+function executionModeOf(mode: 'live' | 'mock' | 'disabled'): 'live' | 'mock' | undefined {
+  return mode === 'disabled' ? undefined : mode;
 }

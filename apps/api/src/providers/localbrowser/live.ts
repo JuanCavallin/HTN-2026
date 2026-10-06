@@ -36,6 +36,9 @@
 import { chromium, type Browser, type Locator, type Page } from 'playwright-core';
 import type {
   BrowserAdapter,
+  BrowserBackend,
+  BrowserViewer,
+  BrowserHumanInput,
   BrowserPerformResult,
   ElementRow,
   ElementTable,
@@ -45,6 +48,8 @@ import type {
 } from '@htn/shared';
 import { LOCAL_BROWSER_DESTINATION, needsTarget } from '@htn/shared';
 import { config, type ProviderConfig } from '../../config.js';
+import { browserLocation, browserFailure } from '../browserSafety.js';
+import { notifyBrowserSessionClosed } from '../withBrowserOwnership.js';
 
 interface Snapshot {
   id: string;
@@ -70,6 +75,7 @@ interface Handle {
   browser: Browser;
   page: Page;
   snapshot?: Snapshot;
+  credentialRef?: string;
 }
 
 /**
@@ -136,6 +142,7 @@ const COLLECT_ROWS = `(() => {
   document.querySelectorAll(SEL).forEach((el, domIndex) => {
     const style = window.getComputedStyle(el);
     const visible =
+      !el.closest('[hidden], [aria-hidden="true"]') &&
       el.getClientRects().length > 0 &&
       style.visibility !== 'hidden' &&
       style.display !== 'none' &&
@@ -153,7 +160,7 @@ const COLLECT_ROWS = `(() => {
         el.getAttribute('alt') ||
         ''
       ),
-      value: (el.value === undefined || el.value === null) ? '' : String(el.value),
+      value: (el.type === 'password' || /password|passcode|secret|token|credential|otp|mfa|one-time-code/i.test([el.name || '', el.id || '', el.getAttribute('autocomplete') || '', el.getAttribute('aria-label') || ''].join(' ')) || el.value === undefined || el.value === null) ? '' : String(el.value),
       visible,
     });
   });
@@ -227,49 +234,69 @@ function truncate(text: string, max = MAX_LABEL_CHARS): string {
   return clean.length > max ? clean.slice(0, max - 1) + '…' : clean;
 }
 
-function meta(op: string, started: number, destination: string | null) {
-  return {
-    provider: 'localbrowser' as const,
-    op,
-    mode: 'live' as const,
-    latencyMs: Date.now() - started,
-    destination,
-  };
+export interface BrowserTransport {
+  backend: BrowserBackend;
+  destination: string;
+  connect(
+    ctx: ProviderCallContext,
+  ): Promise<{ browser: Browser; page: Page; credentialRef?: string }>;
+  validate?(credentialRef: string | undefined, ctx: ProviderCallContext): void;
+  viewer?(
+    page: Page,
+    mode: 'watch' | 'control',
+    ctx: ProviderCallContext,
+  ): Promise<Partial<BrowserViewer>>;
+  revoke?(page: Page): Promise<void>;
 }
 
-function failure<T>(
-  op: string,
-  started: number,
-  err: unknown,
-  code: 'UPSTREAM' | 'BAD_INPUT' | 'TIMEOUT' = 'UPSTREAM',
-): ProviderResult<T> {
-  return {
-    ok: false,
-    error: {
-      code,
-      message: err instanceof Error ? err.message : String(err),
-      retryable: code !== 'BAD_INPUT',
-    },
-    meta: meta(op, started, LOCAL_BROWSER_DESTINATION),
-  };
-}
-
-function rejected<T>(op: string, started: number, reason: TargetRejection): ProviderResult<T> {
-  return {
-    ok: false,
-    error: {
-      code: 'BAD_INPUT',
-      message: reason,
-      // A stale snapshot is worth retrying after a re-snapshot; a wrong
-      // operation for the element's role is not.
-      retryable: reason === 'stale_snapshot' || reason === 'occluded',
-    },
-    meta: meta(op, started, LOCAL_BROWSER_DESTINATION),
-  };
-}
-
-export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
+/** Shared Playwright execution engine for local Chrome and cloud CDP sessions. */
+export function createLiveLocalBrowser(
+  cfg: ProviderConfig,
+  transport?: BrowserTransport,
+): BrowserAdapter {
+  const backend = transport?.backend ?? 'localbrowser';
+  const destination = transport?.destination ?? LOCAL_BROWSER_DESTINATION;
   const sessions = new Map<string, Handle>();
+  function meta(op: string, started: number, destination: string | null) {
+    return {
+      provider: backend,
+      op,
+      mode: 'live' as const,
+      latencyMs: Date.now() - started,
+      destination,
+    };
+  }
+
+  function failure<T>(
+    op: string,
+    started: number,
+    err: unknown,
+    code: 'UPSTREAM' | 'BAD_INPUT' | 'TIMEOUT' = 'UPSTREAM',
+  ): ProviderResult<T> {
+    return {
+      ok: false,
+      error: {
+        code,
+        message: browserFailure(err),
+        retryable: code !== 'BAD_INPUT',
+      },
+      meta: meta(op, started, destination),
+    };
+  }
+
+  function rejected<T>(op: string, started: number, reason: TargetRejection): ProviderResult<T> {
+    return {
+      ok: false,
+      error: {
+        code: 'BAD_INPUT',
+        message: reason,
+        // A stale snapshot is worth retrying after a re-snapshot; a wrong
+        // operation for the element's role is not.
+        retryable: reason === 'stale_snapshot' || reason === 'occluded',
+      },
+      meta: meta(op, started, destination),
+    };
+  }
 
   /** Shared by openSession — concurrency is money on one backend and RAM on this one. */
   function atCapacity(): boolean {
@@ -325,7 +352,7 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
       table: {
         snapshotId: id,
         sessionId,
-        url: handle.page.url(),
+        url: browserLocation(handle.page.url()),
         title: await handle.page.title().catch(() => ''),
         capturedAt: new Date().toISOString(),
         rows,
@@ -372,13 +399,13 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
   }
 
   return {
-    id: 'localbrowser',
+    id: backend,
     mode: 'live',
-    capabilities: ['browser.local'],
+    capabilities: backend === 'localbrowser' ? ['browser.local'] : ['browser'],
 
     async health() {
       const started = Date.now();
-      if (!cfg.channel) {
+      if (!transport && !cfg.channel) {
         return {
           ok: false,
           error: {
@@ -393,8 +420,8 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
       }
       return {
         ok: true,
-        data: { detail: 'channel=' + cfg.channel + ', sessions=' + sessions.size },
-        meta: meta('health', started, LOCAL_BROWSER_DESTINATION),
+        data: { detail: 'live ' + backend + ', sessions=' + sessions.size },
+        meta: meta('health', started, destination),
       };
     },
 
@@ -407,7 +434,7 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
       );
     },
 
-    async openSession(input, _ctx: ProviderCallContext) {
+    async openSession(input, ctx: ProviderCallContext) {
       const started = Date.now();
       if (atCapacity()) {
         return failure(
@@ -422,27 +449,42 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
 
       let browser: Browser | undefined;
       try {
-        browser = await chromium.launch({
-          channel: cfg.channel,
-          headless: true,
-          timeout: config.browser.timeoutMs,
-        });
-        const page = await browser.newPage();
+        const connected = transport ? await transport.connect(ctx) : undefined;
+        browser =
+          connected?.browser ??
+          (await chromium.launch({
+            channel: cfg.channel,
+            headless: cfg.headless ?? true,
+            timeout: config.browser.timeoutMs,
+          }));
+        const page = connected?.page ?? (await browser.newPage());
+        await page.setViewportSize({ width: 1280, height: 720 });
         page.setDefaultTimeout(config.browser.timeoutMs);
 
         if (input.startUrl) {
           await page.goto(input.startUrl, { waitUntil: 'domcontentloaded' });
         }
 
-        const sessionId = 'lb_' + Math.random().toString(36).slice(2, 10);
-        sessions.set(sessionId, { browser, page });
+        const sessionId = backend + '_' + Math.random().toString(36).slice(2, 10);
+        sessions.set(sessionId, { browser, page, credentialRef: connected?.credentialRef });
+        browser.on?.('disconnected', () => {
+          sessions.delete(sessionId);
+          notifyBrowserSessionClosed(sessionId);
+        });
+        page.context().on('page', (newPage) => {
+          const handle = sessions.get(sessionId);
+          if (handle) {
+            handle.page = newPage;
+            handle.snapshot = undefined;
+          }
+        });
 
         // No live view URL: the browser is on this machine. Reporting a fake
         // one would break the truthful-labeling acceptance criterion.
         return {
           ok: true as const,
-          data: { sessionId, liveViewUrl: undefined },
-          meta: meta('openSession', started, LOCAL_BROWSER_DESTINATION),
+          data: { sessionId, interactive: true },
+          meta: meta('openSession', started, destination),
         };
       } catch (err) {
         // A half-launched browser is a leaked Chrome process. Close it here —
@@ -452,9 +494,10 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
       }
     },
 
-    async act(input, _ctx) {
+    async act(input, ctx) {
       const started = Date.now();
       const handle = sessions.get(input.sessionId);
+      transport?.validate?.(handle?.credentialRef, ctx);
       if (!handle) {
         return failure('act', started, new Error('Unknown sessionId'), 'BAD_INPUT');
       }
@@ -478,17 +521,18 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
         handle.snapshot = undefined;
         return {
           ok: true as const,
-          data: { url: handle.page.url() },
-          meta: meta('act', started, LOCAL_BROWSER_DESTINATION),
+          data: { url: browserLocation(handle.page.url()) },
+          meta: meta('act', started, destination),
         };
       } catch (err) {
         return failure('act', started, err);
       }
     },
 
-    async navigate(input, _ctx) {
+    async navigate(input, ctx) {
       const started = Date.now();
       const handle = sessions.get(input.sessionId);
+      transport?.validate?.(handle?.credentialRef, ctx);
       if (!handle) {
         return failure('navigate', started, new Error('Unknown sessionId'), 'BAD_INPUT');
       }
@@ -497,8 +541,8 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
         await handle.page.goto(input.url, { waitUntil: 'domcontentloaded' });
         return {
           ok: true as const,
-          data: { url: handle.page.url() },
-          meta: meta('navigate', started, LOCAL_BROWSER_DESTINATION),
+          data: { url: browserLocation(handle.page.url()) },
+          meta: meta('navigate', started, destination),
         };
       } catch (err) {
         return failure('navigate', started, err);
@@ -507,10 +551,11 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
 
     async extract<T = unknown>(
       input: { sessionId: string; instruction: string },
-      _ctx: ProviderCallContext,
+      ctx: ProviderCallContext,
     ) {
       const started = Date.now();
       const handle = sessions.get(input.sessionId);
+      transport?.validate?.(handle?.credentialRef, ctx);
       if (!handle) {
         return failure<T>('extract', started, new Error('Unknown sessionId'), 'BAD_INPUT');
       }
@@ -526,20 +571,21 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
         return {
           ok: true as const,
           data: {
-            url: handle.page.url(),
+            url: browserLocation(handle.page.url()),
             title: await handle.page.title().catch(() => ''),
             text: truncate(text, 4000),
           } as T,
-          meta: meta('extract', started, LOCAL_BROWSER_DESTINATION),
+          meta: meta('extract', started, destination),
         };
       } catch (err) {
         return failure<T>('extract', started, err);
       }
     },
 
-    async snapshot(input, _ctx) {
+    async snapshot(input, ctx) {
       const started = Date.now();
       const handle = sessions.get(input.sessionId);
+      transport?.validate?.(handle?.credentialRef, ctx);
       if (!handle) {
         return failure<ElementTable>(
           'snapshot',
@@ -558,16 +604,17 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
         return {
           ok: true as const,
           data: snap.table,
-          meta: meta('snapshot', started, LOCAL_BROWSER_DESTINATION),
+          meta: meta('snapshot', started, destination),
         };
       } catch (err) {
         return failure<ElementTable>('snapshot', started, err);
       }
     },
 
-    async perform(input, _ctx) {
+    async perform(input, ctx) {
       const started = Date.now();
       const handle = sessions.get(input.sessionId);
+      transport?.validate?.(handle?.credentialRef, ctx);
       if (!handle) {
         return failure<BrowserPerformResult>(
           'perform',
@@ -594,10 +641,10 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
             ok: true as const,
             data: {
               operation: input.operation,
-              url: handle.page.url(),
+              url: browserLocation(handle.page.url()),
               navigated: false,
             },
-            meta: meta('perform', started, LOCAL_BROWSER_DESTINATION),
+            meta: meta('perform', started, destination),
           };
         } catch (err) {
           return failure<BrowserPerformResult>('perform', started, err);
@@ -674,14 +721,122 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
           data: {
             operation: input.operation,
             index: input.index,
-            url,
+            url: browserLocation(url),
             navigated: url !== urlBefore,
           },
-          meta: meta('perform', started, LOCAL_BROWSER_DESTINATION),
+          meta: meta('perform', started, destination),
         };
       } catch (err) {
         return failure<BrowserPerformResult>('perform', started, err);
       }
+    },
+
+    async viewer(input, ctx) {
+      const started = Date.now();
+      const handle = sessions.get(input.sessionId);
+      if (!handle) return failure('viewer', started, new Error('Unknown sessionId'), 'BAD_INPUT');
+      transport?.validate?.(handle.credentialRef, ctx);
+      try {
+        const supplied = transport?.viewer
+          ? await transport.viewer(handle.page, input.mode, ctx)
+          : {};
+        return {
+          ok: true as const,
+          data: {
+            providerId: backend,
+            mode: 'live' as const,
+            kind: 'stream' as const,
+            owner: 'agent' as const,
+            revision: 0,
+            phase: 'agent_running' as const,
+            pageUrl: browserLocation(handle.page.url()),
+            canWatch: true,
+            canControl: true,
+            interactive: input.mode === 'control',
+            width: 1280,
+            height: 720,
+            ...supplied,
+          },
+          meta: meta('viewer', started, destination),
+        };
+      } catch (err) {
+        return failure('viewer', started, err);
+      }
+    },
+    async liveView(sessionId, ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure('liveView', Date.now(), new Error('Unknown sessionId'), 'BAD_INPUT');
+      transport?.validate?.(handle.credentialRef, ctx);
+      return {
+        ok: true as const,
+        data: { pageUrl: browserLocation(handle.page.url()), interactive: true },
+        meta: meta('liveView', Date.now(), destination),
+      };
+    },
+    async captureFrame(sessionId, ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure('captureFrame', Date.now(), new Error('Unknown sessionId'), 'BAD_INPUT');
+      transport?.validate?.(handle.credentialRef, ctx);
+      try {
+        const bytes = await handle.page.screenshot({ type: 'jpeg', quality: 65, fullPage: false });
+        return {
+          ok: true as const,
+          data: { bytes, width: 1280, height: 720 },
+          meta: meta('captureFrame', Date.now(), destination),
+        };
+      } catch (err) {
+        return failure('captureFrame', Date.now(), err);
+      }
+    },
+    async humanInput(input, ctx) {
+      const handle = sessions.get(input.sessionId);
+      if (!handle)
+        return failure('humanInput', Date.now(), new Error('Unknown sessionId'), 'BAD_INPUT');
+      transport?.validate?.(handle.credentialRef, ctx);
+      try {
+        const entry = input.input;
+        if (entry.type === 'click') await handle.page.mouse.click(entry.x, entry.y);
+        else if (entry.type === 'key') await handle.page.keyboard.press(entry.key);
+        else if (entry.type === 'text') await handle.page.keyboard.insertText(entry.text);
+        else await handle.page.mouse.wheel(entry.deltaX, entry.deltaY);
+        handle.snapshot = undefined;
+        return { ok: true as const, data: null, meta: meta('humanInput', Date.now(), destination) };
+      } catch (err) {
+        return failure('humanInput', Date.now(), err);
+      }
+    },
+    async revokeControl(sessionId, _ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure('revokeControl', Date.now(), new Error('Unknown sessionId'), 'BAD_INPUT');
+      try {
+        await transport?.revoke?.(handle.page);
+        return {
+          ok: true as const,
+          data: null,
+          meta: meta('revokeControl', Date.now(), destination),
+        };
+      } catch (err) {
+        return failure('revokeControl', Date.now(), err);
+      }
+    },
+    async invalidateSnapshot(sessionId, _ctx) {
+      const handle = sessions.get(sessionId);
+      if (!handle)
+        return failure(
+          'invalidateSnapshot',
+          Date.now(),
+          new Error('Unknown sessionId'),
+          'BAD_INPUT',
+        );
+      handle.snapshot = undefined;
+      return {
+        ok: true as const,
+        data: null,
+        meta: meta('invalidateSnapshot', Date.now(), destination),
+      };
     },
 
     async closeSession(sessionId, _ctx) {
@@ -701,7 +856,7 @@ export function createLiveLocalBrowser(cfg: ProviderConfig): BrowserAdapter {
         return {
           ok: true as const,
           data: null,
-          meta: meta('closeSession', started, LOCAL_BROWSER_DESTINATION),
+          meta: meta('closeSession', started, destination),
         };
       } catch (err) {
         return failure('closeSession', started, err);

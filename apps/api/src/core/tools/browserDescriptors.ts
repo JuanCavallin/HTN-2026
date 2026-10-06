@@ -2,7 +2,7 @@ import type { DataLabel, Json, ToolDescriptor } from '@htn/shared';
 import { BROWSER_EXECUTOR_REF } from './browser.js';
 import type { ToolRegistration } from './registry.js';
 
-type BrowserProviderId = 'localbrowser' | 'browserbase';
+type BrowserProviderId = 'localbrowser' | 'browserbase' | 'browserless';
 type BrowserOperation =
   'open' | 'search' | 'read' | 'extract' | 'inspect' | 'click' | 'type' | 'submit' | 'close';
 
@@ -115,12 +115,29 @@ const OPERATIONS: readonly OperationSpec[] = [
 export interface BrowserDescriptorOptions {
   localAvailable: boolean;
   browserbaseAvailable: boolean;
+  browserlessAvailable?: boolean;
+  /** Each backend's effective mode, recorded as its descriptors' `executionMode`. */
+  modes?: Partial<Record<BrowserProviderId, 'live' | 'mock'>>;
 }
 
 export function browserToolRegistrations(options: BrowserDescriptorOptions): ToolRegistration[] {
+  const modes = options.modes ?? {};
   return [
-    ...build('localbrowser', ['public', 'private', 'secret', 'local_only'], options.localAvailable),
-    ...build('browserbase', ['public', 'private'], options.browserbaseAvailable),
+    ...build(
+      'localbrowser',
+      ['public', 'private', 'secret', 'local_only'],
+      options.localAvailable,
+      modes.localbrowser,
+    ),
+    ...build('browserbase', ['public', 'private'], options.browserbaseAvailable, modes.browserbase),
+    ...(options.browserlessAvailable === undefined
+      ? []
+      : build(
+          'browserless',
+          ['public', 'private'],
+          options.browserlessAvailable,
+          modes.browserless,
+        )),
   ];
 }
 
@@ -128,6 +145,7 @@ function build(
   providerId: BrowserProviderId,
   allowedDataLabels: DataLabel[],
   available: boolean,
+  executionMode: 'live' | 'mock' | undefined,
 ): ToolRegistration[] {
   return OPERATIONS.map((spec) => {
     const id = providerId + '.' + spec.operation;
@@ -147,7 +165,10 @@ function build(
         allowedDataLabels,
         availability: available ? 'available' : 'unavailable',
         executorRef: BROWSER_EXECUTOR_REF,
-        ...(providerId === 'browserbase' ? { credentialRef: 'BROWSERBASE_API_KEY' } : {}),
+        ...(providerId !== 'localbrowser'
+          ? { credentialRef: providerId.toUpperCase() + '_API_KEY' }
+          : {}),
+        ...(executionMode ? { executionMode } : {}),
       },
       wireName: providerId + '_' + spec.operation,
       inputSchema: spec.schema,

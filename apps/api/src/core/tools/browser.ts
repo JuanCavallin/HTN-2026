@@ -1,5 +1,6 @@
 import type {
   BrowserAdapter,
+  BrowserBackend,
   BrowserOperation,
   DataLabel,
   ElementTable,
@@ -8,6 +9,7 @@ import type {
   ToolAction,
 } from '@htn/shared';
 import { BROWSERBASE_API_DESTINATION, LOCAL_BROWSER_DESTINATION } from '@htn/shared';
+import { config } from '../../config.js';
 import type { BrowserDecider } from './browserDecision.js';
 import { LOW_CONFIDENCE_THRESHOLD } from './browserDecision.js';
 import type { ToolExecutionOutput, ToolExecutor } from './executors.js';
@@ -15,20 +17,41 @@ import type { ToolExecutionOutput, ToolExecutor } from './executors.js';
 export const BROWSER_EXECUTOR_REF = 'native://browser';
 
 export interface BrowserExecutorDeps {
+  byId?(providerId: BrowserBackend): BrowserAdapter;
   provider(capability: 'browser' | 'browser.local'): BrowserAdapter;
   decide: BrowserDecider;
   maxElements?: number;
+  /**
+   * Told when a session that outlives one tool call opens or closes: an
+   * explicit `open`, or the pooled research session. The dashboard lists only
+   * announced sessions, so without this a browser the agent drove was
+   * invisible there. Sessions opened and closed inside one call are not sent.
+   */
+  onSession?(event: BrowserSessionEvent): void | Promise<void>;
 }
+
+export type BrowserSessionEvent =
+  | {
+      phase: 'opened';
+      runId: string;
+      stepId?: string;
+      sessionId: string;
+      providerId: BrowserBackend;
+      interactive: boolean;
+      mode: BrowserAdapter['mode'];
+    }
+  | { phase: 'closed'; runId: string; sessionId: string };
 
 export interface BrowserToolExecutor extends ToolExecutor {
   closeRunSessions(runId: string, ctx: ProviderCallContext): Promise<void>;
 }
 
 interface BrowserSession {
-  providerId: 'localbrowser' | 'browserbase';
+  providerId: BrowserBackend;
   runId: string;
   interactive: boolean;
   url?: string;
+  destination?: string;
 }
 
 /**
@@ -38,6 +61,12 @@ interface BrowserSession {
  */
 export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExecutor {
   const sessions = new Map<string, BrowserSession>();
+  const adapterFor = (id: BrowserBackend): BrowserAdapter => {
+    const adapter =
+      deps.byId?.(id) ?? deps.provider(id === 'localbrowser' ? 'browser.local' : 'browser');
+    if (adapter.id !== id) throw new Error('Explicit browser provider is unavailable: ' + id);
+    return adapter;
+  };
   /**
    * One reusable session per run and backend for stateless public research.
    * A session per search/read cost a Browserbase session each (35 in one
@@ -48,13 +77,23 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
   /** Serializes navigate+read on a pooled session so concurrent calls cannot interleave. */
   const poolTails = new Map<string, Promise<unknown>>();
 
+  async function announce(event: BrowserSessionEvent): Promise<void> {
+    try {
+      await deps.onSession?.(event);
+    } catch {
+      // Showing a session is never a reason to fail the browser action.
+    }
+  }
+
   function withPoolLock<T>(key: string, action: () => Promise<T>): Promise<T> {
     const previous = poolTails.get(key) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(action);
     poolTails.set(key, next);
-    void next.finally(() => {
-      if (poolTails.get(key) === next) poolTails.delete(key);
-    }).catch(() => undefined);
+    void next
+      .finally(() => {
+        if (poolTails.get(key) === next) poolTails.delete(key);
+      })
+      .catch(() => undefined);
     return next;
   }
 
@@ -81,6 +120,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
             .catch(() => undefined);
           sessions.delete(sessionId);
           researchPool.delete(key);
+          await announce({ phase: 'closed', runId: action.runId, sessionId });
           sessionId = undefined;
         }
       }
@@ -92,6 +132,15 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
         if (!opened.ok) throw new Error('Could not open browser session: ' + opened.error.message);
         sessionId = opened.data.sessionId;
         researchPool.set(key, sessionId);
+        await announce({
+          phase: 'opened',
+          runId: action.runId,
+          ...(ctx.stepId ? { stepId: ctx.stepId } : {}),
+          sessionId,
+          providerId,
+          interactive: opened.data.interactive === true,
+          mode: adapter.mode,
+        });
       }
       sessions.set(sessionId, {
         providerId,
@@ -114,9 +163,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
       const owned = [...sessions.entries()].filter(([, session]) => session.runId === runId);
       await Promise.all(
         owned.map(async ([sessionId, session]) => {
-          const adapter = deps.provider(
-            session.providerId === 'localbrowser' ? 'browser.local' : 'browser',
-          );
+          const adapter = adapterFor(session.providerId);
           try {
             const closed = await adapter.closeSession(
               sessionId,
@@ -136,20 +183,27 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
             }
           } finally {
             sessions.delete(sessionId);
+            await announce({ phase: 'closed', runId, sessionId });
           }
         }),
       );
     },
 
-    destinationFor({ descriptor }) {
+    destinationFor({ descriptor, arguments: args }) {
+      const sessionId =
+        args && typeof args === 'object' && !Array.isArray(args) ? args.sessionId : undefined;
+      if (typeof sessionId === 'string' && sessions.get(sessionId)?.destination)
+        return sessions.get(sessionId)!.destination;
       if (descriptor.providerId === 'localbrowser') return LOCAL_BROWSER_DESTINATION;
       if (descriptor.providerId === 'browserbase') return BROWSERBASE_API_DESTINATION;
+      if (descriptor.providerId === 'browserless')
+        return new URL(config.providers.browserless.baseUrl!).origin;
       return undefined;
     },
 
     async execute(action, ctx) {
       const providerId = providerFor(action.toolId);
-      const adapter = deps.provider(providerId === 'localbrowser' ? 'browser.local' : 'browser');
+      const adapter = adapterFor(providerId);
       const args = asObject(action.arguments);
       const operation = action.toolId.split('.').at(-1);
       if (!operation) throw new Error('Browser operation is missing.');
@@ -160,7 +214,16 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
         const closed = await adapter.closeSession(sessionId, ctx);
         if (!closed.ok) throw new Error(closed.error.message);
         sessions.delete(sessionId);
-        return output(action, { closed: sessionId }, 'Closed browser session.');
+        for (const [key, pooled] of researchPool)
+          if (pooled === sessionId) researchPool.delete(key);
+        await announce({ phase: 'closed', runId: action.runId, sessionId });
+        return output(
+          action,
+          { closed: sessionId },
+          'Closed browser session.',
+          undefined,
+          adapter.mode,
+        );
       }
 
       const suppliedSessionId = optionalString(args, 'sessionId');
@@ -199,12 +262,27 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           url: requestedUrl,
           runId: action.runId,
           interactive: opened.data.interactive === true,
+          destination: opened.meta.destination ?? undefined,
         });
       }
 
       try {
         if (operation === 'open') {
           ownsSession = false;
+          await announce({
+            phase: 'opened',
+            runId: action.runId,
+            ...(ctx.stepId ? { stepId: ctx.stepId } : {}),
+            sessionId,
+            providerId,
+            interactive: openedInteractive(sessions, sessionId),
+            mode: adapter.mode,
+          });
+          // The session ID MUST reach the model: inspect/click/type/extract all
+          // require it. The bare "Opened a session." summary left the model to
+          // guess ("default"), every follow-up failed with "not owned by this
+          // run", and it opened sessions until BROWSER_MAX_SESSIONS stopped it.
+          // The ID is an opaque handle; the broker still checks run ownership.
           return output(
             action,
             {
@@ -213,7 +291,13 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
               interactive: openedInteractive(sessions, sessionId),
               backend: providerId,
             },
-            'Opened a ' + providerId + ' browser session.',
+            'Opened a ' +
+              providerId +
+              ' browser session with sessionId "' +
+              sessionId +
+              '". Pass that sessionId to the other browser tools.',
+            { sessionId, backend: providerId },
+            adapter.mode,
           );
         }
 
@@ -227,6 +311,8 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
             action,
             table as unknown as Json,
             'Inspected ' + table.rows.length.toString() + ' interactive browser controls.',
+            undefined,
+            adapter.mode,
           );
         }
 
@@ -239,6 +325,9 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           operation === 'type' ? ['TYPE_TEXT', 'SELECT'] : ['CLICK'];
         const typedValue = optionalString(args, 'text');
         const decision = await deps.decide({
+          credentialRunId: ctx.runId,
+          cacheScope: ctx.runId + ':' + providerId + ':' + sessionId,
+          localOnly: action.dataLabels.some((label) => label !== 'public'),
           goal,
           table,
           allowedOperations,
@@ -246,13 +335,10 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           ...(ctx.signal ? { signal: ctx.signal } : {}),
         });
 
-        if (decision.confidence < LOW_CONFIDENCE_THRESHOLD) {
-          throw new Error(
-            'Browser target confidence ' +
-              decision.confidence.toFixed(2) +
-              ' is below the execution threshold; refine the goal or request human review.',
-          );
-        }
+        // Jev's pick is followed at any confidence. Refusing a low-confidence
+        // target sent the model back to retry the same click with a reworded
+        // goal until its tool budget ran out. Authorization already happened
+        // in the broker; the confidence travels with the result instead.
         if (decision.index === undefined) {
           throw new Error(
             'Browser decision returned no target (' +
@@ -293,7 +379,17 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
             confidence: decision.confidence,
             rationale: decision.rationale,
           },
-          'Completed ' + operation + ' on browser target "' + target.label + '".',
+          'Completed ' +
+            operation +
+            ' on browser target "' +
+            target.label +
+            '"' +
+            (decision.confidence < LOW_CONFIDENCE_THRESHOLD
+              ? ' (a low-confidence pick, ' + decision.confidence.toFixed(2) + ': check the page)'
+              : '') +
+            '.',
+          undefined,
+          adapter.mode,
         );
       } finally {
         if (ownsSession) {
@@ -310,6 +406,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
 function providerFor(toolId: string): BrowserSession['providerId'] {
   if (toolId.startsWith('localbrowser.')) return 'localbrowser';
   if (toolId.startsWith('browserbase.')) return 'browserbase';
+  if (toolId.startsWith('browserless.')) return 'browserless';
   throw new Error('Unknown browser provider for tool: ' + toolId);
 }
 
@@ -356,6 +453,7 @@ async function researchOutput(
         ? 'Read a page as bounded stateless research evidence.'
         : 'Extracted bounded evidence from the existing browser page.',
     publicOnly ? evidence : undefined,
+    adapter.mode,
   );
 }
 
@@ -437,13 +535,22 @@ function output(
   value: Json,
   summary: string,
   modelOutput?: Json,
+  mode?: BrowserAdapter['mode'],
 ): ToolExecutionOutput {
   const publicOnly = action.dataLabels.every((label) => label === 'public');
+  const visibleSummary = mode === 'mock' ? 'Simulated: ' + summary : summary;
+  const labelMock = (item: Json): Json =>
+    mode === 'mock'
+      ? item && typeof item === 'object' && !Array.isArray(item)
+        ? { ...item, simulated: true }
+        : { result: item, simulated: true }
+      : item;
   return {
-    output: value,
-    summary,
-    ...(publicOnly ? { sanitizedSummary: summary } : {}),
-    ...(publicOnly && modelOutput !== undefined ? { modelOutput } : {}),
+    output: labelMock(value),
+    summary: visibleSummary,
+    ...(mode === 'mock' || mode === 'live' ? { executionMode: mode } : {}),
+    ...(publicOnly ? { sanitizedSummary: visibleSummary } : {}),
+    ...(publicOnly && modelOutput !== undefined ? { modelOutput: labelMock(modelOutput) } : {}),
     dataLabels: [...action.dataLabels],
     verified: true,
   };
