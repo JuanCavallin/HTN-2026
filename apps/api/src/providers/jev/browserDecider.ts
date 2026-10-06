@@ -52,6 +52,8 @@ import type {
 } from '../../core/tools/browserDecision.js';
 import { eligibleRows, toCriteria, toState } from '../../core/tools/elementTable.js';
 import { config } from '../../config.js';
+import { credentials } from '../../services/credentials.js';
+import { createDeterministicDecider } from '../../core/tools/browserDecision.js';
 
 /** Same model id and gateway root Person 2's adapter uses. Keep them in step. */
 const MODEL_ID = 'typesafe-ai/jev';
@@ -84,19 +86,28 @@ export function createJevBrowserDecider(
   options: JevBrowserDeciderOptions = {},
 ): BrowserDecider | null {
   const cfg = config.providers.jev;
-  if (cfg.mode !== 'live' || !cfg.apiKey) return null;
-
-  const gateway = createGateway({
-    apiKey: cfg.apiKey,
-    baseURL: cfg.baseUrl ?? DEFAULT_BASE_URL,
-  });
-  const model = gateway.evaluationModel(MODEL_ID);
+  if (cfg.mode !== 'live' || (credentials.source === 'operator' && !cfg.apiKey)) return null;
+  const deterministic = createDeterministicDecider();
 
   const timeoutMs = options.timeoutMs ?? config.browser.decisionTimeoutMs;
-  const maxRetries = options.maxRetries ?? 1;
+  const maxRetries = credentials.source === 'user' ? 0 : (options.maxRetries ?? 1);
 
   return async (request: BrowserDecisionRequest): Promise<BrowserDecision> => {
     const { table, goal, allowedOperations, signal } = request;
+    if (request.localOnly) return deterministic(request);
+    // Missing user Jev keys use the bounded, truthfully labeled deterministic matcher.
+    // Without a trusted run binding, do not spend any user's credential.
+    if (credentials.source === 'user' && !request.credentialRunId) return deterministic(request);
+    const credential = await credentials.resolve({
+      runId: request.credentialRunId ?? 'browser-operator',
+      providerId: 'jev',
+      purpose: 'decision',
+    });
+    if (!credential) return deterministic(request);
+    const model = createGateway({
+      apiKey: credential.secret,
+      baseURL: cfg.baseUrl ?? DEFAULT_BASE_URL,
+    }).evaluationModel(MODEL_ID);
 
     const allowed = (op: BrowserOperation): boolean =>
       !allowedOperations || allowedOperations.includes(op);
@@ -302,6 +313,8 @@ export function createJevBrowserDecider(
           confidence.toFixed(2) +
           ').',
       };
+    } catch {
+      throw new Error('Jev browser evaluation failed; deterministic matching will be used.');
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);

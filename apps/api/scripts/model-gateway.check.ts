@@ -279,16 +279,22 @@ async function main(): Promise<void> {
   assert.ok(!JSON.stringify(await store.listSessionStates()).includes(credentials.model));
 
   // Per-turn tool budget: Hermes ACP never caps a turn itself, so the gateway
-  // withholds tools once a turn has spent its budget, forcing a text report.
+  // forbids tool calls once a turn has spent its budget, forcing a text answer.
+  // The definitions stay (the transcript already holds calls to them); the
+  // backend is told toolChoice 'none' and any call it returns is stripped.
   {
     let budgetTools: unknown[] = [];
+    let budgetToolChoice: string | undefined;
     let budgetMessages: unknown[] = [];
+    let backendCalls = 0;
     const budgeted = new ModelGatewayService(decisions, sessions, model, catalog, bus, {
       modelRoutes: () => [TOOL_ROUTE],
       maxToolCallsPerTurn: 1,
       backend: {
         async complete(input) {
+          backendCalls += 1;
           budgetTools = input.tools;
+          budgetToolChoice = input.toolChoice;
           budgetMessages = input.messages;
           return {
             text: '',
@@ -335,16 +341,55 @@ async function main(): Promise<void> {
 
     const first = await callLooping();
     assert.equal(budgetTools.length, 1, 'the first call in a turn is offered its tools');
+    assert.notEqual(budgetToolChoice, 'none');
     assert.equal(first.toolCalls.length, 1);
 
     const second = await callLooping();
-    assert.equal(budgetTools.length, 0, 'a spent turn must not be offered tools');
+    assert.equal(budgetToolChoice, 'none', 'a spent turn must not be allowed to call tools');
+    assert.equal(budgetTools.length, 1, 'definitions stay so the transcript remains valid');
     assert.deepEqual(second.toolCalls, [], 'tool calls are stripped once the budget is spent');
     assert.match(JSON.stringify(budgetMessages.at(-1)), /Tool budget for this turn is used up/);
 
     await sessions.beginTurn(looping.id);
     await callLooping();
     assert.equal(budgetTools.length, 1, 'a new turn gets a fresh tool budget');
+    assert.notEqual(budgetToolChoice, 'none', 'a new turn may call tools again');
+
+    // Model-call cap: a turn that keeps calling the model after its tools are
+    // spent (Hermes nudging an empty reply with "continue") is ended by the
+    // gateway with a plain final reply, without another model or Jev call.
+    // Budget 1 tool call + 4 headroom = 5 model calls; this turn has made 1.
+    for (let call = 2; call <= 5; call += 1) await callLooping();
+    const reached = backendCalls;
+    const ended = await callLooping();
+    assert.equal(backendCalls, reached, 'the call past the cap never reaches the model');
+    assert.deepEqual(ended.toolCalls, [], 'the cap reply carries no tool calls');
+    assert.match(ended.text, /limit of model calls/);
+    assert.equal(ended.model, 'agentos-stop');
+
+    // No model may see the session's data any more (cloud routes take public
+    // data only): the run ends with that explanation instead of a 502, which
+    // Hermes retried three times and then reported as "temporarily unavailable".
+    const sealed = await sessions.create({
+      runId: 'gateway_sealed',
+      stepId: 'gateway_sealed_step',
+      harness: 'hermes',
+      objective: 'Summarize private notes.',
+      dataLabels: ['private'],
+      budget: { stepsRemaining: 1 },
+    });
+    await sessions.beginTurn(sealed.id);
+    const sealedCredentials = sessions.issueGatewayCredentials(sealed.id);
+    const callsBefore = backendCalls;
+    const stopped = await new ModelGatewayService(decisions, sessions, model, catalog, bus, {
+      modelRoutes: () => [CLOUD_TOOL_ROUTE],
+    }).complete(
+      { messages: [{ role: 'user', content: 'Summarize private notes.' }] },
+      await sessions.resolveGatewayToken(sealedCredentials.model, 'model'),
+    );
+    assert.match(stopped.text, /no available model is allowed to see that/);
+    assert.deepEqual(stopped.toolCalls, []);
+    assert.equal(backendCalls, callsBefore, 'no model is called for data it may not see');
   }
 
   console.log('model gateway check: ok');

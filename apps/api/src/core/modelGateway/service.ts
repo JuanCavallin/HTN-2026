@@ -11,10 +11,11 @@ import type {
 } from '@htn/shared';
 import { newId, nowIso } from '../../lib/ids.js';
 import type { RunBus } from '../bus.js';
-import type { DecisionService } from '../decisions/service.js';
+import { NoEligibleModelRouteError, type DecisionService } from '../decisions/service.js';
 import { decisionStateFromSession } from '../sessions/decisionState.js';
 import type { GatewayTurnBinding, SessionStateService } from '../sessions/service.js';
 import { KeyedLock } from '../locks.js';
+import { waitWhilePaused } from '../pauseGate.js';
 import type { RegisteredTool } from '../tools/registry.js';
 import { modelRoutesFor } from './catalog.js';
 import type { ToolDescriptorCatalog } from './toolCatalog.js';
@@ -65,6 +66,12 @@ export interface ChatModelBackendInput {
   route: ModelRoute;
   messages: OpenAiMessage[];
   tools: OpenAiTool[];
+  /**
+   * 'none' keeps the tool definitions -- the transcript already holds calls
+   * to them -- but forbids a new call. Backends with no native switch drop
+   * the tools instead. Defaults to 'auto'.
+   */
+  toolChoice?: 'auto' | 'none';
   maxTokens?: number;
 }
 
@@ -87,6 +94,8 @@ export interface ModelGatewayOptions {
   backend?: ChatModelBackend;
   /** Tool calls the model may make in one harness turn before it must report. */
   maxToolCallsPerTurn?: number;
+  /** Trusted credential eligibility, checked before routing; never supplied by Hermes. */
+  routeAvailable?: (route: ModelRoute, ctx: ProviderCallContext) => boolean;
 }
 
 const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 8;
@@ -99,19 +108,38 @@ const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 8;
  * BETWEEN turns, so it never got a say. Once a turn spends its budget, the
  * next model call gets no tools and this instruction, the model answers in
  * text, Hermes ends the turn, and the judge decides whether to continue.
+ *
+ * It asks for a final answer, not a progress report: "list what is still
+ * missing" turned every capped turn into a to-do list the judge then
+ * (reasonably) sent back for another full turn.
  */
 const TOOL_BUDGET_EXHAUSTED_INSTRUCTION =
-  'Tool budget for this turn is used up; tools are unavailable until the next turn. ' +
-  'Do not call tools. Reply now with what you have found so far: the concrete results, ' +
-  'their sources, and what is still missing.';
+  'Tool budget for this turn is used up; tools are unavailable. Do not call tools. ' +
+  'Give your final answer now from what you have found: the concrete results and their ' +
+  'sources. If a requested item could not be found, say so in one sentence.';
+
+/**
+ * Model calls a turn may make beyond one per allowed tool call: the final
+ * answer plus a few Hermes retries/nudges. Past that the turn is looping --
+ * typically empty replies that Hermes answers with "continue" -- and the
+ * gateway ends it itself rather than paying for another model and Jev call.
+ */
+const MODEL_CALL_HEADROOM = 4;
+
+const TURN_LIMIT_REPLY =
+  '[AgentOS] Stopped this agent run: it reached its limit of model calls without ' +
+  'giving a final answer.';
 
 export class ModelGatewayService {
   private readonly calls = new KeyedLock();
   private readonly routes: ModelRoute[];
   private readonly backend: ChatModelBackend;
   private readonly maxToolCallsPerTurn: number;
+  private readonly routeAvailable: NonNullable<ModelGatewayOptions['routeAvailable']>;
   /** Tool calls made per `${sessionStateId}:${turn}`. In memory: a turn never outlives the process. */
   private readonly turnToolCalls = new Map<string, number>();
+  /** Model calls made per `${sessionStateId}:${turn}`, for the same reason. */
+  private readonly turnModelCalls = new Map<string, number>();
 
   constructor(
     private readonly decisionService: DecisionService,
@@ -124,6 +152,7 @@ export class ModelGatewayService {
     this.routes = (options.modelRoutes ?? modelRoutesFor)(model);
     this.backend = options.backend ?? textAdapterBackend(model);
     this.maxToolCallsPerTurn = options.maxToolCallsPerTurn ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+    this.routeAvailable = options.routeAvailable ?? (() => true);
   }
 
   listModels(): ModelRoute[] {
@@ -147,6 +176,8 @@ export class ModelGatewayService {
     binding: GatewayTurnBinding,
   ): Promise<GatewayCompletion> {
     const initialSession = await this.sessions.requireGatewayTurn(binding);
+    await waitWhilePaused(initialSession.runId);
+    await this.sessions.requireGatewayTurn(binding);
     const messages = Array.isArray(request.messages) ? request.messages : [];
     if (messages.length === 0) throw new Error('messages must contain at least one item');
 
@@ -156,6 +187,24 @@ export class ModelGatewayService {
     );
     const session = await this.sessions.get(initialSession.id);
     if (!session) throw new Error('Active AgentOS session disappeared during model routing.');
+
+    const turnKey = binding.sessionStateId + ':' + binding.turn.toString();
+    const modelCalls = (this.turnModelCalls.get(turnKey) ?? 0) + 1;
+    this.turnModelCalls.set(turnKey, modelCalls);
+    const modelCallLimit = this.maxToolCallsPerTurn + MODEL_CALL_HEADROOM;
+    if (modelCalls > modelCallLimit) {
+      return this.finalReply(
+        session,
+        TURN_LIMIT_REPLY,
+        // Said once, the first time; Hermes may still call again.
+        modelCalls === modelCallLimit + 1
+          ? 'The agent made ' +
+              modelCallLimit.toString() +
+              ' model calls in one run without finishing; AgentOS ended the run instead of ' +
+              'calling the model again.'
+          : undefined,
+      );
+    }
 
     const decisionState = decisionStateFromSession(session);
     const callContext: ProviderCallContext = {
@@ -209,13 +258,52 @@ export class ModelGatewayService {
     const selectedRequestTools = requestTools.filter((tool) =>
       selectedIds.has(tool.registered.descriptor.id),
     );
-    const modelCandidates =
-      selectedTools.length > 0 ? this.routes.filter((route) => route.supportsTools) : this.routes;
-    const modelDecision = await this.decisionService.selectModel(
-      decisionState,
-      modelCandidates,
-      callContext,
+    const availableRoutes = this.routes.filter(
+      (route) => route.enabled && this.routeAvailable(route, callContext),
     );
+    const modelCandidates =
+      selectedTools.length > 0
+        ? availableRoutes.filter((route) => route.supportsTools)
+        : availableRoutes;
+    if (modelCandidates.length === 0) {
+      return this.finalReply(
+        session,
+        '[AgentOS] Stopped this agent run: no model with eligible credentials is available. ' +
+          'Configure model credentials in Connections or enable local Ollama.',
+      );
+    }
+    // The all-tools baseline arm pins a cost tier so it measures "frontier
+    // model" rather than whatever Jev would pick. Falls back to the normal
+    // choice when no route of that tier is available.
+    const pinnedRoute = session.pinnedCostTier
+      ? modelCandidates.find(
+          (route) => route.deployment !== 'local' && route.costTier === session.pinnedCostTier,
+        )
+      : undefined;
+    let modelDecision: Pick<
+      Awaited<ReturnType<DecisionService['selectModel']>>,
+      'selectedRouteId' | 'confidence' | 'reasonCodes'
+    >;
+    try {
+      modelDecision = pinnedRoute
+        ? {
+            selectedRouteId: pinnedRoute.id,
+            confidence: 1,
+            reasonCodes: ['baseline-pinned-' + pinnedRoute.costTier],
+          }
+        : await this.decisionService.selectModel(decisionState, modelCandidates, callContext);
+    } catch (error) {
+      if (!(error instanceof NoEligibleModelRouteError)) throw error;
+      // The session now holds data no available model may see -- typically a
+      // private tool result, since the cloud routes take public data only.
+      return this.finalReply(
+        session,
+        '[AgentOS] Stopped this agent run: its data is now labelled ' +
+          session.dataLabels.join(', ') +
+          ', and no available model is allowed to see that. Only a local model may continue ' +
+          'a task like this; turn on Ollama to run it locally.',
+      );
+    }
     const selectedRoute = modelCandidates.find(
       (route) => route.id === modelDecision.selectedRouteId,
     );
@@ -290,20 +378,31 @@ export class ModelGatewayService {
       messageCount: messages.length,
     });
 
-    const turnKey = binding.sessionStateId + ':' + binding.turn.toString();
     const turnBudgetSpent =
       selectedToolSchemas.length > 0 &&
       (this.turnToolCalls.get(turnKey) ?? 0) >= this.maxToolCallsPerTurn;
     let completed: ChatModelBackendResult;
     try {
+      await waitWhilePaused(session.runId, callContext.signal);
+      callContext.signal?.throwIfAborted();
       await this.sessions.requireGatewayTurn(binding);
       completed = await this.backend.complete(
         {
           route: selectedRoute,
+          // A USER message, so it lands right after the tool results. As a
+          // system message it was hoisted into the system prompt, the
+          // conversation still ended on a tool result, and the model replied
+          // with nothing; Hermes's "continue with the task" nudge then turned
+          // the turn's last reply into a progress note instead of an answer.
           messages: turnBudgetSpent
-            ? [...messages, { role: 'system', content: TOOL_BUDGET_EXHAUSTED_INSTRUCTION }]
+            ? [...messages, { role: 'user', content: TOOL_BUDGET_EXHAUSTED_INSTRUCTION }]
             : messages,
-          tools: turnBudgetSpent ? [] : selectedToolSchemas,
+          // Stripping the tools from a transcript full of tool calls made
+          // Anthropic return an EMPTY reply; Hermes then nudged the model,
+          // which narrated a next step it could not take, and the turn ended
+          // with no answer. Keep the definitions and forbid the call instead.
+          tools: selectedToolSchemas,
+          ...(turnBudgetSpent ? { toolChoice: 'none' as const } : {}),
           maxTokens: request.max_completion_tokens ?? request.max_tokens,
         },
         callContext,
@@ -328,6 +427,11 @@ export class ModelGatewayService {
         dataLabels: session.dataLabels,
         messageCount: messages.length,
         latencyMs: Date.now() - modelStartedAt,
+        ...ioPreview(
+          session.dataLabels,
+          messages,
+          selectedTools.map((descriptor) => descriptor.id),
+        ),
         error: {
           code: 'MODEL_CALL_FAILED',
           message: error instanceof Error ? compactSummary(error.message) : 'Model call failed.',
@@ -355,6 +459,12 @@ export class ModelGatewayService {
       tokensOut: completed.tokensOut,
       estimatedCostCents: completed.estimatedCostCents,
       toolCallCount: completed.toolCalls?.length ?? 0,
+      ...ioPreview(
+        session.dataLabels,
+        messages,
+        selectedTools.map((descriptor) => descriptor.id),
+        completed,
+      ),
     });
 
     const latest = await this.sessions.get(session.id);
@@ -381,6 +491,42 @@ export class ModelGatewayService {
       runId: session.runId,
       sessionStateId: latest?.id ?? session.id,
       selectedToolIds: selectedTools.map((descriptor) => descriptor.id),
+    };
+  }
+
+  /**
+   * Answer without calling a model: a plain final reply with no tool calls,
+   * which ends the Hermes turn cleanly. For when another model call would be
+   * wrong (a looping turn) or is impossible (no model may see the session's
+   * data). Throwing instead made Hermes retry three times and then report the
+   * gateway as "temporarily unavailable, wait and /retry" -- untrue for both.
+   * The reply is also written to the run log, where a person will look.
+   */
+  private async finalReply(
+    session: AgentSessionState,
+    text: string,
+    log: string | undefined = text,
+  ): Promise<GatewayCompletion> {
+    if (log) {
+      await this.bus.emit(session.runId, {
+        type: 'log',
+        runId: session.runId,
+        level: 'warn',
+        message: log,
+        at: nowIso(),
+      });
+    }
+    return {
+      id: newId('chatcmpl'),
+      created: Math.floor(Date.now() / 1000),
+      model: 'agentos-stop',
+      text,
+      toolCalls: [],
+      tokensIn: 0,
+      tokensOut: 0,
+      runId: session.runId,
+      sessionStateId: session.id,
+      selectedToolIds: [],
     };
   }
 
@@ -491,6 +637,9 @@ export class ModelGatewayService {
     tokensOut?: number;
     estimatedCostCents?: number;
     toolCallCount?: number;
+    inputPreview?: string;
+    outputPreview?: string;
+    ioWithheld?: boolean;
     error?: { code: string; message: string };
   }): Promise<void> {
     await this.bus.emit(input.runId, {
@@ -504,6 +653,49 @@ export class ModelGatewayService {
       },
     });
   }
+}
+
+/**
+ * Debug-log copy of a model call's input and output. Truncated per message, and
+ * only built for all-public sessions: the event stream is UI-safe by contract,
+ * so anything that might carry private data is withheld rather than redacted.
+ */
+function ioPreview(
+  labels: readonly DataLabel[],
+  messages: OpenAiMessage[],
+  toolNames: string[],
+  output?: ChatModelBackendResult,
+): { inputPreview?: string; outputPreview?: string; ioWithheld?: boolean } {
+  if (!labels.every((label) => label === 'public')) return { ioWithheld: true };
+  const clip = (text: string, max: number) =>
+    text.length <= max ? text : text.slice(0, max) + '… [+' + (text.length - max).toString() + ' chars]';
+  const shown = messages.slice(-8);
+  const skipped = messages.length - shown.length;
+  const input = [
+    ...(skipped > 0 ? ['… ' + skipped.toString() + ' earlier message(s) not shown'] : []),
+    ...shown.map((message) => {
+      const text = contentText(message.content).trim();
+      const calls = (message as { tool_calls?: GatewayToolCall[] }).tool_calls ?? [];
+      return (
+        '[' +
+        message.role +
+        '] ' +
+        clip(text, message.role === 'system' ? 300 : 1500) +
+        calls.map((call) => '\n  -> ' + call.function.name + ' ' + clip(call.function.arguments, 300)).join('')
+      );
+    }),
+    ...(toolNames.length > 0 ? ['tools offered: ' + toolNames.join(', ')] : ['tools offered: none']),
+  ].join('\n\n');
+  if (!output) return { inputPreview: input };
+  const outputText = [
+    output.text ? clip(output.text.trim(), 3000) : '',
+    ...(output.toolCalls ?? []).map(
+      (call) => 'tool call: ' + call.function.name + ' ' + clip(call.function.arguments, 600),
+    ),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return { inputPreview: input, outputPreview: outputText || '(empty response)' };
 }
 
 function isSeparateBrowserOperation(toolId: string): boolean {
@@ -571,7 +763,8 @@ function summarizeMessage(
  * Unwrapping grants nothing on its own: the body must still equal a summary
  * AgentOS recorded as public, or it gets local_only as before.
  */
-const HERMES_TOOL_ENVELOPE = /^<untrusted_tool_result source="[^"\n]*">\n[^\n]*\n\n([\s\S]*)\n<\/untrusted_tool_result>$/;
+const HERMES_TOOL_ENVELOPE =
+  /^<untrusted_tool_result source="[^"\n]*">\n[^\n]*\n\n([\s\S]*)\n<\/untrusted_tool_result>$/;
 
 function unwrapHermesToolEnvelope(text: string): string {
   const body = HERMES_TOOL_ENVELOPE.exec(text)?.[1] ?? text;
