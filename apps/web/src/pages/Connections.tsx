@@ -1,14 +1,16 @@
 /**
  * Truthful connections screen: what AgentOS is actually wired to, not what a demo
  * script claims. Every fact here comes straight from a live route response — no
- * secrets are ever held in state, only the env-var NAMES the backend reads them
- * from. See docs/frontend-handoff.md, "Tool connections UI".
+ * credential status never returns secret values. User API-key inputs live only
+ * in the setup form until saved to the local API process. See docs/frontend-handoff.md.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { McpConnection, ProviderStatus } from '@htn/shared';
 import { api, ApiError, type ToolCatalogEntry } from '../lib/api';
 import { Icon } from '../components/ui/Icon';
+import { CredentialsPanel } from '../components/connections/CredentialsPanel';
+import { SupervisionExamples } from '../components/actions/SupervisionExamples';
 
 type ComposioTool = { name: string; toolkit?: string; version?: string; connected: boolean };
 
@@ -115,6 +117,8 @@ export function Connections() {
       </header>
 
       <ProvidersSection state={providers} />
+      <CredentialsPanel />
+      <SupervisionExamples />
       <ToolSourcesSection composio={composio} mcp={mcp} />
       <ToolInventorySection state={tools} />
     </div>
@@ -153,7 +157,15 @@ function ProvidersSection({
             </div>
             {state.data.providers.map((provider) => (
               <div className="connections-table-row" key={provider.id}>
-                <strong>{provider.id}</strong>
+                <span>
+                  <strong>{provider.id}</strong>
+                  {provider.id === 'browserbase' && (
+                    <small>
+                      Deprecated · compatibility backend. Switch to Browserless after hosted
+                      validation.
+                    </small>
+                  )}
+                </span>
                 <span className="connections-caps">{provider.capabilities.join(', ')}</span>
                 <span>{modeChip(provider.mode)}</span>
                 <span>
