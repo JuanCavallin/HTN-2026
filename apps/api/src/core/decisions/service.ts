@@ -63,7 +63,7 @@ function deterministicActionPolicy(descriptor: ToolDescriptor, action: ToolActio
   ) {
     return 'deny';
   }
-  if (descriptor.baselineEffect === 'destructive' || descriptor.reversibility === 'irreversible') {
+  if (descriptor.requiresChangeReview || descriptor.baselineEffect === 'destructive' || descriptor.reversibility === 'irreversible') {
     return 'ask_user';
   }
   if (descriptor.baselineEffect === 'write' || descriptor.reversibility === 'recoverable') {

@@ -20,6 +20,15 @@ import { checkOutboundText } from './contentCheck.js';
 import type { ToolExecutorRegistry, ToolExecutionOutput } from './executors.js';
 import { modelToolText } from './executors.js';
 import type { RegisteredTool, ToolRegistry } from './registry.js';
+import {
+  actionEvidenceStore,
+  actionFingerprint,
+  actionForTrace,
+} from '../../services/actionEvidence.js';
+import { KeyedLock } from '../locks.js';
+import { waitWhilePaused } from '../pauseGate.js';
+
+const mutationLocks = new KeyedLock();
 
 export type ToolBrokerErrorCode =
   | 'TOOL_NOT_REGISTERED'
@@ -34,6 +43,7 @@ export type ToolBrokerErrorCode =
   | 'TOOL_ACTION_DENIED'
   | 'TOOL_APPROVAL_UNAVAILABLE'
   | 'TOOL_EXECUTION_FAILED'
+  | 'TOOL_EXECUTION_UNKNOWN'
   | 'TOOL_VERIFICATION_FAILED';
 
 export class ToolBrokerError extends Error {
@@ -55,6 +65,8 @@ export interface ToolExecutionRequest {
   /** Labels may be added for a particular payload, but session labels cannot be removed. */
   dataLabels?: DataLabel[];
   signal?: AbortSignal;
+  /** Trusted graph author explicitly requested a submit/approval boundary. */
+  forceApproval?: boolean;
 }
 
 export interface ToolBrokerResult extends ToolExecutionOutput {
@@ -106,6 +118,9 @@ export class ToolBroker {
         'Agent session state not found: ' + request.sessionStateId,
       );
     }
+    await waitWhilePaused(session.runId, request.signal);
+    if (request.signal?.aborted)
+      throw new ToolBrokerError('TOOL_ACTION_DENIED', 'Tool call cancelled.');
     if (request.expectedTurn !== undefined && request.expectedTurn !== session.turn) {
       throw new ToolBrokerError('TOOL_NOT_SELECTED', 'Stale gateway turn.');
     }
@@ -117,6 +132,11 @@ export class ToolBroker {
     const exactArguments = deepFreeze(
       bindBrowserResource(session, registered.descriptor.id, request.arguments),
     );
+    if (Buffer.byteLength(JSON.stringify(exactArguments)) > 128_000)
+      throw new ToolBrokerError(
+        'TOOL_ARGUMENTS_INVALID',
+        'Tool payload exceeds the bounded action budget.',
+      );
     this.assertSelected(session, registered.descriptor);
     this.assertAvailable(registered.descriptor);
     this.assertScopes(registered);
@@ -151,10 +171,23 @@ export class ToolBroker {
       operation: registered.descriptor.id,
       arguments: exactArguments,
       destination,
+      ...(registered.descriptor.accountRef ? { accountRef: registered.descriptor.accountRef } : {}),
       dataLabels: mergeLabels(session.dataLabels, request.dataLabels ?? []),
       createdAt: nowIso(),
     });
-    await this.emit(session, action, 'proposed');
+    action = deepFreeze({ ...action, previewFingerprint: actionFingerprint(action) });
+    const proposedEvidence = actionEvidenceStore.proposed(action, registered.descriptor);
+    if (
+      (registered.descriptor.requiresChangeReview || request.forceApproval) &&
+      actionEvidenceStore.preview(action.runId, proposedEvidence.previewRef!)?.truncated
+    ) {
+      actionEvidenceStore.retireExactAction(action.runId, action.id);
+      throw new ToolBrokerError(
+        'TOOL_ARGUMENTS_INVALID',
+        'The proposed change exceeds the complete preview budget. Narrow the edit before requesting approval.',
+      );
+    }
+    await this.emit(session, action, 'proposed', { evidence: proposedEvidence });
     await this.bus.emit(session.runId, {
       type: 'harness.turn',
       turn: {
@@ -180,6 +213,13 @@ export class ToolBroker {
       registered.descriptor,
       callContext,
     );
+    if (request.forceApproval && authorization.finalPolicy !== 'deny')
+      authorization = {
+        ...authorization,
+        allowed: false,
+        finalPolicy: 'ask_user',
+        reasonCodes: [...authorization.reasonCodes, 'explicit-submit-requires-approval'],
+      };
     await this.emit(session, action, 'policy_decided', { authorization });
     await this.bus.emit(session.runId, {
       type: 'control.decided',
@@ -287,6 +327,7 @@ export class ToolBroker {
       if (receipt.revisedArguments !== undefined) {
         const revisedArguments = deepFreeze(structuredClone(receipt.revisedArguments));
         this.validateArguments(registered, revisedArguments);
+        assertRevisionTargetUnchanged(action.arguments, revisedArguments);
 
         const revisedDestination = executor.destinationFor({
           descriptor: registered.descriptor,
@@ -308,8 +349,19 @@ export class ToolBroker {
         }
 
         action = deepFreeze<ToolAction>({ ...action, arguments: revisedArguments });
-        await this.emit(session, action, 'proposed', { authorization, approvalId });
+        action = deepFreeze({ ...action, previewFingerprint: actionFingerprint(action) });
+        const revisedEvidence = actionEvidenceStore.proposed(action, registered.descriptor);
+        await this.emit(session, action, 'proposed', {
+          authorization,
+          approvalId,
+          evidence: revisedEvidence,
+        });
 
+        if (actionEvidenceStore.preview(action.runId, revisedEvidence.previewRef!)?.truncated)
+          throw new ToolBrokerError(
+            'TOOL_ARGUMENTS_INVALID',
+            'Revised change exceeds the complete preview budget.',
+          );
         authorization = await this.decisions.authorizeAction(
           decisionStateFromSession(session),
           action,
@@ -318,10 +370,12 @@ export class ToolBroker {
         );
         await this.emit(session, action, 'policy_decided', { authorization, approvalId });
 
-        // 'ask_user' again would mean the revision is no safer than what the
-        // human was already shown, and re-prompting the same person for the
-        // payload they just wrote is a loop, not a gate. Fail closed instead.
-        if (!authorization.allowed || authorization.finalPolicy === 'deny') {
+        // The human just approved this edited payload; policy may still require
+        // that receipt. Deterministic denials and missing authorization block.
+        if (
+          authorization.finalPolicy === 'deny' ||
+          (!authorization.allowed && authorization.finalPolicy !== 'ask_user')
+        ) {
           const message = 'The revised tool action was not authorized.';
           await this.emit(session, action, 'blocked', {
             authorization,
@@ -330,8 +384,17 @@ export class ToolBroker {
           });
           throw new ToolBrokerError('TOOL_ACTION_DENIED', message);
         }
+        authorization = {
+          ...authorization,
+          allowed: true,
+          reasonCodes: [...authorization.reasonCodes, 'human-approved-revised-exact-action'],
+        };
       }
-
+      authorization = {
+        ...authorization,
+        allowed: true,
+        reasonCodes: [...authorization.reasonCodes, 'human-approved-exact-action'],
+      };
       await this.emit(session, action, 'approved', { authorization, approvalId });
     } else if (!authorization.allowed) {
       throw new ToolBrokerError(
@@ -340,6 +403,7 @@ export class ToolBroker {
       );
     }
 
+    await waitWhilePaused(session.runId, request.signal);
     const currentSession = await this.sessions.get(session.id);
     if (
       !currentSession ||
@@ -353,7 +417,41 @@ export class ToolBroker {
       throw new ToolBrokerError('TOOL_ACTION_DENIED', 'Tool call cancelled.');
     await this.emit(session, action, 'executing', { authorization, approvalId });
     let executed: ToolExecutionOutput;
+    const release =
+      registered.descriptor.baselineEffect !== 'read'
+        ? await mutationLocks.acquire(
+            registered.descriptor.credentialRef + ':' + destination,
+            request.signal,
+          )
+        : undefined;
+    let dispatched = false;
     try {
+      await waitWhilePaused(session.runId, request.signal);
+      const dispatchSession = await this.sessions.get(session.id);
+      if (
+        !dispatchSession ||
+        dispatchSession.turn !== session.turn ||
+        !['created', 'running', 'awaiting_approval'].includes(dispatchSession.status)
+      )
+        throw new Error('The authorized turn is no longer active.');
+      this.assertSelected(dispatchSession, registered.descriptor);
+      const currentTool = await this.registry.get(action.toolId);
+      if (
+        !currentTool ||
+        currentTool.descriptor.version !== action.descriptorVersion ||
+        currentTool.descriptor.executorRef !== registered.descriptor.executorRef ||
+        currentTool.descriptor.accountRef !== action.accountRef
+      )
+        throw new Error('Tool descriptor changed after review; request a fresh action.');
+      this.assertAvailable(currentTool.descriptor);
+      this.assertScopes(currentTool);
+      if (dispatchSession.dataLabels.some((label) => !action.dataLabels.includes(label)))
+        throw new Error('Session privacy tightened after review; request fresh authorization.');
+      if (action.previewFingerprint !== actionFingerprint(action))
+        throw new Error('Reviewed payload changed before execution.');
+      if (executor.validateResourceVersion)
+        await executor.validateResourceVersion(action, callContext);
+      dispatched = true;
       executed = await executor.execute(action, {
         ...callContext,
         sessionStateId: session.id,
@@ -361,12 +459,25 @@ export class ToolBroker {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Tool executor failed.';
+      const unknown =
+        dispatched &&
+        registered.descriptor.baselineEffect !== 'read' &&
+        registered.descriptor.transport !== 'local';
+      const code = unknown ? 'TOOL_EXECUTION_UNKNOWN' : 'TOOL_EXECUTION_FAILED';
       await this.emit(session, action, 'failed', {
         authorization,
         approvalId,
-        error: { code: 'TOOL_EXECUTION_FAILED', message },
+        outcome: unknown ? 'unknown' : dispatched ? 'partial' : 'not_executed',
+        error: {
+          code,
+          message: unknown
+            ? 'Provider write outcome is unknown. Check the resource before retrying. ' + message
+            : message,
+        },
       });
-      throw new ToolBrokerError('TOOL_EXECUTION_FAILED', message);
+      throw new ToolBrokerError(code, message);
+    } finally {
+      release?.();
     }
 
     if (authorization.finalPolicy === 'verify' && executed.verified !== true) {
@@ -403,8 +514,11 @@ export class ToolBroker {
       authorization,
       approvalId,
       outputSummary,
+      evidence: actionEvidenceStore.completed({ ...action, dataLabels: outputLabels }, executed),
+      outcome: 'completed',
     });
-    return { ...executed, action, authorization, approvalId };
+    const { executedPreview: _humanOnlyPreview, ...modelResult } = executed;
+    return { ...modelResult, action, authorization, approvalId };
   }
 
   private assertSelected(session: AgentSessionState, descriptor: ToolDescriptor): void {
@@ -492,9 +606,11 @@ export class ToolBroker {
     phase: ToolLifecycleEvent['phase'],
     details: Pick<
       ToolLifecycleEvent,
-      'authorization' | 'approvalId' | 'outputSummary' | 'error'
+      'authorization' | 'approvalId' | 'outputSummary' | 'error' | 'evidence' | 'outcome'
     > = {},
   ): Promise<void> {
+    if (phase === 'blocked' || phase === 'failed')
+      actionEvidenceStore.retireExactAction(action.runId, action.id);
     await this.bus.emit(session.runId, {
       type: 'tool.lifecycle',
       lifecycle: {
@@ -503,7 +619,7 @@ export class ToolBroker {
         stepId: session.stepId,
         sessionStateId: session.id,
         phase,
-        action,
+        action: actionForTrace(action),
         ...details,
         at: nowIso(),
       },
@@ -527,7 +643,10 @@ function bindBrowserResource(
   argumentsValue: Json,
 ): Json {
   const bound = session.boundBrowserSessionId;
-  const isBrowser = toolId.startsWith('browserbase.') || toolId.startsWith('localbrowser.');
+  const isBrowser =
+    toolId.startsWith('browserbase.') ||
+    toolId.startsWith('localbrowser.') ||
+    toolId.startsWith('browserless.');
   if (bound === undefined || !isBrowser) {
     return structuredClone(argumentsValue);
   }
@@ -539,11 +658,16 @@ function bindBrowserResource(
   if (operation === 'open' || operation === 'search' || operation === 'read') {
     throw new ToolBrokerError(
       'TOOL_NOT_SELECTED',
-      'This agent task is bound to an existing browser session; ' + operation + ' cannot create or use a separate session.',
+      'This agent task is bound to an existing browser session; ' +
+        operation +
+        ' cannot create or use a separate session.',
     );
   }
   if (!argumentsValue || typeof argumentsValue !== 'object' || Array.isArray(argumentsValue)) {
-    throw new ToolBrokerError('TOOL_ARGUMENTS_INVALID', 'Bound browser actions require object arguments.');
+    throw new ToolBrokerError(
+      'TOOL_ARGUMENTS_INVALID',
+      'Bound browser actions require object arguments.',
+    );
   }
 
   const args = structuredClone(argumentsValue) as Record<string, Json>;
@@ -585,4 +709,35 @@ function deepFreeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+function assertRevisionTargetUnchanged(original: Json, revised: Json): void {
+  if (
+    !original ||
+    typeof original !== 'object' ||
+    Array.isArray(original) ||
+    !revised ||
+    typeof revised !== 'object' ||
+    Array.isArray(revised)
+  )
+    return;
+  for (const key of [
+    'artifactId',
+    'document_id',
+    'spreadsheet_id',
+    'file_id',
+    'connectedAccountId',
+    'account_id',
+    'expectedVersion',
+    'baseVersion',
+    'etag',
+    'range',
+    'sheet',
+  ]) {
+    if (JSON.stringify(original[key]) !== JSON.stringify(revised[key]))
+      throw new ToolBrokerError(
+        'TOOL_ACTION_DENIED',
+        'Revision cannot change the reviewed target or version (' + key + ').',
+      );
+  }
 }

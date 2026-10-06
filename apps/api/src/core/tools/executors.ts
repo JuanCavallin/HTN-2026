@@ -1,4 +1,11 @@
-import type { DataLabel, Json, ProviderCallContext, ToolAction, ToolDescriptor } from '@htn/shared';
+import type {
+  ActionPreview,
+  DataLabel,
+  Json,
+  ProviderCallContext,
+  ToolAction,
+  ToolDescriptor,
+} from '@htn/shared';
 
 export interface ToolExecutionOutput {
   output: Json;
@@ -12,6 +19,11 @@ export interface ToolExecutionOutput {
   modelOutput?: Json;
   /** Required when AgentOS policy says the result needs verification. */
   verified?: boolean;
+  /** Stronger than provider acknowledgement: resulting state was independently read back. */
+  evidenceVerified?: boolean;
+  executionMode?: 'live' | 'mock';
+  /** Private bounded preview, stored locally; never put in model output or SSE. */
+  executedPreview?: ActionPreview;
 }
 
 export function modelToolText(result: ToolExecutionOutput): string {
@@ -28,6 +40,7 @@ export interface ToolExecutor {
   /** Pure/local resolution performed before authorization. No network calls here. */
   destinationFor(input: { descriptor: ToolDescriptor; arguments: Json }): string | undefined;
   execute(action: ToolAction, ctx: ProviderCallContext): Promise<ToolExecutionOutput>;
+  validateResourceVersion?(action: ToolAction, ctx: ProviderCallContext): Promise<void>;
 }
 
 export interface ToolExecutorRegistry {

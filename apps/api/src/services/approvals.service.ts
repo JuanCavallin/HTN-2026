@@ -11,6 +11,19 @@ import { pendingAction, settleApproval } from '../core/approvalGate.js';
 import { reauthorizeRevision } from '../core/risk.js';
 import { nowIso } from '../lib/ids.js';
 import { bus, store } from './runtime.js';
+import {
+  actionEvidenceStore,
+  actionFingerprint,
+  actionForTrace,
+  buildActionPreview,
+} from './actionEvidence.js';
+import { toolRegistry, toolExecutors } from './runtime.js';
+import Ajv, { type AnySchema } from 'ajv';
+import { KeyedLock } from '../core/locks.js';
+import { prepareBrowserHandoffApproval } from '../providers/withBrowserOwnership.js';
+import { isTerminal } from '@htn/shared';
+
+const approvalLocks = new KeyedLock();
 
 /** The client sent a revision the gate refuses. Distinct from a conflict. */
 export class ApprovalRevisionError extends Error {
@@ -49,6 +62,15 @@ export async function getApproval(id: string): Promise<Approval | null> {
  * resumes, any client watching has already seen the resolution.
  */
 export async function decideApproval(id: string, body: ApprovalDecision): Promise<Approval> {
+  const release = await approvalLocks.acquire(id);
+  try {
+    return await decideApprovalLocked(id, body);
+  } finally {
+    release();
+  }
+}
+
+async function decideApprovalLocked(id: string, body: ApprovalDecision): Promise<Approval> {
   const { decision, note } = body;
   const existing = await store.getApproval(id);
   if (!existing) throw new ApprovalConflictError('Approval ' + id + ' not found');
@@ -64,6 +86,37 @@ export async function decideApproval(id: string, body: ApprovalDecision): Promis
   // decidable. Nothing half-applied.
   let patch: Partial<Approval> = { status: decision, decidedAt: nowIso(), note };
   let outcomeAction = pendingAction(id);
+  const currentRun = await store.getRun(existing.runId);
+  if (!outcomeAction || !currentRun || isTerminal(currentRun.status))
+    throw new ApprovalConflictError(
+      'This run is no longer waiting on the approval. Start a new action.',
+    );
+  const handoff = existing.proposedAction;
+  if (isRecord(handoff) && handoff.kind === 'human_handoff') {
+    if (decision === 'revised')
+      throw new ApprovalRevisionError(
+        'A browser handoff cannot be revised into a different target or continuation.',
+      );
+    if (decision === 'approved') {
+      if (
+        typeof handoff.sessionId !== 'string' ||
+        (handoff.resumeWhen === 'url_matches' &&
+          (typeof handoff.expectUrl !== 'string' || !handoff.expectUrl))
+      )
+        throw new ApprovalConflictError('Handoff verification target is missing.');
+      try {
+        await prepareBrowserHandoffApproval({
+          runId: existing.runId,
+          sessionId: handoff.sessionId,
+          ...(typeof handoff.expectUrl === 'string' ? { expectUrl: handoff.expectUrl } : {}),
+        });
+      } catch {
+        throw new ApprovalConflictError(
+          'Could not safely revoke browser control or verify the handoff. Approval remains pending. Retry verification or return to manual control.',
+        );
+      }
+    }
+  }
 
   if (decision === 'revised') {
     const original = pendingAction(id);
@@ -73,6 +126,7 @@ export async function decideApproval(id: string, body: ApprovalDecision): Promis
       );
     }
 
+    await validateExactToolRevision(existing, body.revisedPayload);
     const authorization = reauthorizeRevision(original, {
       payload: body.revisedPayload,
       amountCents: body.revisedAmountCents,
@@ -83,13 +137,27 @@ export async function decideApproval(id: string, body: ApprovalDecision): Promis
     patch = {
       ...patch,
       // Both survive: what was asked for, and what actually runs.
-      revisedAction: toJson(authorization.action.payload),
+      revisedAction: await privateRevisionMetadata(authorization.action.payload, existing),
       reversibility: authorization.decision.reversibility,
       riskClass: authorization.decision.riskClass,
       reauthorizedRule: authorization.decision.rule,
     };
   }
 
+  // Verification can await remote browser I/O. Cancellation/timeout may have
+  // expired the waiter while it was in flight; never revive that action.
+  const latestRun = await store.getRun(existing.runId);
+  const latestApproval = await store.getApproval(id);
+  if (
+    !pendingAction(id) ||
+    !latestRun ||
+    isTerminal(latestRun.status) ||
+    latestApproval?.status !== 'pending'
+  ) {
+    throw new ApprovalConflictError(
+      'This run stopped waiting while the action was being verified. Start a new action.',
+    );
+  }
   const updated = await store.patchApproval(id, patch);
 
   await bus.emit(updated.runId, { type: 'approval.resolved', approval: updated });
@@ -111,4 +179,107 @@ export async function decideApproval(id: string, body: ApprovalDecision): Promis
   }
 
   return updated;
+}
+
+async function privateRevisionMetadata(payload: unknown, approval: Approval): Promise<Json> {
+  const value = toJson(payload);
+  const proposed = approval.proposedAction;
+  if (
+    !proposed ||
+    typeof proposed !== 'object' ||
+    Array.isArray(proposed) ||
+    typeof proposed.actionId !== 'string'
+  )
+    return value;
+  const evidence = actionEvidenceStore
+    .list(approval.runId, proposed.actionId)
+    .findLast((e) => e.phase === 'proposed');
+  if (
+    !evidence ||
+    !['document', 'spreadsheet', 'presentation'].includes(evidence.kind) ||
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value)
+  )
+    return value;
+  const original = actionEvidenceStore.exactAction(approval.runId, proposed.actionId);
+  const registered = original ? await toolRegistry.get(original.toolId) : null;
+  if (!original || !registered)
+    throw new ApprovalRevisionError('Exact proposal expired; request a fresh action.');
+  const next = { ...original, arguments: value.arguments };
+  next.previewFingerprint = actionFingerprint(next);
+  actionEvidenceStore.proposed(next, registered.descriptor);
+  return {
+    ...value,
+    arguments: actionForTrace(next).arguments,
+    previewFingerprint: next.previewFingerprint,
+  };
+}
+
+/** Reject retargeting/schema errors while the original approval is still pending. */
+async function validateExactToolRevision(approval: Approval, revised: unknown): Promise<void> {
+  const proposed = approval.proposedAction;
+  if (!isRecord(proposed) || typeof proposed.actionId !== 'string') return;
+  const original = actionEvidenceStore.exactAction(approval.runId, proposed.actionId);
+  if (!original) throw new ApprovalRevisionError('Exact proposal expired; request a fresh action.');
+  if (!isRecord(revised) || !('arguments' in revised))
+    throw new ApprovalRevisionError(
+      'Revision requires the complete exact-action envelope and arguments.',
+    );
+  for (const key of [
+    'actionId',
+    'toolId',
+    'descriptorVersion',
+    'operation',
+    'destination',
+    'dataLabels',
+    'previewFingerprint',
+    'accountRef',
+  ]) {
+    if (JSON.stringify(proposed[key]) !== JSON.stringify(revised[key]))
+      throw new ApprovalRevisionError('Revision cannot change ' + key + '.');
+  }
+  const args = revised.arguments as Json;
+  if (isRecord(original.arguments) && isRecord(args))
+    for (const key of [
+      'artifactId',
+      'document_id',
+      'spreadsheet_id',
+      'file_id',
+      'connectedAccountId',
+      'account_id',
+      'expectedVersion',
+      'baseVersion',
+      'etag',
+      'range',
+      'sheet',
+    ]) {
+      if (JSON.stringify(original.arguments[key]) !== JSON.stringify(args[key]))
+        throw new ApprovalRevisionError(
+          'Revision cannot change reviewed target/version (' + key + ').',
+        );
+    }
+  const registered = await toolRegistry.get(original.toolId);
+  if (!registered || registered.descriptor.version !== original.descriptorVersion)
+    throw new ApprovalRevisionError('Tool metadata changed; request fresh approval.');
+  const validate = new Ajv({ allErrors: true, strict: true }).compile(
+    registered.inputSchema as AnySchema,
+  );
+  if (!validate(args))
+    throw new ApprovalRevisionError('Revised arguments do not satisfy the trusted tool schema.');
+  if (buildActionPreview({ ...original, arguments: args }, registered.descriptor).truncated)
+    throw new ApprovalRevisionError(
+      'Revised change exceeds the complete preview budget; narrow the edit.',
+    );
+  const executor = toolExecutors.resolve(registered.descriptor.executorRef);
+  if (
+    !executor ||
+    executor.destinationFor({ descriptor: registered.descriptor, arguments: args }) !==
+      original.destination
+  )
+    throw new ApprovalRevisionError('Revision cannot change the reviewed destination.');
+}
+
+function isRecord(value: unknown): value is Record<string, Json> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
