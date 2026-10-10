@@ -18,7 +18,9 @@ export type ProviderId =
   | 'ollama' // local/private model runtime
   | 'mcp' // user-configured upstream MCP connections
   | 'anthropic' // frontier text model
-  | 'gptzero'; // OUT OF SCOPE — slot only
+  | 'gemini' // direct Google cloud model route (second cloud vendor)
+  | 'weather' // structured public weather and geocoding data
+  | 'gptzero'; // outbound-text authenticity check
 
 export const PROVIDER_IDS = [
   'hermes',
@@ -30,6 +32,8 @@ export const PROVIDER_IDS = [
   'ollama',
   'mcp',
   'anthropic',
+  'gemini',
+  'weather',
   'gptzero',
 ] as const satisfies readonly ProviderId[];
 
@@ -54,7 +58,9 @@ export type Capability =
   | 'decision'
   | 'browser'
   | 'browser.local'
+  | 'web.search'
   | 'toolbox'
+  | 'weather.forecast'
   | 'text.model'
   | 'content.analysis';
 
@@ -236,7 +242,20 @@ export interface BrowserAdapter extends ProviderAdapter {
   openSession(
     input: { startUrl?: string },
     ctx: ProviderCallContext,
-  ): Promise<ProviderResult<{ sessionId: string; liveViewUrl?: string }>>;
+  ): Promise<
+    ProviderResult<{
+      sessionId: string;
+      liveViewUrl?: string;
+      /**
+       * True ONLY when a human can type into `liveViewUrl`. A `handoff` node
+       * refuses to run without it, so it must be a promise the adapter can
+       * actually keep — never inferred from the URL merely existing. An
+       * adapter that serves a recording, a screenshot strip or a read-only
+       * stream leaves this false.
+       */
+      interactive?: boolean;
+    }>
+  >;
   act(
     input: { sessionId: string; instruction: string },
     ctx: ProviderCallContext,
@@ -246,6 +265,34 @@ export interface BrowserAdapter extends ProviderAdapter {
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<T>>;
   closeSession(sessionId: string, ctx: ProviderCallContext): Promise<ProviderResult<null>>;
+
+  /**
+   * Mint a CURRENT viewer URL for a running session.
+   *
+   * MUST BE CALLED WHEN THE VIEWER IS WANTED, not when the session opens.
+   * Browserbase signs its debug URL with a short-lived token: the URL captured
+   * at open time is dead minutes later, and the symptom is a blank page that
+   * accepts no input -- which is exactly what a `handoff` hands a person, since
+   * they click the link long after the session opened.
+   *
+   * Optional: an adapter with no viewable session (local, mocked) omits it, and
+   * callers must treat a missing URL as a normal state rather than an error.
+   */
+  liveView?(
+    sessionId: string,
+    ctx: ProviderCallContext,
+  ): Promise<
+    ProviderResult<{
+      liveViewUrl?: string;
+      /**
+       * The URL of the page the viewer is pointed at. 'about:blank' is a real,
+       * common answer -- a session opened with no start URL has nothing else --
+       * and callers should SAY SO rather than hand over a blank viewer.
+       */
+      pageUrl?: string;
+      interactive: boolean;
+    }>
+  >;
 
   /** Optional element-table path used by the Jev browser controller. */
   snapshot?(
@@ -264,6 +311,72 @@ export interface BrowserAdapter extends ProviderAdapter {
   ): Promise<ProviderResult<BrowserPerformResult>>;
 }
 
+export interface WeatherLocation {
+  name: string;
+  country?: string;
+  admin1?: string;
+  latitude: number;
+  longitude: number;
+  timezone: string;
+}
+
+export interface WeatherForecastHour {
+  /** Local ISO-8601 hour in the resolved location, for example 2026-09-24T17:00. */
+  time: string;
+  temperature: number;
+  apparentTemperature: number;
+  precipitationProbability: number;
+  weatherCode: number;
+  condition: string;
+  windSpeed: number;
+}
+
+export interface WeatherAdapter extends ProviderAdapter {
+  resolveLocation(
+    input: { query: string },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<WeatherLocation>>;
+  hourlyForecast(
+    input: {
+      latitude: number;
+      longitude: number;
+      timezone: string;
+      date: string;
+      times: string[];
+      temperatureUnit: 'celsius' | 'fahrenheit';
+    },
+    ctx: ProviderCallContext,
+  ): Promise<
+    ProviderResult<{
+      date: string;
+      timezone: string;
+      temperatureUnit: 'celsius' | 'fahrenheit';
+      temperatureUnitSymbol: '°C' | '°F';
+      windSpeedUnit: string;
+      hours: WeatherForecastHour[];
+    }>
+  >;
+}
+
+export interface WebSearchCitation {
+  url: string;
+  title?: string;
+  excerpt?: string;
+}
+
+export interface WebSearchAdapter extends ProviderAdapter {
+  search(
+    input: { query: string; maxResults?: number },
+    ctx: ProviderCallContext,
+  ): Promise<
+    ProviderResult<{
+      answer: string;
+      citations: WebSearchCitation[];
+      actualModel?: string;
+    }>
+  >;
+}
+
 export interface ToolboxToolDefinition {
   /** Provider-native immutable tool identifier (for example GMAIL_SEND_EMAIL). */
   name: string;
@@ -275,15 +388,51 @@ export interface ToolboxToolDefinition {
   connectedAccountId?: string;
 }
 
+/** One external application exposed by a managed toolbox such as Composio. */
+export interface ToolboxToolkitDefinition {
+  slug: string;
+  name: string;
+  description?: string;
+  logoUrl?: string;
+  authSchemes: string[];
+  toolsCount?: number;
+  connected: boolean;
+  noAuth: boolean;
+}
+
+export interface ToolboxToolkitCatalog {
+  items: ToolboxToolkitDefinition[];
+  nextCursor?: string;
+  totalItems?: number;
+}
+
 export interface ToolboxAdapter extends ProviderAdapter {
   /** Resolve explicitly configured provider-native tools. */
   listTools(ctx: ProviderCallContext): Promise<ProviderResult<ToolboxToolDefinition[]>>;
-  /** Search the provider catalog for a task before the harness starts. */
+  /**
+   * Legacy/manual catalog search. Agent routing must not depend on the
+   * provider's semantic search ranking; Jev selects from connected metadata.
+   */
   searchTools(
     input: { query: string; toolkits?: string[]; limit?: number },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<ToolboxToolDefinition[]>>;
-  connectUrl(app: string, ctx: ProviderCallContext): Promise<ProviderResult<{ url: string }>>;
+  /** List only applications connected by the current AgentOS user. */
+  listConnectedToolkits(
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<ToolboxToolkitDefinition[]>>;
+  /** Load trusted metadata and schemas for explicitly selected connected apps. */
+  listToolkitTools(
+    input: { toolkits: string[]; limitPerToolkit?: number },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<ToolboxToolDefinition[]>>;
+  /** Browse connectable applications without loading every app tool into model context. */
+  listToolkits(
+    input: { search?: string; cursor?: string; limit?: number },
+    ctx: ProviderCallContext,
+  ): Promise<ProviderResult<ToolboxToolkitCatalog>>;
+  /** Create a provider-hosted connection link for one discovered toolkit slug. */
+  connectUrl(toolkit: string, ctx: ProviderCallContext): Promise<ProviderResult<{ url: string }>>;
   callTool(
     input: {
       name: string;
@@ -305,12 +454,14 @@ export interface TextModelAdapter extends ProviderAdapter {
       json?: boolean;
       /** Jev's model-tier recommendation. Defaults to 'standard' if omitted. */
       tier?: ModelTier;
+      /** 0-1. Omit to use the provider's own default. */
+      temperature?: number;
     },
     ctx: ProviderCallContext,
   ): Promise<ProviderResult<{ text: string; tokensIn: number; tokensOut: number }>>;
 }
 
-/** GPTZero slot. Mock only — no live.ts exists. */
+/** Outbound-text authenticity scoring. `score` is normalised to P(ai) in 0..1. */
 export interface ContentAnalysisAdapter extends ProviderAdapter {
   analyze(
     input: { text: string },
@@ -324,7 +475,9 @@ export interface CapabilityMap {
   decision: DecisionAdapter;
   browser: BrowserAdapter;
   'browser.local': BrowserAdapter;
+  'web.search': WebSearchAdapter;
   toolbox: ToolboxAdapter;
+  'weather.forecast': WeatherAdapter;
   'text.model': TextModelAdapter;
   'content.analysis': ContentAnalysisAdapter;
 }

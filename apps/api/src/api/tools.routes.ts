@@ -15,6 +15,12 @@ toolsRouter.get('/tools', async (_req, res) => {
     name: tool.descriptor.id,
     description: tool.descriptor.description,
     availability: tool.descriptor.availability,
+    // Additive: lets a client say WHICH provider owns a tool (Composio, browser, MCP)
+    // without guessing from the id.
+    providerId: tool.descriptor.providerId,
+    family: tool.descriptor.family,
+    effect: tool.descriptor.baselineEffect,
+    reversibility: tool.descriptor.reversibility,
   }));
   // Startup and connection lifecycle operations populate this registry; a
   // catalog read never performs provider discovery itself.

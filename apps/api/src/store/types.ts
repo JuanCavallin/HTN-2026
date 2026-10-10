@@ -15,6 +15,7 @@ import type {
   AgentSessionState,
   AgentGraph,
   Approval,
+  Conversation,
   EgressEvent,
   McpConnection,
   PiiSpanWithValue,
@@ -85,6 +86,14 @@ export interface Store {
   getGraph(id: string): Promise<AgentGraph | null>;
   listGraphs(): Promise<AgentGraph[]>;
   deleteGraph(id: string): Promise<boolean>;
+
+  // Conversations. Mutable like graphs, and not scoped to a run. The chat that
+  // AUTHORS a graph depends on these -- see api/conversations.routes.ts, which
+  // is the front door of the workspace UI (Workspace.tsx's composer), so
+  // dropping them takes the app's main entry flow with it.
+  saveConversation(conversation: Conversation): Promise<Conversation>;
+  getConversation(id: string): Promise<Conversation | null>;
+  listConversations(): Promise<Conversation[]>;
 
   // Event log — append-only, monotonic seq per run. Powers SSE replay.
   appendEvent(runId: string, event: RunEvent): Promise<StoredEvent>;

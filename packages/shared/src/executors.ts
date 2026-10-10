@@ -13,7 +13,7 @@
  * must agree on exactly one mapping.
  *
  * The palette is not invented here — it matches the classDefs already used in
- * docs/example_flow.md, which the team agreed on before any of this existed.
+ * docs/archive/example_flow.md, which the team agreed on before any of this existed.
  */
 
 import type { GraphNodeType } from './schemas/graph.js';
@@ -60,6 +60,7 @@ export const EXECUTOR_BY_NODE_TYPE: Record<GraphNodeType, NodeExecutor> = {
   decide: 'model',
   agent_task: 'agent',
   approval: 'human',
+  handoff: 'human',
   swarm: 'group',
 };
 
@@ -78,7 +79,7 @@ export interface ExecutorStyle {
   color: 'slate' | 'emerald' | 'amber' | 'violet' | 'zinc' | 'rose' | 'sky';
   /**
    * True when we cannot see inside the work. RENDER THIS AS A DASHED BORDER —
-   * it is the most honest single mark on the canvas, and docs/example_flow.md
+   * it is the most honest single mark on the canvas, and docs/archive/example_flow.md
    * already uses stroke-dasharray for exactly these boxes.
    */
   opaque: boolean;
@@ -135,7 +136,7 @@ export const EXECUTOR_STYLE: Record<NodeExecutor, ExecutorStyle> = {
     color: 'rose',
     opaque: false,
     cost: 'none',
-    description: 'Blocks until a person decides.',
+    description: 'Blocks until a person decides — or, for a handoff, until they act.',
   },
   group: {
     label: 'Swarm',
@@ -170,6 +171,7 @@ export const NODE_TYPE_ICON: Record<GraphNodeType | 'worker' | 'task', string> =
   judge: '⚖',
   submit: '↥',
   approval: '🛑',
+  handoff: '⌨',
   worker: '•',
   task: '▸',
 };

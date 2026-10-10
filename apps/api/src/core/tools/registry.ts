@@ -153,6 +153,16 @@ function validateRegistration(registration: ToolRegistration): void {
   }
   if (!descriptor.version.trim()) throw new Error('Tool descriptor version is required.');
   if (!descriptor.executorRef.trim()) throw new Error('Tool executorRef is required.');
+  for (const capability of descriptor.capabilities ?? []) {
+    if (!/^[a-z0-9]+(?:\.[a-z0-9]+)*$/.test(capability)) {
+      throw new Error('Tool capabilities must use stable lowercase dot notation: ' + descriptor.id);
+    }
+  }
+  for (const alias of descriptor.aliases ?? []) {
+    if (!alias || alias !== alias.trim() || alias !== alias.toLowerCase() || alias.length > 80) {
+      throw new Error('Tool aliases must be normalized lowercase terms: ' + descriptor.id);
+    }
+  }
   if (!inputSchema || typeof inputSchema !== 'object' || Array.isArray(inputSchema)) {
     throw new Error('Tool inputSchema must be a JSON object: ' + descriptor.id);
   }
@@ -176,6 +186,10 @@ function cloneRegistration(registration: RegisteredTool): RegisteredTool {
   return {
     descriptor: {
       ...registration.descriptor,
+      capabilities: registration.descriptor.capabilities
+        ? [...registration.descriptor.capabilities]
+        : undefined,
+      aliases: registration.descriptor.aliases ? [...registration.descriptor.aliases] : undefined,
       requiredScopes: [...registration.descriptor.requiredScopes],
       allowedDataLabels: [...registration.descriptor.allowedDataLabels],
     },

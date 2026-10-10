@@ -5,9 +5,11 @@ import type {
   ProviderCallContext,
   ToolboxAdapter,
   ToolboxToolDefinition,
+  ToolboxToolkitDefinition,
   ToolDescriptor,
 } from '@htn/shared';
 import type { ProviderConfig } from '../../config.js';
+import { enrichToolDescriptorCapabilities } from '../../core/tools/capabilities.js';
 import type { InMemoryToolExecutorRegistry } from '../../core/tools/executors.js';
 import type { InMemoryToolRegistry } from '../../core/tools/registry.js';
 
@@ -26,6 +28,25 @@ const REVIEWED: Record<string, ClassifiedTool> = {
     toolId: 'mail.send',
     wireName: 'mail_send',
     family: 'mail',
+    baselineEffect: 'write',
+    reversibility: 'irreversible',
+    allowedDataLabels: ['public', 'private'],
+  },
+  GOOGLECALENDAR_CREATE_EVENT: {
+    toolId: 'googlecalendar.create_event',
+    wireName: 'googlecalendar_create_event',
+    family: 'googlecalendar',
+    baselineEffect: 'write',
+    // Creating an event with attendees sends an external invitation. Treat
+    // the whole operation conservatively so the deterministic policy floor
+    // always pauses before execution, even when the provider calls it CREATE.
+    reversibility: 'irreversible',
+    allowedDataLabels: ['public', 'private'],
+  },
+  GOOGLECALENDAR_QUICK_ADD: {
+    toolId: 'googlecalendar.quick_add',
+    wireName: 'googlecalendar_quick_add',
+    family: 'googlecalendar',
     baselineEffect: 'write',
     reversibility: 'irreversible',
     allowedDataLabels: ['public', 'private'],
@@ -67,6 +88,47 @@ const MAIL_SEND_INPUT_SCHEMA: Json = {
     },
   },
   required: ['to', 'body'],
+  additionalProperties: false,
+};
+
+/** Stable, compact facade over Composio's much larger Calendar event schema. */
+const CALENDAR_CREATE_EVENT_INPUT_SCHEMA: Json = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string', description: 'Calendar event title.' },
+    start_datetime: {
+      type: 'string',
+      description:
+        'Exact local start date and time in YYYY-MM-DDTHH:MM:SS format. Never guess a missing date.',
+    },
+    event_duration_minutes: {
+      type: 'integer',
+      description: 'Event duration in minutes from 1 through 59.',
+      minimum: 1,
+      maximum: 59,
+    },
+    timezone: {
+      type: 'string',
+      description: 'IANA timezone such as America/Toronto.',
+    },
+    attendees: {
+      type: 'array',
+      description: 'Email addresses that should receive the invitation.',
+      items: { type: 'string' },
+    },
+    description: { type: 'string', description: 'Optional event description.' },
+    calendar_id: {
+      type: 'string',
+      description: 'Target calendar identifier. Defaults to primary.',
+      default: 'primary',
+    },
+    create_meeting_room: {
+      type: 'boolean',
+      description: 'Create a Google Meet link only when the user requests one.',
+      default: false,
+    },
+  },
+  required: ['summary', 'start_datetime', 'event_duration_minutes', 'timezone', 'attendees'],
   additionalProperties: false,
 };
 
@@ -160,6 +222,11 @@ export interface ComposioDiscoveryInput {
   signal?: AbortSignal;
 }
 
+export interface ConnectedToolkitResult {
+  toolkits: ToolboxToolkitDefinition[];
+  warning?: string;
+}
+
 /**
  * Imports only task-relevant Composio metadata. Jev sees normalized descriptors;
  * schemas and provider-native identifiers remain inside AgentOS.
@@ -179,6 +246,41 @@ export class ComposioToolCatalog {
       policyRule: 'reviewed-tool-registry-bootstrap',
     });
     if (!result.ok) return failureReport(this.cfg.toolSlugs ?? [], result.error.message);
+    return this.register(result.data);
+  }
+
+  async connectedToolkits(input: {
+    runId: string;
+    stepId?: string;
+    signal?: AbortSignal;
+  }): Promise<ConnectedToolkitResult> {
+    if (this.adapter.mode !== 'live') return { toolkits: [] };
+    const result = await this.adapter.listConnectedToolkits({
+      runId: input.runId,
+      stepId: input.stepId,
+      policyRule: 'connected-toolkit-catalog-read',
+      signal: input.signal,
+    });
+    return result.ok ? { toolkits: result.data } : { toolkits: [], warning: result.error.message };
+  }
+
+  async importToolkits(input: {
+    toolkits: string[];
+    runId: string;
+    stepId?: string;
+    signal?: AbortSignal;
+  }): Promise<ComposioRegistrationReport> {
+    if (this.adapter.mode !== 'live' || input.toolkits.length === 0) return emptyReport();
+    const result = await this.adapter.listToolkitTools(
+      { toolkits: input.toolkits },
+      {
+        runId: input.runId,
+        stepId: input.stepId,
+        policyRule: 'jev-selected-connected-toolkit-import',
+        signal: input.signal,
+      },
+    );
+    if (!result.ok) return failureReport([], result.error.message);
     return this.register(result.data);
   }
 
@@ -217,22 +319,25 @@ export class ComposioToolCatalog {
       const requiredScopes = [connectedScope, ...(tool.requiredScopes ?? [])];
       const grantedScopes = tool.connectedAccountId ? requiredScopes : [];
       const executorRef = 'composio://' + tool.name + '@' + tool.version;
-      const descriptor: ToolDescriptor = {
-        id: classified.toolId,
-        version: tool.version,
-        providerId: 'composio',
-        family: classified.family,
-        description: trustedDescription(tool),
-        inputSchemaRef: 'composio://schemas/' + tool.name + '/' + tool.version,
-        transport: 'http',
-        baselineEffect: classified.baselineEffect,
-        reversibility: classified.reversibility,
-        requiredScopes,
-        allowedDataLabels: classified.allowedDataLabels,
-        availability: tool.connectedAccountId ? 'available' : 'requires_connection',
-        executorRef,
-        credentialRef: 'composio-connected-account:' + tool.toolkit,
-      };
+      const descriptor: ToolDescriptor = enrichToolDescriptorCapabilities(
+        {
+          id: classified.toolId,
+          version: tool.version,
+          providerId: 'composio',
+          family: classified.family,
+          description: trustedDescription(tool),
+          inputSchemaRef: 'composio://schemas/' + tool.name + '/' + tool.version,
+          transport: 'http',
+          baselineEffect: classified.baselineEffect,
+          reversibility: classified.reversibility,
+          requiredScopes,
+          allowedDataLabels: classified.allowedDataLabels,
+          availability: tool.connectedAccountId ? 'available' : 'requires_connection',
+          executorRef,
+          credentialRef: 'composio-connected-account:' + tool.toolkit,
+        },
+        { toolkit: tool.toolkit },
+      );
       this.registry.register({
         descriptor,
         wireName: classified.wireName,
@@ -440,15 +545,28 @@ function asArguments(value: Json): Record<string, unknown> {
 
 function exposedInputSchema(tool: ToolboxToolDefinition): Json {
   if (tool.name === 'GMAIL_SEND_EMAIL') return structuredClone(MAIL_SEND_INPUT_SCHEMA);
+  if (tool.name === 'GOOGLECALENDAR_CREATE_EVENT') {
+    return structuredClone(CALENDAR_CREATE_EVENT_INPUT_SCHEMA);
+  }
   if (!tool.inputSchema) throw new Error('Composio tool is missing its trusted input schema.');
   return tool.inputSchema;
 }
 
 function providerArguments(toolName: string, value: Json): Record<string, unknown> {
   const args = asArguments(value);
-  if (toolName !== 'GMAIL_SEND_EMAIL') return args;
-  const { to, ...providerArgs } = args;
-  return { ...providerArgs, recipient_email: to };
+  if (toolName === 'GMAIL_SEND_EMAIL') {
+    const { to, ...providerArgs } = args;
+    return { ...providerArgs, recipient_email: to };
+  }
+  if (toolName === 'GOOGLECALENDAR_CREATE_EVENT') {
+    return {
+      ...args,
+      calendar_id: args.calendar_id ?? 'primary',
+      send_updates: 'all',
+      create_meeting_room: args.create_meeting_room ?? false,
+    };
+  }
+  return args;
 }
 
 function emptyReport(skipped: string[] = []): ComposioRegistrationReport {

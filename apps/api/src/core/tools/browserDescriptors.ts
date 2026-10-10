@@ -102,12 +102,24 @@ const OPERATIONS: readonly OperationSpec[] = [
 export interface BrowserDescriptorOptions {
   localAvailable: boolean;
   browserbaseAvailable: boolean;
+  localSimulated?: boolean;
+  browserbaseSimulated?: boolean;
 }
 
 export function browserToolRegistrations(options: BrowserDescriptorOptions): ToolRegistration[] {
   return [
-    ...build('localbrowser', ['public', 'private', 'secret', 'local_only'], options.localAvailable),
-    ...build('browserbase', ['public', 'private'], options.browserbaseAvailable),
+    ...build(
+      'localbrowser',
+      ['public', 'private', 'secret', 'local_only'],
+      options.localAvailable,
+      options.localSimulated ?? false,
+    ),
+    ...build(
+      'browserbase',
+      ['public', 'private'],
+      options.browserbaseAvailable,
+      options.browserbaseSimulated ?? false,
+    ),
   ];
 }
 
@@ -115,6 +127,7 @@ function build(
   providerId: BrowserProviderId,
   allowedDataLabels: DataLabel[],
   available: boolean,
+  simulated: boolean,
 ): ToolRegistration[] {
   return OPERATIONS.map((spec) => {
     const id = providerId + '.' + spec.operation;
@@ -133,6 +146,7 @@ function build(
         allowedDataLabels,
         availability: available ? 'available' : 'unavailable',
         executorRef: BROWSER_EXECUTOR_REF,
+        ...(simulated ? { simulated: true } : {}),
         ...(providerId === 'browserbase' ? { credentialRef: 'BROWSERBASE_API_KEY' } : {}),
       },
       wireName: providerId + '_' + spec.operation,

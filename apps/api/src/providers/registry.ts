@@ -27,6 +27,8 @@ import { create as createOpenRouter } from './openrouter/index.js';
 import { create as createOllama } from './ollama/index.js';
 import { create as createMcp } from './mcp/index.js';
 import { create as createAnthropic } from './anthropic/index.js';
+import { create as createGemini } from './gemini/index.js';
+import { create as createWeather } from './weather/index.js';
 import { create as createGptzero } from './gptzero/index.js';
 
 type Factory = (cfg: ProviderConfig) => ProviderAdapter;
@@ -41,6 +43,8 @@ const FACTORIES: Record<ProviderId, Factory> = {
   ollama: createOllama,
   mcp: createMcp,
   anthropic: createAnthropic,
+  gemini: createGemini,
+  weather: createWeather,
   gptzero: createGptzero,
 };
 
@@ -54,7 +58,9 @@ const BINDINGS: Record<Capability, ProviderId> = {
   // distinct egress destinations. That is what makes "local-only data never
   // reached Browserbase" a provable ledger fact rather than a claim.
   'browser.local': 'localbrowser',
+  'web.search': 'openrouter',
   toolbox: 'composio',
+  'weather.forecast': 'weather',
   'text.model': 'anthropic',
   'content.analysis': 'gptzero',
 };

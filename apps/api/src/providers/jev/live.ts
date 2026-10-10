@@ -298,12 +298,16 @@ export function createLiveJev(cfg: ProviderConfig): DecisionAdapter {
         state: {
           task: input.state.taskSummary,
           context: input.state.contextSummary ?? null,
-          tools: input.candidates.map(({ id, family, description, baselineEffect }) => ({
-            id,
-            family,
-            description,
-            baselineEffect,
-          })),
+          tools: input.candidates.map(
+            ({ id, family, capabilities, aliases, description, baselineEffect }) => ({
+              id,
+              family,
+              capabilities: capabilities ?? [],
+              aliases: aliases ?? [],
+              description,
+              baselineEffect,
+            }),
+          ),
         },
         questions,
         maxRetries: 2,
@@ -408,6 +412,19 @@ export function createLiveJev(cfg: ProviderConfig): DecisionAdapter {
       const remainingSteps = input.checkpoint.steps
         .filter((step) => step.required && step.status !== 'succeeded')
         .map((step) => ({ id: step.id, label: step.label, status: step.status }));
+      const requiredEvidence = {
+        allRequiredStepsSucceeded: input.checkpoint.steps.every(
+          (step) => !step.required || step.status === 'succeeded',
+        ),
+        allRequiredArtifactsVerified: input.checkpoint.artifacts.every(
+          (artifact) => !artifact.required || artifact.verified,
+        ),
+        allRequiredVerificationsPassed: input.checkpoint.verifications.every(
+          (verification) => !verification.required || verification.passed,
+        ),
+        hasOutstandingRequirements: input.checkpoint.outstandingRequirements.length > 0,
+        hasPendingApprovals: input.checkpoint.pendingApprovalIds.length > 0,
+      };
       const result = await evaluate({
         model,
         state: {
@@ -434,6 +451,7 @@ export function createLiveJev(cfg: ProviderConfig): DecisionAdapter {
           })),
           outstandingRequirements: input.checkpoint.outstandingRequirements,
           pendingApprovalCount: input.checkpoint.pendingApprovalIds.length,
+          requiredEvidence,
           budget: {
             stepsRemaining: input.checkpoint.budget.stepsRemaining,
             timeRemainingMs: input.checkpoint.budget.timeRemainingMs ?? null,
@@ -445,13 +463,15 @@ export function createLiveJev(cfg: ProviderConfig): DecisionAdapter {
           completion: {
             type: 'choice',
             instructions:
-              'Judge whether the stated objective is complete, should continue, or is blocked.',
+              'Judge whether the stated objective is complete from the objective and result summaries. ' +
+              'Treat requiredEvidence and verification records as authoritative facts. Remaining budget ' +
+              'is capacity, not unfinished work: never choose continue only because budget remains.',
             criteria: {
-              done: 'The objective and every required output are satisfied with no remaining work.',
+              done: 'The result summary satisfies the objective, every required step succeeded, every required artifact is verified, every required verification passed, and there are no outstanding requirements or approvals.',
               continue:
-                'Useful required work remains and the task can make progress within its budget.',
+                'A specific required part of the objective is still unsatisfied and the task can make progress within its remaining budget.',
               blocked:
-                'The task needs user input, approval, unavailable capability, or has exhausted its budget.',
+                'Required work remains, but it needs user input, approval, an unavailable capability, or the budget is exhausted.',
             },
           },
           ...(remainingSteps.length > 0

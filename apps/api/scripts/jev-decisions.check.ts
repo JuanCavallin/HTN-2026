@@ -191,7 +191,11 @@ async function main(): Promise<void> {
   });
   assert.equal(sanitizedPrivateState.sanitizedForRemote, true);
   assert.equal(sanitizedPrivateState.taskSummary, 'Email [[PII_1]].');
-  assert.equal(sanitizedPrivateState.contextSummary, 'Email [[PII_1]].');
+  assert.equal(
+    sanitizedPrivateState.contextSummary,
+    'Original objective: Email [[PII_1]].\nuser: Email [[PII_1]].',
+  );
+  assert.doesNotMatch(sanitizedPrivateState.contextSummary ?? '', /private\.person@example\.test/);
   assert.deepEqual(sanitizedPrivateState.dataLabels, ['private']);
 
   const model = await service.selectModel(publicState, MODEL_ROUTE_FIXTURES, ctx);
@@ -317,6 +321,35 @@ async function main(): Promise<void> {
   assert.equal(guardedCompletion.status, 'blocked');
   assert.equal(guardedCompletion.verified, false);
   assert.ok(guardedCompletion.verificationFailures.includes('pending-approval'));
+
+  const lowConfidenceDoneAdapter: DecisionAdapter = {
+    ...alwaysDoneAdapter,
+    async judgeCompletion() {
+      const result = await alwaysDoneAdapter.judgeCompletion(
+        { checkpoint: checkpoint(), sanitizedState: publicState },
+        ctx,
+      );
+      assert.ok(result.ok);
+      return {
+        ...result,
+        data: {
+          ...result.data,
+          confidence: 0.52,
+          probabilities: { done: 0.52, continue: 0.48 },
+        },
+      };
+    },
+  };
+  const verifiedLowConfidenceDone = await new DecisionService(
+    lowConfidenceDoneAdapter,
+  ).judgeCompletion(checkpoint(), ctx);
+  assert.equal(verifiedLowConfidenceDone.status, 'done');
+  assert.equal(verifiedLowConfidenceDone.verified, true);
+  assert.ok(
+    verifiedLowConfidenceDone.reasonCodes.includes(
+      'low-confidence-completion-supported-by-verification',
+    ),
+  );
 
   const completed = await service.judgeCompletion(checkpoint(), ctx);
   assert.equal(completed.status, 'done');

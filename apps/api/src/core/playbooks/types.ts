@@ -14,6 +14,7 @@ import type {
   Capability,
   CapabilityMap,
   CompletionDecision,
+  AgentExecutionProfile,
   DataLabel,
   IntelligenceLevel,
   Json,
@@ -68,6 +69,8 @@ export interface AgentTaskSpec {
   label: string;
   /** The goal handed to the agent runtime. */
   goal: string;
+  /** Adaptive AgentOS control or a fixed-frontier Hermes comparison run. */
+  executionProfile?: AgentExecutionProfile;
   /** Extra context passed through untouched — redact it first if it might be sensitive. */
   context?: unknown;
   /** Redacted objective eligible for a remote completion judgment. */
@@ -91,6 +94,10 @@ export interface AgentTaskSpec {
   maxPolls?: number;
   /** Maximum Hermes turns in the AgentOS outer loop. Defaults to 3. */
   maxTurns?: number;
+  /** Give up once the task has run this long overall, regardless of poll/turn budget. */
+  maxDurationMs?: number;
+  /** Give up once this many of the task's tool calls have failed. */
+  maxFailedToolCalls?: number;
 }
 
 export interface AgentTaskResult {
@@ -124,8 +131,14 @@ export interface PlaybookContext {
   /**
    * Classify an action and, if the policy demands a human, BLOCK until they decide.
    * Throws ApprovalRejectedError when rejected.
+   *
+   * Returns the action AS AUTHORIZED. That is the proposed action for an
+   * ungated or plainly-approved call, and the human's edit when they revised
+   * it. Execute the return value — executing the argument instead would
+   * silently discard a revision, which is the one bug this signature exists to
+   * make impossible.
    */
-  requireApproval(stepId: string, action: ProposedAction): Promise<void>;
+  requireApproval(stepId: string, action: ProposedAction): Promise<ProposedAction>;
 
   /** Get a provider by capability — never by vendor name. */
   provider<C extends Capability>(capability: C): CapabilityMap[C];
@@ -168,6 +181,64 @@ export interface PlaybookContext {
    * availableTools-vs-exposedTools number would only ever come from the
    * expensive path.
    */
+  /**
+   * Call a registered tool through the trusted broker.
+   *
+   * WHY A GRAPH NODE GETS A BROKER CALL AT ALL: the broker binds every call to
+   * a deliberate SELECTION (see assertSelected). For a harness turn that is the
+   * model's pick; for a graph node it is the author's, pinned in a reviewed
+   * document -- a stronger claim, not a weaker one. So the orchestrator mints a
+   * one-tool exposure grant from what the node names and executes against it.
+   *
+   * Returns null when no broker is wired, so a caller can fall back rather than
+   * fail. THE BROKER GATES ITS OWN CALLS -- do not also call requireApproval
+   * around this, or a person is asked twice for one action.
+   */
+  callBrokeredTool(input: {
+    stepId: string;
+    toolId: string;
+    args: Record<string, Json>;
+  }): Promise<{ output: Json; summary: string } | null>;
+
+  /**
+   * Which of these tool ids the registry can actually execute right now.
+   *
+   * A decision layer must never be offered a candidate that cannot run. Graph
+   * authors write candidate lists by hand (and a generated graph writes them
+   * from a model), so a list can easily name a tool that no provider
+   * registers — `sheets.append` is the standing example. Without this, the
+   * choice succeeds, the call fails deep inside the toolbox, and the error
+   * blames Composio for a name it was never taught.
+   *
+   * OPTIONAL on purpose: a caller with no registry wired keeps the old
+   * behaviour rather than losing the ability to dispatch at all.
+   */
+  registeredToolIds?(candidates: string[]): Promise<string[]>;
+
+  /**
+   * Announce a browser session the UI can offer a live view of.
+   *
+   * Same shape as `recordSchedule`: core declares what it needs, the
+   * orchestrator supplies store + bus. A `handoff` node opens a session and
+   * deliberately leaves it open, and the person being handed to has no way to
+   * reach it unless the id and viewer URL are put on the run stream.
+   *
+   * NOTHING SENSITIVE may go through here -- it crosses SSE and is persisted
+   * in the run's event log. A viewer URL and metadata, never page content.
+   */
+  announceBrowserSession(session: {
+    sessionId: string;
+    stepId?: string;
+    nodeId?: string;
+    providerId: ProviderId;
+    liveViewUrl?: string;
+    interactive: boolean;
+    startUrl?: string;
+  }): Promise<void>;
+
+  /** Symmetric: the viewer is dead from here (Browserbase 410s the debug URL). */
+  releaseBrowserSession(sessionId: string): Promise<void>;
+
   recordSchedule(input: {
     stepId: string;
     requestedCapability: Capability;

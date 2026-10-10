@@ -5,6 +5,8 @@ import type {
   ProviderErrorCode,
   ProviderResult,
   ToolboxAdapter,
+  ToolboxToolkitCatalog,
+  ToolboxToolkitDefinition,
 } from '@htn/shared';
 import type { ProviderConfig } from '../../config.js';
 
@@ -20,6 +22,8 @@ interface RawTool {
 
 interface RawToolList {
   items?: RawTool[];
+  next_cursor?: unknown;
+  total_items?: unknown;
 }
 
 interface RawConnections {
@@ -29,6 +33,29 @@ interface RawConnections {
     status?: unknown;
     toolkit?: { slug?: unknown };
   }[];
+}
+
+interface RawToolkit {
+  slug?: unknown;
+  name?: unknown;
+  auth_schemes?: unknown;
+  composio_managed_auth_schemes?: unknown;
+  no_auth?: unknown;
+  meta?: {
+    description?: unknown;
+    logo?: unknown;
+    tools_count?: unknown;
+  };
+}
+
+interface RawToolkitList {
+  items?: RawToolkit[];
+  next_cursor?: unknown;
+  total_items?: unknown;
+}
+
+interface RawSession {
+  session_id?: unknown;
 }
 
 interface ToolInfo {
@@ -66,7 +93,7 @@ export function createLiveComposio(cfg: ProviderConfig): ToolboxAdapter {
       return success(
         cfg,
         'health',
-        { detail: 'live; task-time catalog discovery enabled' },
+        { detail: 'live; Jev routing over connected-tool metadata enabled' },
         started,
         result.destination,
       );
@@ -176,31 +203,207 @@ export function createLiveComposio(cfg: ProviderConfig): ToolboxAdapter {
         connectionResult.destination,
       );
     },
-    async connectUrl(app, ctx) {
+    async listConnectedToolkits(ctx) {
       const started = Date.now();
-      const authConfigId = app.trim() || cfg.authConfigId;
-      if (!authConfigId) {
+      const connectionResult = await activeConnections(cfg, baseUrl, userId, ctx.signal);
+      if (!connectionResult.ok) {
+        return failureFromRequest(cfg, 'listConnectedToolkits', connectionResult, started);
+      }
+      const bySlug = new Map<string, ToolboxToolkitDefinition>();
+      for (const account of connectionResult.data.items ?? []) {
+        if (account.status !== 'ACTIVE' || typeof account.toolkit?.slug !== 'string') continue;
+        const slug = account.toolkit.slug.toLowerCase();
+        bySlug.set(slug, {
+          slug,
+          name: humanizeToolkitSlug(slug),
+          authSchemes: [],
+          connected: true,
+          noAuth: false,
+        });
+      }
+      return success(
+        cfg,
+        'listConnectedToolkits',
+        [...bySlug.values()].sort((a, b) => a.slug.localeCompare(b.slug)),
+        started,
+        connectionResult.destination,
+      );
+    },
+    async listToolkitTools(input, ctx) {
+      const started = Date.now();
+      const connectionResult = await activeConnections(cfg, baseUrl, userId, ctx.signal);
+      if (!connectionResult.ok) {
+        return failureFromRequest(cfg, 'listToolkitTools', connectionResult, started);
+      }
+      const active = new Set(
+        (connectionResult.data.items ?? []).flatMap((account) =>
+          account.status === 'ACTIVE' && typeof account.toolkit?.slug === 'string'
+            ? [account.toolkit.slug.toLowerCase()]
+            : [],
+        ),
+      );
+      const requested = [
+        ...new Set(
+          input.toolkits
+            .map((toolkit) => toolkit.trim().toLowerCase())
+            .filter((toolkit) => active.has(toolkit)),
+        ),
+      ];
+      const limitPerToolkit = Math.max(1, Math.min(input.limitPerToolkit ?? 1_000, 1_000));
+      const tools = new Map<string, ToolInfo>();
+
+      for (const toolkit of requested) {
+        let cursor: string | undefined;
+        let loaded = 0;
+        do {
+          const query = new URLSearchParams({
+            toolkit_slug: toolkit,
+            limit: String(Math.min(100, limitPerToolkit - loaded)),
+            include_deprecated: 'false',
+            toolkit_versions: 'latest',
+          });
+          if (cursor) query.set('cursor', cursor);
+          const result = await requestJson<RawToolList>(cfg, baseUrl, '/api/v3.1/tools?' + query, {
+            signal: ctx.signal ?? AbortSignal.timeout(20_000),
+          });
+          if (!result.ok) return failureFromRequest(cfg, 'listToolkitTools', result, started);
+          for (const raw of result.data.items ?? []) {
+            const parsed = parseTool(raw, '', connectionResult.data);
+            if (!parsed || parsed.toolkit !== toolkit) continue;
+            knownVersions.set(parsed.name, parsed.version);
+            tools.set(parsed.name, parsed);
+            loaded += 1;
+            if (loaded >= limitPerToolkit) break;
+          }
+          cursor =
+            loaded < limitPerToolkit && typeof result.data.next_cursor === 'string'
+              ? result.data.next_cursor
+              : undefined;
+        } while (cursor && loaded < limitPerToolkit);
+      }
+
+      return success(
+        cfg,
+        'listToolkitTools',
+        [...tools.values()],
+        started,
+        connectionResult.destination,
+      );
+    },
+    async listToolkits(input, ctx) {
+      const started = Date.now();
+      const query = new URLSearchParams({
+        limit: String(Math.max(1, Math.min(input.limit ?? 1_000, 1_000))),
+        sort_by: 'usage',
+        include_deprecated: 'false',
+      });
+      if (input.search?.trim()) query.set('search', input.search.trim());
+      if (input.cursor?.trim()) query.set('cursor', input.cursor.trim());
+      const [catalogResult, connectionResult] = await Promise.all([
+        requestJson<RawToolkitList>(cfg, baseUrl, '/api/v3.1/toolkits?' + query, {
+          signal: ctx.signal ?? AbortSignal.timeout(20_000),
+        }),
+        activeConnections(cfg, baseUrl, userId, ctx.signal),
+      ]);
+      if (!catalogResult.ok) {
+        return failureFromRequest(cfg, 'listToolkits', catalogResult, started);
+      }
+      if (!connectionResult.ok) {
+        return failureFromRequest(cfg, 'listToolkits', connectionResult, started);
+      }
+      const connected = new Set(
+        (connectionResult.data.items ?? []).flatMap((account) =>
+          account.status === 'ACTIVE' && typeof account.toolkit?.slug === 'string'
+            ? [account.toolkit.slug.toLowerCase()]
+            : [],
+        ),
+      );
+      const data: ToolboxToolkitCatalog = {
+        items: (catalogResult.data.items ?? []).flatMap((raw) => {
+          if (typeof raw.slug !== 'string' || typeof raw.name !== 'string') return [];
+          const slug = raw.slug.toLowerCase();
+          const noAuth = raw.no_auth === true;
+          const authSchemes = Array.isArray(raw.composio_managed_auth_schemes)
+            ? raw.composio_managed_auth_schemes.filter(
+                (scheme): scheme is string => typeof scheme === 'string',
+              )
+            : Array.isArray(raw.auth_schemes)
+              ? raw.auth_schemes.filter((scheme): scheme is string => typeof scheme === 'string')
+              : [];
+          return [
+            {
+              slug,
+              name: raw.name,
+              ...(typeof raw.meta?.description === 'string'
+                ? { description: raw.meta.description }
+                : {}),
+              ...(typeof raw.meta?.logo === 'string' ? { logoUrl: raw.meta.logo } : {}),
+              ...(typeof raw.meta?.tools_count === 'number'
+                ? { toolsCount: raw.meta.tools_count }
+                : {}),
+              authSchemes,
+              connected: noAuth || connected.has(slug),
+              noAuth,
+            },
+          ];
+        }),
+        ...(typeof catalogResult.data.next_cursor === 'string'
+          ? { nextCursor: catalogResult.data.next_cursor }
+          : {}),
+        ...(typeof catalogResult.data.total_items === 'number'
+          ? { totalItems: catalogResult.data.total_items }
+          : {}),
+      };
+      return success(cfg, 'listToolkits', data, started, catalogResult.destination);
+    },
+    async connectUrl(toolkit, ctx) {
+      const started = Date.now();
+      const slug = toolkit.trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(slug)) {
         return fail(
           cfg,
           'connectUrl',
           'BAD_INPUT',
-          'COMPOSIO_AUTH_CONFIG_ID is required to create an OAuth link.',
+          'A valid Composio toolkit slug is required.',
           false,
           started,
         );
       }
-      const result = await requestJson<{ redirect_url?: unknown }>(
+      // A session link lets Composio select or create managed authentication for
+      // any catalog toolkit. This replaces the old single auth-config-id path.
+      const session = await requestJson<RawSession>(cfg, baseUrl, '/api/v3.1/tool_router/session', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: userId,
+          manage_connections: { enable: true },
+          workbench: { enable: false },
+        }),
+        signal: ctx.signal ?? AbortSignal.timeout(15_000),
+      });
+      if (!session.ok) return failureFromRequest(cfg, 'connectUrl', session, started);
+      if (typeof session.data.session_id !== 'string') {
+        return fail(
+          cfg,
+          'connectUrl',
+          'UPSTREAM',
+          'Composio returned no session identifier.',
+          false,
+          started,
+          session.destination,
+        );
+      }
+      const link = await requestJson<{ redirect_url?: unknown }>(
         cfg,
         baseUrl,
-        '/api/v3/connected_accounts/link',
+        '/api/v3.1/tool_router/session/' + encodeURIComponent(session.data.session_id) + '/link',
         {
           method: 'POST',
-          body: JSON.stringify({ auth_config_id: authConfigId, user_id: userId }),
+          body: JSON.stringify({ toolkit: slug }),
           signal: ctx.signal ?? AbortSignal.timeout(15_000),
         },
       );
-      if (!result.ok) return failureFromRequest(cfg, 'connectUrl', result, started);
-      if (typeof result.data.redirect_url !== 'string') {
+      if (!link.ok) return failureFromRequest(cfg, 'connectUrl', link, started);
+      if (typeof link.data.redirect_url !== 'string') {
         return fail(
           cfg,
           'connectUrl',
@@ -208,16 +411,10 @@ export function createLiveComposio(cfg: ProviderConfig): ToolboxAdapter {
           'Composio returned no redirect URL.',
           false,
           started,
-          result.destination,
+          link.destination,
         );
       }
-      return success(
-        cfg,
-        'connectUrl',
-        { url: result.data.redirect_url },
-        started,
-        result.destination,
-      );
+      return success(cfg, 'connectUrl', { url: link.data.redirect_url }, started, link.destination);
     },
     async callTool(input, ctx) {
       const started = Date.now();
@@ -287,7 +484,10 @@ function parseTool(
   if (!name || !version || !toolkit) return null;
   const account = connections.items?.find(
     (item) =>
-      item.status === 'ACTIVE' && item.toolkit?.slug === toolkit && typeof item.id === 'string',
+      item.status === 'ACTIVE' &&
+      typeof item.toolkit?.slug === 'string' &&
+      item.toolkit.slug.toLowerCase() === toolkit &&
+      typeof item.id === 'string',
   );
   return {
     name,
@@ -305,6 +505,19 @@ function parseTool(
       : [],
     ...(typeof account?.id === 'string' ? { connectedAccountId: account.id } : {}),
   };
+}
+
+function humanizeToolkitSlug(slug: string): string {
+  const known: Record<string, string> = {
+    googlecalendar: 'Google Calendar',
+    googlesheets: 'Google Sheets',
+    googledrive: 'Google Drive',
+    gmail: 'Gmail',
+    github: 'GitHub',
+  };
+  return (
+    known[slug] ?? slug.replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+  );
 }
 
 /** Convert Composio's parameter map or JSON Schema into strict draft-compatible JSON Schema. */

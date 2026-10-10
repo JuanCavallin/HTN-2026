@@ -37,6 +37,12 @@ export interface NodeCardData extends Record<string, unknown> {
   /** Canvas is in edit mode (GraphEditor, not a live/past run view). */
   editable?: boolean;
   onDelete?: (nodeId: string) => void;
+  /**
+   * A browser session this node opened, if any. Presence is what puts the
+   * watch affordance on the card -- one line in the footer, never a viewport.
+   */
+  browser?: { sessionId: string; host: string | null; live: boolean; awaitingHuman: boolean };
+  onWatchBrowser?: (sessionId: string) => void;
 }
 
 /** The concrete callee, so the canvas names real things rather than categories. */
@@ -64,6 +70,9 @@ function subtitleFor(node: GraphNode): string | null {
       return node.config.source;
     case 'approval':
       return 'blocks for a human';
+    case 'handoff':
+      // Says who acts, which is the whole distinction from `approval`.
+      return 'a person acts · agent waits';
     default:
       return null;
   }
@@ -75,7 +84,8 @@ function tokens(metrics?: NodeMetrics): number {
 }
 
 export function NodeCard({ data }: NodeProps) {
-  const { node, status, metrics, selected, onOpen, editable, onDelete } = data as NodeCardData;
+  const { node, status, metrics, selected, onOpen, editable, onDelete, browser, onWatchBrowser } =
+    data as NodeCardData;
   const style = styleOf(node.type);
   const classes = EXECUTOR_CLASSES[executorOf(node.type)];
 
@@ -168,6 +178,43 @@ export function NodeCard({ data }: NodeProps) {
             </span>
           )}
         </div>
+      )}
+
+      {/* The watch affordance. Deliberately ONE LINE in the same footer rhythm
+          as the token counts above -- a browser viewport does not fit in a
+          224px card, and a fourth visual mark would compete with the three
+          that already carry meaning (colour, dash, subtitle). */}
+      {browser && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onWatchBrowser?.(browser.sessionId);
+          }}
+          title={browser.awaitingHuman ? 'Waiting for you to act' : 'Watch this browser'}
+          className={
+            'mt-1 flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-[10px] transition-colors ' +
+            (browser.awaitingHuman
+              ? 'bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-200')
+          }
+        >
+          <span
+            aria-hidden
+            className={
+              'h-1.5 w-1.5 shrink-0 rounded-full ' +
+              (browser.awaitingHuman
+                ? 'animate-pulse bg-rose-400'
+                : browser.live
+                  ? 'animate-pulse bg-sky-400'
+                  : 'bg-slate-600')
+            }
+          />
+          <span className="truncate font-mono">{browser.host ?? 'browser'}</span>
+          <span className="ml-auto shrink-0 opacity-70">
+            {browser.awaitingHuman ? 'your turn' : 'watch'}
+          </span>
+        </button>
       )}
 
       {node.background && (

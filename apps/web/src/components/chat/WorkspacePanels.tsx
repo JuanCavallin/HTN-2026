@@ -5,10 +5,23 @@ import {
   formatCost,
   formatDuration,
   LIVE_INTERVENTION_REASON,
+  metricCoverageLabel,
+  providerLabel,
   ROUTE_OPTIONS,
+  timeMetricPresentation,
+  toolActivity,
+  toolGlyph,
   type RouteOption,
   type Trace,
 } from '../../lib/workspace';
+
+/**
+ * preview  - synthetic, labelled walkthrough; no network.
+ * backend  - adaptive Zephyr run: Jev selects models and tools per step.
+ * hermes   - fixed-frontier Hermes baseline with adaptive routing disabled.
+ * workflow - chat-to-graph: drafts a workflow document to review before anything runs.
+ */
+export type ComposerMode = 'preview' | 'backend' | 'hermes' | 'workflow';
 
 export function TaskComposer({
   onSend,
@@ -22,8 +35,8 @@ export function TaskComposer({
   onSend: (text: string) => Promise<boolean>;
   busy?: boolean;
   disabled?: boolean;
-  mode: 'preview' | 'backend';
-  onModeChange?: (mode: 'preview' | 'backend') => void;
+  mode: ComposerMode;
+  onModeChange?: (mode: ComposerMode) => void;
   placeholder?: string;
   hint?: string;
 }) {
@@ -62,13 +75,15 @@ export function TaskComposer({
                 aria-label="Execution mode"
                 value={mode}
                 disabled={busy}
-                onChange={(event) => onModeChange(event.target.value as 'preview' | 'backend')}
+                onChange={(event) => onModeChange(event.target.value as ComposerMode)}
               >
                 <option value="preview">Preview mode</option>
-                <option value="backend">Use backend</option>
+                <option value="backend">Zephyr adaptive</option>
+                <option value="hermes">Hermes flagship baseline</option>
+                <option value="workflow">Build a workflow</option>
               </select>
             ) : (
-              <span>Backend run</span>
+              <span>{mode === 'hermes' ? 'Hermes baseline' : 'Zephyr adaptive'}</span>
             )}
           </div>
           <span className="composer-shortcut">Shift + Enter for a new line</span>
@@ -86,7 +101,11 @@ export function TaskComposer({
         {hint ??
           (mode === 'preview'
             ? 'Preview uses synthetic data. No models or tools are called.'
-            : 'Sending starts a workflow. Required action approvals still apply.')}
+            : mode === 'workflow'
+              ? 'Drafts a workflow graph you can review and edit. Nothing runs until you press Run.'
+              : mode === 'hermes'
+                ? 'Hermes uses one fixed cloud flagship with deterministic tool retrieval. Safety and approvals remain enforced.'
+                : 'Jev can switch models and reduce tools per step while durable session context follows the run.')}
       </p>
     </div>
   );
@@ -100,6 +119,7 @@ const STATUS_LABELS: Record<string, string> = {
   failed: 'Failed',
   cancelled: 'Cancelled',
   awaiting_approval: 'Needs approval',
+  paused: 'Paused',
 };
 
 /**
@@ -126,10 +146,32 @@ export function MetricsStrip({
   connected?: boolean;
   lastEventAt?: number | null;
 }) {
-  const completed = trace.nodes.filter((item) => item.status === 'succeeded').length;
+  // A tool that was only offered never becomes work, so it must not sit in the denominator.
+  const countable = trace.nodes.filter((item) => item.role !== 'tool-exposed');
+  const completed = countable.filter((item) => item.status === 'succeeded').length;
   const active = trace.nodes.filter((item) => item.status === 'running');
-  const running = trace.status === 'running';
+  // A paused run is still an ACTIVE run -- it is exactly the run whose pause
+  // control has to stay on screen, so that resume is reachable.
+  const running = trace.status === 'running' || trace.status === 'paused';
   const preview = trace.provenance === 'preview';
+  const totalUsage = trace.metrics?.usage.total;
+  const timeMetric = timeMetricPresentation(trace.metrics);
+  const modelCalls = trace.metrics?.usage.modelCalls.total;
+  const modelCallLabel =
+    modelCalls === undefined ? '' : `${modelCalls} model ${modelCalls === 1 ? 'call' : 'calls'}`;
+  const tokenDetail = preview
+    ? 'illustrative'
+    : [metricCoverageLabel(totalUsage?.totalTokens, 'calls'), modelCallLabel]
+        .filter(Boolean)
+        .join(' · ');
+  const costDetail = preview
+    ? 'USD · illustrative'
+    : `USD · ${metricCoverageLabel(totalUsage?.estimatedCostCents, 'calls')}`;
+  const waitDetail = preview
+    ? paused
+      ? 'preview clock paused'
+      : 'preview clock'
+    : timeMetric.detail;
   const lastEventSeconds = lastEventAt
     ? Math.max(0, Math.floor((Date.now() - lastEventAt) / 1000))
     : null;
@@ -139,7 +181,9 @@ export function MetricsStrip({
         <div className="run-status">
           <span className={`status-dot ${running && !paused ? 'live-dot' : 'quiet'}`} />
           <span className={trace.status === 'awaiting_approval' ? 'warning-text' : ''}>
-            {paused && running ? 'Paused' : (STATUS_LABELS[trace.status] ?? trace.status)}
+            {paused && trace.status === 'running'
+              ? 'Paused'
+              : (STATUS_LABELS[trace.status] ?? trace.status)}
           </span>
           <span className="subtle-tag">
             {preview ? 'Preview' : trace.provenance === 'unknown' ? 'Backend' : trace.provenance}
@@ -150,18 +194,25 @@ export function MetricsStrip({
             <span>Steps completed</span>
             <strong>
               {completed}
-              <span> / {trace.nodes.length}</span>
+              <span> / {countable.length}</span>
             </strong>
           </div>
           <progress
             value={completed}
-            max={Math.max(1, trace.nodes.length)}
+            max={Math.max(1, countable.length)}
             aria-label="Completed execution steps"
           />
         </div>
       </div>
 
-      <dl className="run-metrics">
+      <dl
+        className="run-metrics"
+        title={
+          trace.metrics
+            ? `Derived from the event ledger through sequence ${trace.metrics.lastSeq}`
+            : undefined
+        }
+      >
         <div>
           <dt>
             <Icon name="tokens" size={14} />
@@ -169,7 +220,7 @@ export function MetricsStrip({
           </dt>
           <dd>
             {trace.tokens === undefined ? '—' : trace.tokens.toLocaleString()}
-            <small>{preview ? 'illustrative' : 'reported so far'}</small>
+            <small>{tokenDetail}</small>
           </dd>
         </div>
         <div>
@@ -179,19 +230,17 @@ export function MetricsStrip({
           </dt>
           <dd>
             {formatCost(trace.costCents)}
-            <small>USD{preview ? ' · illustrative' : ' · reported so far'}</small>
+            <small>{costDetail}</small>
           </dd>
         </div>
         <div>
           <dt>
             <Icon name="clock" size={14} />
-            Elapsed time
+            {preview ? 'Elapsed time' : timeMetric.label}
           </dt>
           <dd className="elapsed-time">
             {formatDuration(trace.elapsedMs)}
-            <small>
-              {paused ? 'preview clock paused' : preview ? 'preview clock' : 'wall-clock time'}
-            </small>
+            <small>{waitDetail}</small>
           </dd>
         </div>
       </dl>
@@ -236,10 +285,10 @@ export function MetricsStrip({
             <button
               className="secondary-button"
               disabled
-              title="This backend does not expose pause/resume yet"
+              title="This view replays a finished run, so there is nothing to pause"
             >
               <Icon name="pause" size={15} />
-              Pause unavailable
+              Nothing to pause
             </button>
           )}
           {onCancel && !['succeeded', 'cancelled', 'failed'].includes(trace.status) && (
@@ -258,13 +307,15 @@ export function MetricsStrip({
           <span>
             {preview
               ? 'Synthetic demonstration'
-              : connected
-                ? lastEventSeconds !== null
-                  ? `Connected · event ${lastEventSeconds}s ago`
-                  : 'Event stream connected'
-                : ['succeeded', 'cancelled', 'failed'].includes(trace.status)
-                  ? 'Execution finished'
-                  : 'Reconnecting to event stream…'}
+              : connected === undefined
+                ? 'Ready for a live task'
+                : connected
+                  ? lastEventSeconds !== null
+                    ? `Connected · event ${lastEventSeconds}s ago`
+                    : 'Event stream connected'
+                  : ['succeeded', 'cancelled', 'failed'].includes(trace.status)
+                    ? 'Execution finished'
+                    : 'Reconnecting to event stream…'}
           </span>
         </p>
       </div>
@@ -306,9 +357,23 @@ export function RunInspector({
             <Icon name="close" size={14} />
           </button>
         </header>
-        <strong>{node.label}</strong>
+        <strong>
+          {node.tool && (
+            <i className="node-glyph inline" aria-hidden="true">
+              {toolGlyph(node.tool)}
+            </i>
+          )}
+          {node.label}
+        </strong>
         <span className="inspector-route">{node.route}</span>
-        {node.planned && (
+        {node.role === 'tool-exposed' && (
+          <p className="inspector-flag">
+            <Icon name="connect" size={13} />
+            Offered to the agent for this step. Being offered is not evidence that it ran: no call
+            has been reported.
+          </p>
+        )}
+        {node.planned && node.role !== 'tool-exposed' && (
           <p className="inspector-flag">
             <Icon name="graph" size={13} />
             Planned structure. No execution has been reported for this node, so it carries no
@@ -322,19 +387,80 @@ export function RunInspector({
           </p>
         )}
         <p>{node.detail}</p>
+        {node.tool && (
+          <dl className="tool-facts">
+            <div>
+              <dt>Source</dt>
+              <dd>{providerLabel(node.tool.providerId)}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{toolActivity(node)}</dd>
+            </div>
+            {node.tool.family && (
+              <div>
+                <dt>App</dt>
+                <dd>{node.tool.family}</dd>
+              </div>
+            )}
+            {node.tool.policy && (
+              <div>
+                <dt>Policy</dt>
+                <dd>{node.tool.policy}</dd>
+              </div>
+            )}
+            {node.tool.destination && (
+              <div>
+                <dt>Destination</dt>
+                <dd>{node.tool.destination}</dd>
+              </div>
+            )}
+            {node.tool.dataLabels.length > 0 && (
+              <div>
+                <dt>Data</dt>
+                <dd>{node.tool.dataLabels.join(', ')}</dd>
+              </div>
+            )}
+            {node.tool.attempts > 1 && (
+              <div>
+                <dt>Attempts</dt>
+                <dd>{node.tool.attempts} on this step</dd>
+              </div>
+            )}
+          </dl>
+        )}
+        {node.tool?.reasonCodes.length ? (
+          <div className="tool-tags">
+            {node.tool.reasonCodes.map((code) => (
+              <span key={code}>{code}</span>
+            ))}
+          </div>
+        ) : null}
+        {node.tool?.argsPreview && (
+          <details className="tool-args">
+            <summary>Exact arguments</summary>
+            <pre>{node.tool.argsPreview}</pre>
+          </details>
+        )}
         <dl>
           <div>
             <dt>Duration</dt>
             <dd>{formatDuration(node.durationMs)}</dd>
           </div>
-          <div>
-            <dt>Tokens</dt>
-            <dd>{node.tokens?.toLocaleString() ?? '—'}</dd>
-          </div>
-          <div>
-            <dt>Est. cost</dt>
-            <dd>{formatCost(node.costCents)}</dd>
-          </div>
+          {/* A tool call reports no tokens or cost of its own; the provider row on the
+              parent step carries them. Showing an em dash here would imply they were missed. */}
+          {!node.tool && (
+            <>
+              <div>
+                <dt>Tokens</dt>
+                <dd>{node.tokens?.toLocaleString() ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Est. cost</dt>
+                <dd>{formatCost(node.costCents)}</dd>
+              </div>
+            </>
+          )}
           {node.decision && (
             <>
               <div>
@@ -358,53 +484,113 @@ export function RunInspector({
           </div>
         ) : null}
 
-        <div className="inspector-edit">
-          {editable && editing ? (
-            <fieldset className="route-choices">
-              <legend>Run this step on</legend>
-              {ROUTE_OPTIONS.map((option) => (
-                <button
-                  key={option.id}
-                  className={`route-choice ${override === option.id ? 'chosen' : ''}`}
-                  aria-pressed={override === option.id}
-                  onClick={() => {
-                    onOverride?.(node.id, option.id);
-                    setEditing(false);
-                  }}
-                >
-                  <strong>{option.label}</strong>
-                  <small>{option.note}</small>
+        {node.model && (
+          <>
+            <h4 className="inspector-section-title">Actual model call</h4>
+            <dl className="tool-facts">
+              <div>
+                <dt>Provider</dt>
+                <dd>{providerLabel(node.model.providerId)}</dd>
+              </div>
+              <div>
+                <dt>Model</dt>
+                <dd>{node.model.actualModelId ?? node.model.configuredModelId}</dd>
+              </div>
+              <div>
+                <dt>Route</dt>
+                <dd>{node.model.routeId}</dd>
+              </div>
+              <div>
+                <dt>Calls</dt>
+                <dd>
+                  {node.model.callCount} · {node.model.phase}
+                </dd>
+              </div>
+            </dl>
+          </>
+        )}
+
+        {node.completion && (
+          <>
+            <h4 className="inspector-section-title">Completion judgment</h4>
+            <dl className="tool-facts">
+              <div>
+                <dt>Jev result</dt>
+                <dd>{node.completion.status}</dd>
+              </div>
+              <div>
+                <dt>Confidence</dt>
+                <dd>{(node.completion.confidence * 100).toFixed(0)}%</dd>
+              </div>
+              <div>
+                <dt>Source</dt>
+                <dd>{node.completion.source}</dd>
+              </div>
+              <div>
+                <dt>Verified</dt>
+                <dd>{node.completion.verified ? 'yes' : 'no'}</dd>
+              </div>
+            </dl>
+            {node.completion.reasonCodes.length > 0 && (
+              <div className="tool-tags">
+                {node.completion.reasonCodes.map((code) => (
+                  <span key={code}>{code}</span>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* A tool call is not a routed model step, so there is no route to change. */}
+        {!node.tool && (
+          <div className="inspector-edit">
+            {editable && editing ? (
+              <fieldset className="route-choices">
+                <legend>Run this step on</legend>
+                {ROUTE_OPTIONS.map((option) => (
+                  <button
+                    key={option.id}
+                    className={`route-choice ${override === option.id ? 'chosen' : ''}`}
+                    aria-pressed={override === option.id}
+                    onClick={() => {
+                      onOverride?.(node.id, option.id);
+                      setEditing(false);
+                    }}
+                  >
+                    <strong>{option.label}</strong>
+                    <small>{option.note}</small>
+                  </button>
+                ))}
+                <button className="text-link" onClick={() => setEditing(false)}>
+                  Keep the recorded route
                 </button>
-              ))}
-              <button className="text-link" onClick={() => setEditing(false)}>
-                Keep the recorded route
-              </button>
-            </fieldset>
-          ) : editable ? (
-            <button className="secondary-button full-width" onClick={() => setEditing(true)}>
-              <Icon name="settings" size={14} />
-              Change this step’s route
-            </button>
-          ) : (
-            <>
-              <button
-                className="secondary-button full-width"
-                disabled
-                title={LIVE_INTERVENTION_REASON}
-              >
+              </fieldset>
+            ) : editable ? (
+              <button className="secondary-button full-width" onClick={() => setEditing(true)}>
                 <Icon name="settings" size={14} />
-                Editing unavailable
+                Change this step’s route
               </button>
-              <p className="inspector-reason">{LIVE_INTERVENTION_REASON}</p>
-            </>
-          )}
-          {editable && preview && (
-            <p className="inspector-reason">
-              Changing the route restarts this preview from the beginning with the new choice. It is
-              a simulation — no model or tool is called.
-            </p>
-          )}
-        </div>
+            ) : (
+              <>
+                <button
+                  className="secondary-button full-width"
+                  disabled
+                  title={LIVE_INTERVENTION_REASON}
+                >
+                  <Icon name="settings" size={14} />
+                  Editing unavailable
+                </button>
+                <p className="inspector-reason">{LIVE_INTERVENTION_REASON}</p>
+              </>
+            )}
+            {editable && preview && (
+              <p className="inspector-reason">
+                Changing the route restarts this preview from the beginning with the new choice. It
+                is a simulation — no model or tool is called.
+              </p>
+            )}
+          </div>
+        )}
       </section>
     </aside>
   );

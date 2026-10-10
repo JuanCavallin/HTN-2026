@@ -7,12 +7,9 @@
  */
 
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, type ToolCatalogEntry } from '../lib/api';
 
-export interface ToolCatalogEntry {
-  name: string;
-  description: string;
-}
+export type { ToolCatalogEntry };
 
 export function useTools() {
   const [tools, setTools] = useState<ToolCatalogEntry[]>([]);

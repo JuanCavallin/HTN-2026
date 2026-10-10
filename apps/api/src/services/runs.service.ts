@@ -17,7 +17,8 @@ import type {
   Step,
   StoredEvent,
 } from '@htn/shared';
-import { stripPiiValue } from '@htn/shared';
+import { isTerminal, stripPiiValue } from '@htn/shared';
+import { pauseRun as gatePauseRun, resumeRun as gateResumeRun } from '../core/pauseGate.js';
 import { getPlaybook, listPlaybooks } from '../core/playbooks/registry.js';
 import { GraphNotFoundError } from './graphs.service.js';
 import { newId, nowIso } from '../lib/ids.js';
@@ -89,6 +90,10 @@ export async function createRun(args: {
     title: args.title ?? (args.kind === 'graph' ? playbookTitleFor(input) : playbook.title),
     status: 'pending',
     input,
+    // An explicit empty collection means pause accounting is complete for
+    // this run. Older rows without this field remain honestly "unknown" in
+    // event-derived active-time metrics.
+    pauses: [],
     createdAt: at,
     updatedAt: at,
   };
@@ -146,9 +151,87 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
   };
 }
 
+/**
+ * Pause and resume.
+ *
+ * Both are no-ops on a run that is not executing in THIS process: a pause latch
+ * only means something to the loop that checks it, so pretending a restarted
+ * run can be paused would be a lie the UI would then render as truth.
+ */
+export async function pauseRun(id: string): Promise<Run | null> {
+  const run = await store.getRun(id);
+  if (!run) return null;
+
+  if (isTerminal(run.status)) {
+    throw new ValidationError('Run ' + id + ' is already ' + run.status, { status: run.status });
+  }
+  if (!orchestrator.isRunning(id)) {
+    throw new ValidationError(
+      'Run ' + id + ' is not executing in this process and cannot be paused',
+      { status: run.status },
+    );
+  }
+
+  // The status flips to 'paused' when the run actually reaches a checkpoint,
+  // not here -- reporting it earlier would claim a step had stopped while it
+  // was still running.
+  gatePauseRun(id);
+  return run;
+}
+
+export async function resumeRun(id: string): Promise<Run | null> {
+  const run = await store.getRun(id);
+  if (!run) return null;
+
+  if (gateResumeRun(id)) return run;
+
+  if (
+    run.status === 'paused' &&
+    run.error?.code === 'PROCESS_RESTART_RECOVERABLE' &&
+    !orchestrator.isRunning(id)
+  ) {
+    const pauses = [...(run.pauses ?? [])];
+    const openIndex = pauses.findLastIndex((pause) => pause.resumedAt === undefined);
+    if (openIndex !== -1) pauses[openIndex] = { ...pauses[openIndex]!, resumedAt: nowIso() };
+    const restarted = await store.patchRun(id, {
+      status: 'pending',
+      control: 'running',
+      pauses,
+      summary: 'Resuming safely from durable input after restart.',
+      error: undefined,
+    });
+    await bus.emit(id, { type: 'run.updated', run: restarted });
+    await bus.emit(id, {
+      type: 'log',
+      runId: id,
+      level: 'info',
+      message: 'User resumed the interrupted run; replaying from durable input.',
+      at: nowIso(),
+    });
+    orchestrator.start(restarted);
+    return restarted;
+  }
+
+  throw new ValidationError('Run ' + id + ' is not paused', { status: run.status });
+}
+
 export async function cancelRun(id: string): Promise<Run | null> {
   const run = await store.getRun(id);
   if (!run) return null;
+
+  // A cancelled run must not leave an actionable approval in durable state.
+  // Expiring before aborting is safe: the waiter also observes the abort and
+  // no executor can cross the exact-action gate.
+  const at = nowIso();
+  for (const approval of await store.listApprovals(id)) {
+    if (approval.status !== 'pending') continue;
+    const expired = await store.patchApproval(approval.id, {
+      status: 'expired',
+      decidedAt: at,
+      note: 'Expired because the run was cancelled.',
+    });
+    await bus.emit(id, { type: 'approval.resolved', approval: expired });
+  }
 
   const stopped = orchestrator.cancel(id);
   if (!stopped) {

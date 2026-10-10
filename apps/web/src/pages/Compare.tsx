@@ -201,6 +201,10 @@ function Row({ label, a, b }: { label: string; a: string; b: string }) {
 }
 
 function versionLabel(side: Side, other: Side, sameGraph: boolean | null): string {
+  if (side.run.kind === 'agent') {
+    const profile = (side.run.input as { executionProfile?: unknown }).executionProfile;
+    return profile === 'hermes_flagship' ? 'Hermes flagship' : 'Zephyr adaptive';
+  }
   if (!side.graph) return side.run.kind === 'baseline' ? 'n/a — no graph' : '—';
   if (!other.graph) return 'v' + side.graph.version;
   if (sameGraph) {

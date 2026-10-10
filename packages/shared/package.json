@@ -8,6 +8,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "check:analytics-v2": "pnpm --dir ../../apps/api exec tsx ../../packages/shared/scripts/analytics-v2.check.ts"
+  },
   "dependencies": {
     "zod": "^4.6.5"
   }

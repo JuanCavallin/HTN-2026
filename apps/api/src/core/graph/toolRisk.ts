@@ -19,7 +19,7 @@
  * ============================================================================
  * TODO(person-3): DELETE THIS TABLE.
  *
- * implementation_plan.md M1 already assigns "implement common tool interface
+ * docs/archive/implementation_plan.md M1 already assigns "implement common tool interface
  * and read/write classification" to the tool registry. Once ToolCatalogEntry
  * carries that classification, this file becomes a lookup against the registry
  * and the hardcoded map goes away. Full handoff, including every other place

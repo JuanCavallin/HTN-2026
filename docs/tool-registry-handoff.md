@@ -16,12 +16,16 @@ cross it.
   `ToolAction`, calls `authorizeAction`, waits for exact-action approval when required,
   invokes one executor once, and records a compact result in canonical session state.
 - `apps/api/src/core/tools/approval.ts` connects `ask_user` to the existing persisted
-  approval and in-memory pause/resume mechanism.
+  approval and in-memory pause/resume mechanism. A revision
+  (`ToolApprovalReceipt.revisedArguments`) is re-validated by `broker.ts`, which rejects
+  any attempt to change the destination and reruns `authorizeAction` before executing —
+  failing closed unless the revision comes back a clean allow.
 - `apps/api/src/services/runtime.ts` exports `toolRegistry`, `toolExecutors`, and
   `toolBroker` for the MCP transport or a provider bootstrapper.
-- `apps/api/src/providers/composio/register.ts` performs task-scoped catalog discovery,
-  conservative operation classification, stable ID generation, schema registration,
-  and generic executor registration. Unknown operations are skipped.
+- `apps/api/src/providers/composio/register.ts` imports the complete metadata catalog
+  for capability-shortlisted, user-connected toolkits; it performs conservative operation
+  classification, stable ID generation, schema registration, and generic executor
+  registration. Unknown operations are skipped.
 - `apps/api/src/core/mcp/server.ts` and `apps/api/src/api/mcp.routes.ts` expose the
   registry through an authenticated stateless Streamable HTTP endpoint. Every call is
   translated into exactly one broker request.
@@ -34,11 +38,19 @@ tool fields are not authorization.
 
 ## Dynamic Composio registration
 
-The runtime no longer needs one handwritten mapping per Composio tool. It searches the
-provider catalog using the sanitized task summary, pins the returned tool version and
-schema, and derives a stable AgentOS ID such as `gmail.get_profile`. A small explicit
-override table remains for demo-critical names and risk policy, including
-`GMAIL_SEND_EMAIL` → `mail.send`.
+The runtime no longer depends on Composio's prompt-search result to decide which app or
+tool should handle a task. It reads the user's active connections, deterministically
+shortlists toolkits for known capabilities or explicit app names, imports every tool
+definition for those toolkits, and then asks Jev once to choose exact tools from a
+bounded compatible shortlist. Jev chooses a toolkit only for genuinely ambiguous tasks.
+Browser tools are suppressed when a connected toolkit was selected unless the task
+explicitly requests browser use.
+
+The selected provider tool version and schema are pinned, and each tool receives a
+stable AgentOS ID such as `gmail.get_profile`. A small explicit override table remains
+for demo-critical names, compact model-facing schemas, and risk policy, including
+`GMAIL_SEND_EMAIL` → `mail.send` and `GOOGLECALENDAR_CREATE_EVENT` →
+`googlecalendar.create_event`.
 
 Classification is deterministic and conservative: read, recoverable write,
 irreversible write, and destructive verbs map to descriptor baselines; an ambiguous
@@ -58,6 +70,8 @@ toolRegistry.register({
     version: '1',
     providerId: 'composio',
     family: 'mail',
+    capabilities: ['email.send'],
+    aliases: ['send email', 'compose email'],
     description: 'Send one email.',
     inputSchemaRef: 'agentos://schemas/mail.send/1',
     transport: 'mcp',
@@ -101,6 +115,11 @@ Mocks and fixtures must set `simulated: true`; the broker intentionally refuses 
 execute them. They may still appear in catalog and selection demonstrations when the UI
 labels them truthfully.
 
+Selection quality is enforced by `pnpm run check:tool-selection-quality`. Add every
+confirmed routing failure as a sanitized golden case before changing ranking weights;
+the exact candidate scores and decision source are also retained in `control.decided`
+events for offline replay.
+
 ## MCP transport contract
 
 The AgentOS-owned MCP server translates each MCP invocation into exactly one call:
@@ -120,6 +139,19 @@ changed, privacy-ineligible, denied, or unapproved actions fail closed before ex
 code runs. `tool.lifecycle`, `control.decided`, `approval.*`, `session.updated`, and
 `harness.turn` events give the dashboard the complete trace.
 
+## Outbound-text authenticity check (GPTZero)
+
+`apps/api/src/core/tools/contentCheck.ts` runs between `authorizeAction` and execution
+for tools that send prose in the user's name (`mail.send`, `localbrowser.type`,
+`browserbase.type`). It scores the outbound text with GPTZero
+(`apps/api/src/providers/gptzero/live.ts`) and is **escalate-only**: it can move the
+final policy `auto -> verify -> ask_user`, never the reverse, and it can never turn
+`deny` into anything or mark an unauthorized action allowed. It is also the one place in
+the broker that fails **open** — a GPTZero outage or missing key leaves the
+already-authorized policy untouched rather than blocking a permitted send, and the trace
+records `unavailable` rather than implying the text was checked. The check is optional
+(`ToolBrokerOptions.contentCheck`); omitting it disables scoring entirely.
+
 ## Verification
 
 Run:
@@ -129,6 +161,7 @@ pnpm check:model-gateway
 pnpm check:mcp-gateway
 pnpm check:tool-broker
 pnpm check:composio-catalog
+pnpm check:content-check
 pnpm typecheck
 ```
 

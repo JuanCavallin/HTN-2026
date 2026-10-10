@@ -3,9 +3,12 @@ import {
   createRunRequestSchema,
   listRunsQuerySchema,
   rollup,
+  rollupV2,
+  runViewFromStoredEvents,
   type CreateRunRequest,
   type ListRunsQuery,
 } from '@htn/shared';
+import { providers } from '../services/runtime.js';
 import {
   availablePlaybooks,
   cancelRun,
@@ -13,6 +16,8 @@ import {
   getRunEvents,
   getRunDetail,
   listRuns,
+  pauseRun,
+  resumeRun,
 } from '../services/runs.service.js';
 import { listEgress } from '../services/egress.service.js';
 import { HttpError, param, valid, validate } from './middleware/validate.js';
@@ -52,6 +57,23 @@ runsRouter.get('/runs/:id/events', async (req, res) => {
   res.json({ events, lastSeq: events.at(-1)?.seq ?? since });
 });
 
+/**
+ * Pause takes effect at the next step boundary, not instantly — so this
+ * returns the run as it is NOW, and the client learns the run actually stopped
+ * from the `run.updated` event that carries status 'paused'.
+ */
+runsRouter.post('/runs/:id/pause', async (req, res) => {
+  const run = await pauseRun(param(req, 'id'));
+  if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json({ run });
+});
+
+runsRouter.post('/runs/:id/resume', async (req, res) => {
+  const run = await resumeRun(param(req, 'id'));
+  if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+  res.json({ run });
+});
+
 runsRouter.post('/runs/:id/cancel', async (req, res) => {
   const run = await cancelRun(param(req, 'id'));
   if (!run) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
@@ -63,14 +85,77 @@ runsRouter.get('/runs/:id/egress', async (req, res) => {
 });
 
 /**
- * Per-node and total tokens, time and cost.
+ * A CURRENT viewer URL for a browser session this run holds.
  *
- * getRunDetail already returns exactly rollup()'s inputs, and rollup lives in
- * @htn/shared so the web app runs the SAME function over the SSE stream for
- * live numbers. One implementation, two callers.
+ * Minted per request on purpose. Browserbase signs its debug URL with a
+ * short-lived token, so the URL captured when the session opened is already
+ * dead by the time a person clicks a handoff link -- it renders a blank page
+ * that accepts no input. Never cache what this returns.
+ *
+ * 200 with `liveViewUrl: null` is a NORMAL answer, not an error: local and
+ * mocked browsers have no viewer, and a session that has since closed cannot
+ * produce one. The UI renders that state rather than a dead link.
  */
+runsRouter.get('/runs/:id/browser/:sessionId/live-view', async (req, res) => {
+  const runId = param(req, 'id');
+  const sessionId = param(req, 'sessionId');
+
+  const detail = await getRunDetail(runId);
+  if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+
+  const adapter = providers.provider('browser');
+  if (!adapter.liveView) {
+    // Same shape on every path: a caller that reads `pageUrl` must not get
+    // `undefined` from one branch and `null` from the others.
+    res.json({ liveViewUrl: null, pageUrl: null, interactive: false });
+    return;
+  }
+
+  const result = await adapter.liveView(sessionId, {
+    runId,
+    policyRule: 'handoff-live-view-refresh',
+  });
+
+  res.json(
+    result.ok
+      ? {
+          liveViewUrl: result.data.liveViewUrl ?? null,
+          // 'about:blank' here means the session is open but nothing is loaded
+          // -- almost always an `open` node with no url. The UI says so rather
+          // than handing over a white box.
+          pageUrl: result.data.pageUrl ?? null,
+          interactive: result.data.interactive,
+        }
+      : { liveViewUrl: null, pageUrl: null, interactive: false },
+  );
+});
+
+/** Legacy analytics shape retained for Compare and older API clients. */
 runsRouter.get('/runs/:id/analytics', async (req, res) => {
   const detail = await getRunDetail(param(req, 'id'));
   if (!detail) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
   res.json(rollup(detail));
+});
+
+/**
+ * Authoritative metrics contract for new surfaces. Unlike the compatibility
+ * endpoint above, this derives every fact from the one persisted event stream.
+ */
+runsRouter.get('/runs/:id/analytics/v2', async (req, res) => {
+  const events = await getRunEvents(param(req, 'id'));
+  if (!events) throw new HttpError(404, 'NOT_FOUND', 'Run not found');
+
+  const view = runViewFromStoredEvents(events);
+  if (!view.run) {
+    // Never fill this gap from the mutable entity tables: doing that would
+    // combine facts from two independently committed histories and report a
+    // state that may never have existed.
+    throw new HttpError(
+      409,
+      'EVENT_HISTORY_UNAVAILABLE',
+      'Run metrics are unavailable because the persisted event history is incomplete',
+    );
+  }
+
+  res.json(rollupV2(view));
 });

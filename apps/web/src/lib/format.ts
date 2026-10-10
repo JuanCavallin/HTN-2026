@@ -23,6 +23,7 @@ export const RUN_STATUS_TONE: Record<RunStatus, 'ok' | 'warn' | 'bad' | 'muted' 
   pending: 'muted',
   running: 'accent',
   awaiting_approval: 'warn',
+  paused: 'warn',
   succeeded: 'ok',
   failed: 'bad',
   cancelled: 'muted',

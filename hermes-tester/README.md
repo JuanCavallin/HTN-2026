@@ -22,7 +22,7 @@ npm start
 Then open http://localhost:5055 and type a prompt.
 
 Edit `HERMES_DIR` at the top of `server.mjs` if your `hermes-agent` clone lives
-somewhere other than `C:\Users\juanc\Local_Dev\HTN-2026\hermes-agent`.
+somewhere other than `<path-to>/hermes-agent`.
 
 ## What it does
 

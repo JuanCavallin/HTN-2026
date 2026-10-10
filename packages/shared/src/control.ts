@@ -38,6 +38,17 @@ export interface ToolDescriptor {
   version: string;
   providerId: string;
   family: string;
+  /**
+   * Stable semantic actions used for deterministic retrieval before Jev ranks
+   * a bounded candidate set. These are selection hints, never permissions.
+   * Tokens use lowercase dot notation, for example `email.send`.
+   */
+  capabilities?: string[];
+  /**
+   * Lowercase natural-language retrieval terms. Aliases improve recall but do
+   * not affect baseline effect, reversibility, scopes, or authorization.
+   */
+  aliases?: string[];
   description: string;
   inputSchemaRef: string;
   transport: ToolTransport;
@@ -59,6 +70,10 @@ export interface ToolAction {
   toolId: string;
   descriptorVersion: string;
   operation: string;
+  /** Snapshotted from the trusted descriptor for restart-safety checks. */
+  effect?: ToolEffect;
+  /** Snapshotted so recovery never has to trust a reloaded provider catalog. */
+  reversibility?: Reversibility;
   arguments: Json;
   destination?: string;
   dataLabels: DataLabel[];
@@ -167,8 +182,19 @@ export interface SessionContextEntry {
   role: 'system' | 'user' | 'assistant' | 'tool';
   summary: string;
   sanitizedSummary?: string;
+  /** Stable digest used to avoid re-storing a harness transcript on every model call. */
+  sourceKey?: string;
   dataLabels: DataLabel[];
   tokenEstimate?: number;
+  at: Iso;
+}
+
+export type AgentExecutionProfile = 'adaptive' | 'hermes_flagship';
+
+export interface SessionModelRouteEntry {
+  modelCallId: string;
+  routeId: string;
+  turn: number;
   at: Iso;
 }
 
@@ -194,6 +220,8 @@ export interface AgentSessionState {
   runId: string;
   stepId: string;
   harness: string;
+  /** Adaptive Zephyr routing or a fixed-model Hermes comparison run. */
+  executionProfile?: AgentExecutionProfile;
   harnessSessionId?: string;
   objective: string;
   sanitizedObjective?: string;
@@ -204,6 +232,10 @@ export interface AgentSessionState {
   context: SessionContextEntry[];
   candidateModelRouteIds: string[];
   selectedModelRouteId?: string;
+  /** Set on the first baseline call and reused for every later call in that session. */
+  fixedModelRouteId?: string;
+  /** Durable route history proves when an adaptive session changed models. */
+  modelRouteHistory?: SessionModelRouteEntry[];
   candidateToolIds: string[];
   selectedToolIds: string[];
   /** Descriptor versions exposed on the latest model request, pinned against TOCTOU changes. */
@@ -253,6 +285,8 @@ export type ControlDecisionOperation =
   | 'select_tool_families'
   | 'select_tools'
   | 'recommend_action_policy'
+  /** Outbound-text authenticity check. Advisory and escalate-only. */
+  | 'check_outbound_text'
   | 'judge_completion';
 
 /** Persisted, UI-safe trace of one bounded control-plane decision. */
@@ -262,6 +296,8 @@ export interface ControlDecisionRecord {
   stepId?: string;
   operation: ControlDecisionOperation;
   candidateIds: string[];
+  /** Optional normalized score/confidence by candidate ID for evaluation and replay. */
+  candidateScores?: Record<string, number>;
   selectedIds: string[];
   confidence: number;
   reasonCodes: string[];
@@ -327,6 +363,8 @@ export interface ToolLifecycleEvent {
   approvalId?: string;
   /** Tool output is untrusted; only a compact local summary enters the event stream. */
   outputSummary?: string;
+  /** True only when the executor explicitly verified the returned evidence. */
+  outputVerified?: boolean;
   error?: { code: string; message: string };
   at: Iso;
 }

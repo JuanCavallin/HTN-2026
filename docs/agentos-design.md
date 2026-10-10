@@ -68,13 +68,20 @@ AgentOS API + Outer Run Controller ↔ Canonical Session State ↔ Trace/Metrics
    starts a Hermes ACP session.
 2. Before each Hermes model call, build the smallest useful context packet and locally
    filter ineligible models and tools using hard privacy and permission rules.
-3. Ask Jev for a model route, tool subset, context scope, and provisional action policy.
-4. Constrain Jev's recommendation with deterministic policy and budget limits, then send
+3. Infer a high-confidence capability intent, use it to shortlist connected toolkits,
+   import their normalized descriptors, and ask Jev once for the exact tools from a
+   bounded capability-compatible shortlist. Explicit app names are hard routing
+   constraints. Jev handles ambiguous toolkit choice only when deterministic retrieval
+   cannot identify the app; browser is not a fallback once a connected app is selected
+   unless browser use was explicitly requested.
+4. Ask Jev for a model route, context scope, and provisional action policy. Constrain
+   every recommendation with deterministic policy and budget limits, then send
    only approved context and tool schemas to the selected model.
 5. If the model proposes a tool, authorize its exact arguments, destination, and data
    before the AgentOS MCP gateway executes it through Composio or a local executor.
 6. Record the route, context, policy, tools, latency, tokens, cost, and outcome.
-7. When the Hermes inner turn is quiescent, verify the result and ask Jev for
+7. When the Hermes inner turn is quiescent, require successful evidence from a tool that
+   can actually satisfy the requested action, then ask Jev for
    `done`, `continue`, or `blocked` from the sanitized session state.
 8. On verified `done`, close the run. On `continue`, send the unmet-requirement packet
    into the same Hermes session for another bounded turn. On `blocked`, pause for the
@@ -98,6 +105,21 @@ cloud/frontier routes. OpenRouter is the cloud model catalog and gateway; it sup
 mixture of vendors and model families rather than implying use of OpenAI models. Hermes
 speaks an OpenAI-compatible request format to AgentOS only as a wire protocol.
 
+Every agent run declares an execution profile. `adaptive` asks Jev to select an eligible
+model for every model call, so one Hermes session may move between local, cheap-cloud and
+frontier-cloud routes as complexity and privacy change. `hermes_flagship` is the comparison
+profile: it pins one cloud-frontier route for the full Hermes session, uses deterministic
+capability retrieval instead of Jev tool selection, and uses deterministic completion
+verification. Both profiles retain the same schema validation, exact-action policy,
+approval and audit boundaries; the baseline is simpler, not less safe.
+
+Before any provider call, the context builder injects a compact packet from canonical
+session state and retains only the protocol-sensitive tail of the Hermes transcript.
+Repeated transcript messages are de-duplicated by a stable source key. Local routes may
+receive the full permitted summaries; cloud routes receive only explicitly sanitized
+summaries. The selected-route history and context version are persisted with the session,
+which makes mid-session model changes observable and independent of provider memory.
+
 Truly local/private inference goes directly to an approved local endpoint such as
 Ollama or vLLM. An OpenRouter route may require zero-data-retention, no-training, or a
 provider allowlist, but it is still cloud egress and must never be labeled local. A
@@ -110,8 +132,10 @@ not credential values, raw secrets, or every full schema.
 
 ### What Jev is
 
-Jev is TypeSafe AI's _System One_ decision model, reached through the `typesafe-sdk`
-package or `POST https://api.typesafe.ai/v1/systemone` with model id `jev-latest`.
+Jev is TypeSafe AI's _System One_ decision model. This repo reaches it through the
+Vercel AI SDK's AI Gateway (`typesafe-ai/jev`, credential `AI_GATEWAY_API_KEY`), not
+through the `typesafe-sdk` package or `POST https://api.typesafe.ai/v1/systemone`; see
+[jev.md](./jev.md) and `apps/api/src/providers/jev/live.ts`.
 
 It answers **typed questions against state** and returns a `Choice` (one key from a
 supplied `criteria` set), a `Score` (a float against an ordered scale), or a `Noul` (a
@@ -148,12 +172,17 @@ requirements, and an optional suggested next step.
 
 This decision controls the outer loop but is not the sole proof of completion. AgentOS
 accepts `done` only when required output schemas and task-specific checks pass, no
-required tool call, approval, or verification remains, policy permits the result, and
-Jev clears the configured confidence threshold. AgentOS then closes/cancels the Hermes
-session as appropriate and emits `task.completed`. Low confidence or failed verification
-causes a bounded continuation or escalation in the same Hermes session. Step and budget
-limits prevent endless loops. `blocked` pauses for a user or records a terminal
-explanation.
+required tool call, approval, or verification remains, and policy permits the result.
+Jev confidence remains observable but does not veto a `done` decision when every hard
+verification passes; failed verification causes a bounded continuation or escalation in
+the same Hermes session. Step and budget limits prevent endless loops. `blocked` pauses
+for a user or records a terminal explanation.
+
+Process restarts are recovered from the same durable run input. Pending approvals expire,
+in-flight attempts and harness sessions are closed, and model/read-only work pauses for an
+explicit Resume that replays the playbook. If a write, destructive, or legacy-unclassified
+tool reached execution—or a legacy direct-action approval was already granted—replay is
+blocked because the external side effect may have landed.
 
 If Jev is remote, local-only state is never sent to it; AgentOS uses a sanitized summary
 or a deterministic/local completion check instead.
@@ -181,6 +210,24 @@ Jev recommendation. The strictest applicable result wins.
 Every boundary emits a typed event containing route and Jev reasoning, tools considered,
 exposed and called, context labels, policy and verification results, completion status,
 usage, latency, and estimated cost.
+
+### Reliable tool selection and evaluation
+
+Tool descriptors carry normalized semantic `capabilities` (for example `email.read`
+and `calendar.create`) plus natural-language `aliases`. Deterministic retrieval removes
+unavailable, unclassified, and action-incompatible tools before Jev sees at most twelve
+candidates. A read request therefore cannot lose to a send-only tool just because both
+descriptions contain “email.” If Jev fails or returns no exact tool for a known required
+capability, AgentOS recovers only the highest-ranked compatible candidate; it never
+widens back to the full catalog. If no compatible candidate exists, the run fails before
+Hermes starts.
+
+Every selection event stores the candidate IDs, per-candidate scores, selected IDs,
+source, confidence, and reason codes. This is the replay/evaluation substrate for later
+learning from accepted corrections without allowing learned preferences to weaken hard
+privacy or authorization policy. `pnpm run check:tool-selection-quality` runs the golden
+regression set, including typo-heavy Gmail read, email send, calendar, browser, no-tool,
+unavailable-tool, and incompatible-action cases.
 
 ## Human Intervention
 
@@ -212,6 +259,9 @@ exposed, and called tools; model route and escalation history; Jev scheduling an
 completion decisions; context labels and egress; pending approvals/revisions; and
 latency, tokens, cost, frontier calls, schema-token savings, and success. Live providers,
 mocks, fixtures, cached replay, and real execution must be labeled truthfully.
+The composer can run the same goal as Zephyr adaptive or as the fixed-frontier Hermes
+baseline; after either finishes, the user can launch the other profile and compare the two
+runs side by side using provider-reported tokens, cost, latency, model calls and outcomes.
 
 ## Demo
 
@@ -258,7 +308,7 @@ progress in parallel.
 | Person 4 | Dashboard, metrics and demo            | Dashboard                                                                | UI task entry and Hermes-run wrapper; live trace; approval, revision, pause and cancel controls; provider and tool counts; cost and token metrics; synthetic demo fixtures; live/mock/fixture/replay labeling; presentation                                                                                                                                                | Consumes the event stream; calls approve, reject, revise, pause and cancel endpoints                     |
 
 Person 3's scope is split across two people — **3A (tool registry and MCP)** and
-**3B (browser and Browserbase)**. See [person-3.md](./person-3.md) for that breakdown,
+**3B (browser and Browserbase)**. See [person-3.md](./archive/person-3.md) for that breakdown,
 the seam between the two tracks, and the files each one owns.
 
 ### Handoffs

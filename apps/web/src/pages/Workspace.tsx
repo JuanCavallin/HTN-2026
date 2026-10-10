@@ -1,13 +1,11 @@
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from 'react';
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { emptyRunView, isTerminal, type AgentGraph, type Conversation } from '@htn/shared';
+  emptyRunView,
+  isTerminal,
+  type AgentExecutionProfile,
+  type Conversation,
+} from '@htn/shared';
 import { api } from '../lib/api';
 import {
   advancePreview,
@@ -22,12 +20,20 @@ import {
 } from '../lib/workspace';
 import { useRunStream } from '../hooks/useRunStream';
 import { useRunGraph } from '../hooks/useGraph';
+import { useTools } from '../hooks/useTools';
 import { useHarness } from '../components/layout/AppShell';
 import { DecisionCanvas } from '../components/graph/DecisionCanvas';
-import { MetricsStrip, RunInspector, TaskComposer } from '../components/chat/WorkspacePanels';
+import {
+  MetricsStrip,
+  RunInspector,
+  TaskComposer,
+  type ComposerMode,
+} from '../components/chat/WorkspacePanels';
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel';
+import { handoffSessionIdFor } from '../lib/handoff';
 import { EgressLedger } from '../components/egress/EgressLedger';
 import { Icon, Mark } from '../components/ui/Icon';
+import { AssistantMarkdown } from '../components/chat/AssistantMarkdown';
 
 function WorkingStatus({ children, active = true }: { children: ReactNode; active?: boolean }) {
   return (
@@ -52,6 +58,31 @@ function Message({ author, children }: { author: 'you' | 'agent'; children: Reac
       </div>
     </div>
   );
+}
+
+function runResultText(result: unknown): string | null {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const output = (result as Record<string, unknown>).output;
+  if (typeof output === 'string') return output;
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    const text = (output as Record<string, unknown>).text;
+    if (typeof text === 'string') return text;
+  }
+  return null;
+}
+
+function executionProfileFromInput(input: unknown): AgentExecutionProfile {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'adaptive';
+  return (input as { executionProfile?: unknown }).executionProfile === 'hermes_flagship'
+    ? 'hermes_flagship'
+    : 'adaptive';
+}
+
+function goalFromInput(input: unknown): string | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const goal = (input as { goal?: unknown }).goal;
+  return typeof goal === 'string' && goal.trim() ? goal : null;
 }
 
 function EmptyWorkspace({ onExample }: { onExample: (scenario: Scenario) => void }) {
@@ -263,25 +294,54 @@ export function Workspace() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const { providers, openConnection } = useHarness();
+  const requestedExample = params.get('example');
   const [scenario, setScenario] = useState<Scenario>(
-    params.get('example') === 'trip' ? 'trip' : 'support',
+    requestedExample === 'trip' ? 'trip' : 'support',
   );
-  const [started, setStarted] = useState(!params.has('new'));
+  const [started, setStarted] = useState(
+    requestedExample === 'support' || requestedExample === 'trip',
+  );
   const [elapsed, setElapsed] = useState(3200);
   const [playing, setPlaying] = useState(true);
   const [approval, setApproval] = useState<'approved' | 'rejected'>();
   const [selected, setSelected] = useState<string>();
-  const [mode, setMode] = useState<'preview' | 'backend'>('preview');
+  // The product's front door always starts on the real supervised agent path.
+  // Synthetic examples remain available only through explicit example links.
+  const [mode, setMode] = useState<ComposerMode>(requestedExample ? 'preview' : 'backend');
   const [prompt, setPrompt] = useState(SCENARIOS[scenario].prompt);
   const [customPreview, setCustomPreview] = useState(false);
   const [overrides, setOverrides] = useState<RouteOverrides>({});
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const [prepared, setPrepared] = useState<AgentGraph | null>(null);
   const [pastMessages, setPastMessages] = useState<string[]>([]);
   const scroll = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const active = mode === 'preview' && started && playing && elapsed < PREVIEW_LIMIT;
+
+  const previousQuery = useRef(params.toString());
+  useEffect(() => {
+    const current = params.toString();
+    if (previousQuery.current === current) return;
+    previousQuery.current = current;
+    const example = params.get('example');
+    if (example === 'support' || example === 'trip') {
+      setScenario(example);
+      setPrompt(SCENARIOS[example].prompt);
+      setElapsed(0);
+      setPlaying(true);
+      setApproval(undefined);
+      setSelected(undefined);
+      setStarted(true);
+      setCustomPreview(false);
+      setOverrides({});
+      setMode('preview');
+      setError('');
+      return;
+    }
+    setStarted(false);
+    setMode('backend');
+    setError('');
+  }, [params]);
 
   useEffect(() => {
     if (!active) return;
@@ -299,11 +359,11 @@ export function Workspace() {
       mode === 'preview' && started
         ? previewTrace(scenario, elapsed, approval, overrides)
         : {
-            ...buildTrace(emptyRunView, prepared),
+            ...buildTrace(emptyRunView, null),
             provenance: mode === 'preview' ? 'preview' : 'unknown',
             status: busy ? 'pending' : 'ready',
           },
-    [mode, started, scenario, elapsed, approval, overrides, prepared, busy],
+    [mode, started, scenario, elapsed, approval, overrides, busy],
   );
   const done = trace.status === 'succeeded';
   const gate = trace.status === 'awaiting_approval';
@@ -330,7 +390,6 @@ export function Workspace() {
     setOverrides({});
     setMode('preview');
     setError('');
-    setPrepared(null);
   };
 
   // Editing a route in preview re-runs the workflow with the new choice, from the top, so
@@ -356,7 +415,35 @@ export function Workspace() {
       setOverrides({});
       return true;
     }
-    if (!providers.some((provider) => provider.id === 'hermes' && provider.healthy)) {
+    if (mode === 'workflow') {
+      // Chat-to-graph. Synthesis needs no harness, so there is no Hermes gate here.
+      setStarted(true);
+      setPrompt(text);
+      setBusy('Drafting the workflow');
+      try {
+        // A NEW conversation on every send, deliberately unseeded: reusing one would
+        // edit the previous workflow instead of starting a fresh document. Editing an
+        // existing workflow happens from the chat panel inside the workflow editor.
+        const { conversation } = await api.createConversation();
+        const { graph } = await api.sendMessage(conversation.id, text);
+        navigate('/graphs/' + graph.id);
+        return true;
+      } catch (issue) {
+        setError(
+          issue instanceof Error
+            ? issue.message
+            : 'Could not draft the workflow. Check the API and try again.',
+        );
+        return false;
+      } finally {
+        setBusy('');
+      }
+    }
+    const hermes = providers.find((provider) => provider.id === 'hermes');
+    // Provider health loads independently from the composer. An empty array is
+    // still "checking", not proof that Hermes is unavailable; let the start
+    // request reach the backend instead of rejecting a fast first submission.
+    if (hermes && !hermes.healthy) {
       setError(
         'Connect the configured Hermes adapter before starting a backend run. Your message has been kept.',
       );
@@ -365,17 +452,15 @@ export function Workspace() {
     }
     setStarted(true);
     setPrompt(text);
-    setPrepared(null);
-    setBusy('Preparing the workflow');
+    setBusy('Starting execution');
     try {
-      const { conversation } = await api.createConversation();
-      const result = await api.sendMessage(conversation.id, text);
-      setPrepared(result.graph);
-      setBusy('Starting execution');
-      const { run } = await api.runGraph(result.graph.id);
-      navigate('/runs/' + run.id, {
-        state: { conversation: result.conversation, graph: result.graph },
-      });
+      // One supervised `agent` run per goal (docs/frontend-handoff.md). Drafting a
+      // reviewable workflow graph instead is the composer's 'workflow' mode above.
+      const { run } = await api.startAgentTask(
+        text,
+        mode === 'hermes' ? 'hermes_flagship' : 'adaptive',
+      );
+      navigate('/runs/' + run.id);
       return true;
     } catch (issue) {
       setError(
@@ -400,9 +485,13 @@ export function Workspace() {
               <h1>
                 {mode === 'backend'
                   ? 'Your next task'
-                  : customPreview
-                    ? 'Exploring a workflow'
-                    : sample.title}
+                  : mode === 'hermes'
+                    ? 'Hermes baseline task'
+                    : mode === 'workflow'
+                      ? 'Your next workflow'
+                      : customPreview
+                        ? 'Exploring a workflow'
+                        : sample.title}
               </h1>
               <p>
                 {mode === 'preview'
@@ -436,10 +525,10 @@ export function Workspace() {
                 ? customPreview
                   ? 'I can show you how this workspace behaves. This is the sample workflow, not a generated answer to your message. Switch to the backend to execute your own task.'
                   : sample.intro
-                : busy
-                  ? 'Turning your request into a workflow. Execution will start as soon as it is ready.'
-                  : prepared
-                    ? 'The workflow is prepared. Execution has not started.'
+                : mode === 'workflow'
+                  ? 'Drafting a workflow you can review and edit. Nothing runs until you press Run.'
+                  : busy
+                    ? 'Starting your task. The live trace opens as soon as the run exists.'
                     : 'Your task will run through the configured backend.'}
             </p>
             {mode === 'preview' && trace.nodes.length > 0 && (
@@ -481,7 +570,7 @@ export function Workspace() {
                     : 'Three days, without the rush.'}
                 </h2>
                 <p>{sample.result}</p>
-                <ul>
+                <ul className="assistant-preview-notes">
                   {sample.notes.map((note) => (
                     <li key={note}>
                       <Icon name="check" size={14} />
@@ -542,7 +631,6 @@ export function Workspace() {
       {error && (
         <div className="error-note" role="alert">
           {error}
-          {prepared && <Link to={'/graphs/' + prepared.id}>Open the prepared workflow</Link>}
         </div>
       )}
     </>
@@ -570,8 +658,7 @@ export function Workspace() {
           onModeChange={(next) => {
             setMode(next);
             setError('');
-            setPrepared(null);
-            if (next === 'backend') setStarted(false);
+            if (next !== 'preview') setStarted(false);
           }}
           onSend={send}
         />
@@ -590,9 +677,8 @@ export function Workspace() {
 
 export function LiveRunWorkspace() {
   const { id } = useParams<{ id: string }>();
-  const location = useLocation();
   const navigate = useNavigate();
-  const seed = location.state as { conversation?: Conversation; graph?: AgentGraph } | null;
+  const [runParams] = useSearchParams();
   const [retry, setRetry] = useState(0);
   const view = useRunStream(id, retry);
   const snapshot = useRunGraph(view.run?.input ?? null);
@@ -601,9 +687,19 @@ export function LiveRunWorkspace() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const graph = snapshot ?? seed?.graph;
-  const trace = useMemo(() => buildTrace(view, graph, now), [view, graph, now]);
+  const graph = snapshot;
+  // Names each tool's provider (Composio, browser, MCP) so the graph can say where it ran.
+  const { tools } = useTools();
+  const catalog = useMemo(() => new Map(tools.map((tool) => [tool.name, tool])), [tools]);
+  const trace = useMemo(() => buildTrace(view, graph, now, catalog), [view, graph, now, catalog]);
   const terminal = !!view.run && isTerminal(view.run.status);
+  const finalOutput = runResultText(view.run?.result);
+  const executionProfile = executionProfileFromInput(view.run?.input);
+  const runGoal = goalFromInput(view.run?.input);
+  const comparisonSourceId = runParams.get('compare');
+  // Read from the run, never from a local click -- pause lands at the next step
+  // boundary, so the server is the only thing that knows when it took effect.
+  const runPaused = view.run?.status === 'paused';
 
   useEffect(() => {
     if (terminal) return;
@@ -627,17 +723,29 @@ export function LiveRunWorkspace() {
     setBusy(true);
     setError('');
     try {
-      const conversationId =
-        seed?.conversation?.id ?? (await api.createConversation(graph?.id)).conversation.id;
-      const result = await api.sendMessage(conversationId, text);
-      const { run } = await api.runGraph(result.graph.id);
-      navigate('/runs/' + run.id, {
-        state: { conversation: result.conversation, graph: result.graph },
-      });
+      // A follow-up is a new supervised run, not an edit of this one.
+      const { run } = await api.startAgentTask(text, executionProfile);
+      navigate('/runs/' + run.id);
       return true;
     } catch (issue) {
       setError(issue instanceof Error ? issue.message : 'Could not start your follow-up.');
       return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startProfileComparison = async () => {
+    if (!id || !runGoal) return;
+    setBusy(true);
+    setError('');
+    try {
+      const otherProfile: AgentExecutionProfile =
+        executionProfile === 'hermes_flagship' ? 'adaptive' : 'hermes_flagship';
+      const { run } = await api.startAgentTask(runGoal, otherProfile);
+      navigate('/runs/' + run.id + '?compare=' + encodeURIComponent(id));
+    } catch (issue) {
+      setError(issue instanceof Error ? issue.message : 'Could not start the comparison run.');
     } finally {
       setBusy(false);
     }
@@ -653,13 +761,33 @@ export function LiveRunWorkspace() {
     }
   };
 
+  /**
+   * Pause is cooperative, so this does NOT set any local "paused" state: the
+   * run reports status 'paused' over SSE once it actually reaches a step
+   * boundary. Flipping a local flag here would show the run as stopped while a
+   * step was still running.
+   */
+  const togglePause = async () => {
+    if (!id) return;
+    setError('');
+    try {
+      if (runPaused) await api.resumeRun(id);
+      else await api.pauseRun(id);
+    } catch (issue) {
+      setError(issue instanceof Error ? issue.message : 'The run did not accept that request.');
+    }
+  };
+
   const lane = (
     <>
       <header className="conversation-heading">
         <div>
           <h1>{view.run?.title ?? 'Connecting to your run'}</h1>
           <p>
-            Backend execution ·{' '}
+            {executionProfile === 'hermes_flagship'
+              ? 'Hermes flagship baseline'
+              : 'Zephyr adaptive execution'}{' '}
+            ·{' '}
             {trace.provenance === 'unknown'
               ? 'awaiting provider reports'
               : trace.provenance + ' provider activity'}
@@ -679,39 +807,80 @@ export function LiveRunWorkspace() {
         </div>
       ) : (
         <>
-          {seed?.conversation?.messages
-            .filter((message) => message.role === 'user')
-            .map((message) => (
-              <Message author="you" key={message.id}>
-                <p className="user-request">{message.text}</p>
-              </Message>
-            ))}
           <Message author="agent">
             <p className="assistant-intro">
               {view.run?.summary ??
-                seed?.conversation?.messages.findLast((message) => message.role === 'assistant')
-                  ?.text ??
                 'Following the execution stream. Recorded steps and routing decisions will appear here as they arrive.'}
             </p>
             {!terminal && (
-              <WorkingStatus active={view.connected && view.run?.status !== 'awaiting_approval'}>
+              <WorkingStatus
+                active={view.connected && view.run?.status !== 'awaiting_approval' && !runPaused}
+              >
                 {view.run?.status === 'awaiting_approval'
                   ? 'Waiting for your approval'
-                  : !view.connected
-                    ? 'Connection interrupted — reconnecting'
-                    : (trace.nodes.find((node) => node.status === 'running')?.label ??
-                      'Waiting for a backend update')}
+                  : runPaused
+                    ? 'Paused at a step boundary — resume when you’re ready'
+                    : !view.connected
+                      ? 'Connection interrupted — reconnecting'
+                      : (trace.nodes.find((node) => node.status === 'running')?.label ??
+                        'Waiting for a backend update')}
               </WorkingStatus>
             )}
             {view.approvals
               .filter((approval) => approval.status === 'pending')
-              .map((approval) => (
-                <ApprovalPanel key={approval.id} approval={approval} />
-              ))}
+              .map((approval) => {
+                // A handoff approval carries the id of a browser session the
+                // run is holding open. Passing its URL through is what turns
+                // "approve this" into "here is the browser, go and do it".
+                const sessionId = handoffSessionIdFor(approval, view.browserSessions);
+                return (
+                  <ApprovalPanel
+                    key={approval.id}
+                    approval={approval}
+                    {...(sessionId ? { handoffSessionId: sessionId } : {})}
+                  />
+                );
+              })}
             {view.run?.error && (
               <p className="error-note" role="alert">
                 {view.run.error.message}
               </p>
+            )}
+            {terminal && finalOutput && (
+              <div className="assistant-result">
+                <h2>Result</h2>
+                <AssistantMarkdown>{finalOutput}</AssistantMarkdown>
+                <span className="result-provenance">Verified backend output</span>
+              </div>
+            )}
+            {terminal && view.run?.kind === 'agent' && runGoal && (
+              <div className="profile-comparison-actions">
+                {comparisonSourceId ? (
+                  <Link
+                    className="secondary-button"
+                    to={
+                      '/compare?a=' +
+                      encodeURIComponent(comparisonSourceId) +
+                      '&b=' +
+                      encodeURIComponent(id ?? '')
+                    }
+                  >
+                    <Icon name="graph" size={14} />
+                    Compare cost and performance
+                  </Link>
+                ) : (
+                  <button
+                    className="secondary-button"
+                    disabled={busy}
+                    onClick={() => void startProfileComparison()}
+                  >
+                    <Icon name="replay" size={14} />
+                    {executionProfile === 'hermes_flagship'
+                      ? 'Run the same task with Zephyr adaptive'
+                      : 'Run the same task with Hermes flagship'}
+                  </button>
+                )}
+              </div>
             )}
             {view.logs.length > 0 && (
               <details className="run-details">
@@ -773,16 +942,16 @@ export function LiveRunWorkspace() {
       lane={lane}
       composer={
         <TaskComposer
-          mode="backend"
+          mode={executionProfile === 'hermes_flagship' ? 'hermes' : 'backend'}
           onSend={followUp}
           busy={busy}
           disabled={!terminal}
-          placeholder={
-            terminal ? 'Refine this workflow or ask a follow-up…' : 'Your workflow is running…'
-          }
+          placeholder={terminal ? 'Ask a follow-up…' : 'This run is in progress…'}
           hint={
             terminal
-              ? 'A follow-up edits this workflow and starts a new run.'
+              ? executionProfile === 'hermes_flagship'
+                ? 'A follow-up starts another fixed-flagship Hermes run for a fair comparison.'
+                : 'A follow-up starts another adaptive run with the same execution profile.'
               : 'Follow-ups unlock when this run finishes. Use the approval or cancel controls to intervene.'
           }
         />
@@ -790,6 +959,8 @@ export function LiveRunWorkspace() {
       metrics={
         <MetricsStrip
           trace={trace}
+          paused={runPaused}
+          onPause={() => void togglePause()}
           onCancel={() => void cancel()}
           connected={view.connected}
           lastEventAt={view.lastEventAt}

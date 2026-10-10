@@ -4,11 +4,46 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
+import { harnessToolResult } from '../src/core/mcp/server.js';
 import {
   CORE_RUNTIME_STATUS_TOOL_ID,
   CORE_RUNTIME_STATUS_WIRE_NAME,
 } from '../src/core/tools/local.js';
 import { sessionStateService, store } from '../src/services/runtime.js';
+
+const fakeMessages = Array.from({ length: 54 }, (_, index) => ({
+  attachmentList: [],
+  display_url: 'https://example.test/message/' + index,
+  labelIds: ['INBOX', 'UNREAD'],
+  messageId: 'message-' + index,
+  messageText: '',
+  messageTimestamp: '2026-09-22T12:00:00Z',
+  preview: { body: 'x'.repeat(500), subject: 'Subject ' + index },
+  sender: 'sender-' + index + '@example.test',
+  subject: 'Subject ' + index,
+  threadId: 'thread-' + index,
+  to: 'recipient@example.test',
+}));
+const nestedComposioOutput = {
+  result:
+    'AgentOS tool completed through the connected account.\n\n' +
+    'Structured Content (untrusted data):\n' +
+    JSON.stringify({
+      data: { messages: fakeMessages, nextPageToken: '', resultSizeEstimate: 54 },
+      successful: true,
+      error: null,
+      log_id: 'log_test',
+    }),
+};
+const compactGmailResult = harnessToolResult(
+  'Completed gmail.fetch_emails through the connected account.',
+  nestedComposioOutput,
+  'gmail.fetch_emails',
+);
+assert.ok(compactGmailResult.length < 17_000);
+assert.match(compactGmailResult, /"returnedCount":54/);
+assert.match(compactGmailResult, /"sender":"sender-53@example\.test"/);
+assert.doesNotMatch(compactGmailResult, /attachmentList|display_url|messageId|threadId/);
 
 async function main(): Promise<void> {
   const session = await sessionStateService.create({
@@ -70,6 +105,11 @@ async function main(): Promise<void> {
       });
       assert.equal(result.isError, undefined);
       assert.match(JSON.stringify(result.content), /AgentOS session is running on turn 1/);
+      assert.match(
+        JSON.stringify(result.content),
+        /\\"status\\":\\"running\\".*\\"turn\\":1/,
+        'the local harness must receive bounded executor output, not only a generic summary',
+      );
 
       await sessionStateService.beginTurn(session.id);
       const expired = await client.callTool({

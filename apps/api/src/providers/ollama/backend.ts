@@ -20,6 +20,10 @@ interface OllamaResponse {
   eval_count?: number;
 }
 
+const LOCAL_CONTEXT_TOKENS = 8_192;
+const LOCAL_MAX_OUTPUT_TOKENS = 2_048;
+const LOCAL_REQUEST_TIMEOUT_MS = 180_000;
+
 export function createOllamaBackend(
   cfg: ProviderConfig,
   recordEgress: RecordEgress,
@@ -72,12 +76,23 @@ async function completeLocal(
         model: input.route.modelId,
         messages: toOllamaMessages(input.messages),
         ...(input.tools.length > 0 ? { tools: input.tools } : {}),
-        ...(input.maxTokens ? { options: { num_predict: input.maxTokens } } : {}),
+        options: {
+          // Ollama otherwise loaded qwen3:8b with a 4K context while the
+          // gateway invited an 8K-token answer. Provider-result synthesis can
+          // then spend the entire request budget generating an unnecessarily
+          // long response. An 8K context plus a 2K output cap leaves room for
+          // the inline private tool result and keeps demo latency bounded.
+          num_ctx: LOCAL_CONTEXT_TOKENS,
+          num_predict: Math.min(
+            input.maxTokens ?? LOCAL_MAX_OUTPUT_TOKENS,
+            LOCAL_MAX_OUTPUT_TOKENS,
+          ),
+        },
         stream: false,
         // AgentOS needs the answer/tool call, not an unobserved local reasoning trace.
         think: false,
       }),
-      signal: ctx.signal ?? AbortSignal.timeout(120_000),
+      signal: ctx.signal ?? AbortSignal.timeout(LOCAL_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error('Ollama returned HTTP ' + response.status + '.');
     const body = (await response.json()) as OllamaResponse;

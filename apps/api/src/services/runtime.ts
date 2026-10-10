@@ -21,14 +21,18 @@ import { InMemoryToolExecutorRegistry } from '../core/tools/executors.js';
 import { InMemoryToolRegistry } from '../core/tools/registry.js';
 import { registerCoreLocalTools } from '../core/tools/local.js';
 import { registerBrowserTools } from '../core/tools/index.js';
+import { registerWeatherTool } from '../core/tools/weather.js';
+import { registerWebSearchTool } from '../core/tools/webSearch.js';
 import { SessionStateService } from '../core/sessions/service.js';
 import { nowIso } from '../lib/ids.js';
 import { createProviderRegistry } from '../providers/registry.js';
 import { createOpenRouterBackend, openRouterModelRoutes } from '../providers/openrouter/backend.js';
 import { createOllamaBackend, ollamaModelRoutes } from '../providers/ollama/backend.js';
+import { createGeminiBackend, geminiModelRoutes } from '../providers/gemini/backend.js';
 import type { RecordEgress } from '../providers/withEgress.js';
 import { ComposioToolCatalog } from '../providers/composio/register.js';
 import { McpConnectionManager } from '../core/mcp/connections.js';
+import { restartRecoveryDisposition } from '../core/restartRecovery.js';
 import { store } from '../store/index.js';
 
 export const bus = new RunBus((runId, event) => store.appendEvent(runId, event));
@@ -57,9 +61,23 @@ export const toolBroker = new ToolBroker(
   decisionService,
   sessionStateService,
   bus,
-  { approvalGate: toolApprovalGate },
+  {
+    approvalGate: toolApprovalGate,
+    // Escalate-only: it can stop an outbound send for a human, never permit one.
+    contentCheck: {
+      analysis: providers.provider('content.analysis'),
+      threshold: config.contentCheck.escalationThreshold,
+    },
+  },
 );
 registerCoreLocalTools(toolRegistry, toolExecutors, sessionStateService);
+registerWeatherTool(toolRegistry, toolExecutors, providers.provider('weather.forecast'));
+registerWebSearchTool(
+  toolRegistry,
+  toolExecutors,
+  providers.provider('web.search'),
+  config.providers.openrouter.mode === 'live',
+);
 export const browserTools = registerBrowserTools(toolRegistry, toolExecutors, {
   provider: (capability) => providers.provider(capability),
 });
@@ -88,15 +106,22 @@ export const modelGateway = new ModelGatewayService(
     modelRoutes: (adapter) =>
       configuredModelRoutes(adapter, [
         ...openRouterModelRoutes(config.providers.openrouter),
+        ...geminiModelRoutes(config.providers.gemini),
         ...ollamaModelRoutes(config.providers.ollama),
       ]),
+    // Each backend handles only its own route and delegates the rest, so the
+    // chain order is irrelevant to correctness and adding a vendor is one link.
     backend: createOllamaBackend(
       config.providers.ollama,
       recordEgress,
-      createOpenRouterBackend(
-        config.providers.openrouter,
+      createGeminiBackend(
+        config.providers.gemini,
         recordEgress,
-        textAdapterBackend(boundTextModel),
+        createOpenRouterBackend(
+          config.providers.openrouter,
+          recordEgress,
+          textAdapterBackend(boundTextModel),
+        ),
       ),
     ),
   },
@@ -110,21 +135,25 @@ export const orchestrator = new Orchestrator({
   decisionService,
   sessionStateService,
   toolRegistry,
+  // Graph tool nodes execute through the SAME broker a harness turn does.
+  toolBroker,
   toolDiscovery: composioToolCatalog,
   localToolCandidates: async () => {
     const [mcpToolIds, registered] = await Promise.all([
       mcpConnections.candidateToolIds(),
       toolRegistry.list(),
     ]);
-    const browserToolIds = registered
+    const nativeToolIds = registered
       .filter(
         (tool) =>
           tool.descriptor.availability === 'available' &&
           (tool.descriptor.providerId === 'localbrowser' ||
-            tool.descriptor.providerId === 'browserbase'),
+            tool.descriptor.providerId === 'browserbase' ||
+            tool.descriptor.providerId === 'weather' ||
+            tool.descriptor.id === 'web.search'),
       )
       .map((tool) => tool.descriptor.id);
-    return [...new Set([...mcpToolIds, ...browserToolIds])];
+    return [...new Set([...mcpToolIds, ...nativeToolIds])];
   },
   releaseRunResources: ({ runId, stepId }) =>
     browserTools.closeRunSessions(runId, {
@@ -145,17 +174,21 @@ export async function initializeRuntimeProviders(): Promise<void> {
 }
 
 /**
- * A persisted run cannot resume its in-memory Hermes task or approval promise
- * after this process exits. Close that stale state explicitly on startup so the
- * API never presents a run as active when no worker exists to advance it.
+ * Reconcile process-local state after a restart. Safe runs pause for an explicit
+ * user resume and replay from their durable input. If a non-read tool reached
+ * execution, replay could duplicate a side effect, so recovery fails closed.
  */
 export async function recoverInterruptedRuns(): Promise<number> {
   const interrupted = (await store.listRuns({ limit: 100_000 })).filter(
-    (run) => !isTerminal(run.status),
+    (run) =>
+      !isTerminal(run.status) &&
+      !(run.status === 'paused' && run.error?.code === 'PROCESS_RESTART_RECOVERABLE'),
   );
 
   for (const run of interrupted) {
     const at = nowIso();
+    const approvals = await store.listApprovals(run.id);
+    const disposition = restartRecoveryDisposition(await store.eventsSince(run.id, 0), approvals);
     for (const step of await store.listSteps(run.id)) {
       if (!['pending', 'running', 'blocked'].includes(step.status)) continue;
       const next = await store.patchStep(step.id, {
@@ -169,7 +202,7 @@ export async function recoverInterruptedRuns(): Promise<number> {
       await bus.emit(run.id, { type: 'step.upserted', step: next });
     }
 
-    for (const approval of await store.listApprovals(run.id)) {
+    for (const approval of approvals) {
       if (approval.status !== 'pending') continue;
       const next = await store.patchApproval(approval.id, {
         status: 'expired',
@@ -185,15 +218,61 @@ export async function recoverInterruptedRuns(): Promise<number> {
       await bus.emit(run.id, { type: 'session.updated', session: next });
     }
 
-    const next = await store.patchRun(run.id, {
-      status: 'cancelled',
-      summary: 'Interrupted by an API restart; start a new run to continue.',
-      error: {
-        code: 'PROCESS_RESTART',
-        message: 'The in-memory harness task could not be resumed after the API restarted.',
-      },
-    });
+    const next = disposition.resumable
+      ? await store.patchRun(run.id, {
+          status: 'paused',
+          control: 'paused',
+          pauses: [...(run.pauses ?? []), { at }],
+          summary: 'Paused after an API restart. Resume to retry from durable input.',
+          error: {
+            code: 'PROCESS_RESTART_RECOVERABLE',
+            message: 'Process-local execution was lost; safe replay is available.',
+          },
+        })
+      : await store.patchRun(run.id, {
+          status: 'failed',
+          control: undefined,
+          summary: 'Stopped after restart because replay could duplicate an external action.',
+          error: {
+            code: 'PROCESS_RESTART_SIDE_EFFECT_UNCERTAIN',
+            message:
+              'A write or unclassified tool reached execution before restart. Start a new run only after checking the external system.',
+          },
+        });
     await bus.emit(run.id, { type: 'run.updated', run: next });
+    await bus.emit(run.id, {
+      type: 'log',
+      runId: run.id,
+      level: disposition.resumable ? 'warn' : 'error',
+      message: disposition.resumable
+        ? 'Execution was interrupted by restart and is safe to replay after user resume.'
+        : 'Execution was interrupted after an external action may have run; automatic replay is blocked.',
+      at,
+    });
+  }
+
+  // A session left ACTIVE on a run that already finished is never reached by
+  // the loop above, because that loop only walks non-terminal runs. It is still
+  // debris, and it is not harmless: resolveActiveHarnessSession requires
+  // exactly one active session per harness and throws "multiple active
+  // sessions are ambiguous" otherwise, so a single leaked session can break
+  // every later agent task in the process -- and it survives restarts, because
+  // it is persisted.
+  const orphanedSessions = (await store.listSessionStates()).filter(
+    (session) => !['completed', 'failed', 'cancelled'].includes(session.status),
+  );
+  for (const session of orphanedSessions) {
+    const run = await store.getRun(session.runId);
+    if (run && !isTerminal(run.status)) continue; // handled above
+    const next = await store.patchSessionState(session.id, { status: 'cancelled' });
+    await bus.emit(session.runId, { type: 'session.updated', session: next });
+  }
+  if (orphanedSessions.length > 0) {
+    console.warn(
+      '[store] cancelled ' +
+        orphanedSessions.length.toString() +
+        ' session(s) left active on already-finished runs',
+    );
   }
 
   if (interrupted.length > 0) {

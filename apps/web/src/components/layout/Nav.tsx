@@ -23,9 +23,7 @@ export function Nav({
     <aside className={`sidebar ${open ? 'is-open' : ''}`} aria-label="Workspace navigation">
       <Link className="brand" to="/">
         <Mark />
-        <span>
-          Zephyr
-        </span>
+        <span>Zephyr</span>
         <span className="brand-beta">beta</span>
       </Link>
       <button
@@ -52,6 +50,10 @@ export function Nav({
         <NavLink to="/runs">
           <Icon name="clock" />
           <span>Run history</span>
+        </NavLink>
+        <NavLink to="/connections">
+          <Icon name="connect" />
+          <span>Connections</span>
         </NavLink>
       </nav>
       <div className="sidebar-section">
@@ -85,12 +87,14 @@ export function Nav({
           <Icon name="connect" size={17} />
           Harness connection
         </button>
-        <button className="sidebar-utility" aria-expanded={themes} onClick={() => setThemes(!themes)}>
+        <button
+          className="sidebar-utility"
+          aria-expanded={themes}
+          onClick={() => setThemes(!themes)}
+        >
           <Icon name="palette" size={17} />
           Theme
-          <span className="utility-value">
-            {THEMES.find((item) => item.id === theme)?.label}
-          </span>
+          <span className="utility-value">{THEMES.find((item) => item.id === theme)?.label}</span>
         </button>
         {themes && (
           <div className="theme-picker" role="radiogroup" aria-label="Colour theme">

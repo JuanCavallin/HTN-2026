@@ -1,22 +1,26 @@
 /**
- * Does rollup() computed CLIENT-SIDE agree with the server's /analytics?
+ * Does rollupV2() computed CLIENT-SIDE agree with the server's /analytics/v2?
  *
  * The run page computes metrics locally from the SSE stream so the numbers move
  * while a run is in flight, and the API serves the same metrics at
- * GET /runs/:id/analytics. That is only a saving if the two genuinely agree --
+ * GET /runs/:id/analytics/v2. That is only a saving if the two genuinely agree --
  * otherwise the canvas and the endpoint quietly disagree and nobody notices
  * until someone screenshots both.
  *
- * The inputs differ in origin, which is exactly why this is worth checking:
- *   server -> store.listSteps / listEgress / listScheduleDecisions
- *   client -> the SSE reducer's accumulated arrays
+ * Both sides rebuild from persisted StoredEvent[] so entity-table timing can
+ * never make the endpoint and live UI disagree.
  *
  * Needs a running API in mock mode:
  *   MOCK_ALL=true pnpm dev:api
  *   pnpm --filter @htn/api check:analytics
  */
 
-import { rollup, type RunAnalytics } from '@htn/shared';
+import {
+  rollupV2,
+  runViewFromStoredEvents,
+  type RunAnalyticsV2,
+  type StoredEvent,
+} from '@htn/shared';
 
 const BASE = process.env.PARITY_BASE ?? 'http://localhost:8787';
 
@@ -77,70 +81,45 @@ async function main(): Promise<void> {
   await waitFor(runId, (r) => r.status === 'succeeded' || r.status === 'failed');
 
   // Server's answer.
-  const server = await api<RunAnalytics>('/api/runs/' + runId + '/analytics');
+  const server = await api<RunAnalyticsV2>('/api/runs/' + runId + '/analytics/v2');
 
-  // Our own, from the same raw entities the client accumulates over SSE.
-  const detail = await api<Parameters<typeof rollup>[0] & { piiSpans: unknown }>(
-    '/api/runs/' + runId,
-  );
-  // `now` is irrelevant here: the run is finished, so every step has an endedAt
-  // and spanMs never falls back to the clock. That is also why wallMs is safe
-  // to compare exactly below -- on a LIVE run it would legitimately differ
-  // between two invocations.
-  const local = rollup(detail);
+  // This is exactly what an SSE client receives and reduces. `now` is irrelevant
+  // for a terminal run, so the complete contract must match byte-for-byte.
+  const replay = await api<{ events: StoredEvent[] }>('/api/runs/' + runId + '/events');
+  const local = rollupV2(runViewFromStoredEvents(replay.events));
 
-  console.log('\nTotals');
-  const keys = [
-    'tokensIn',
-    'tokensOut',
-    'llmCalls',
-    'estimatedCostCents',
-    'stepCount',
-    'nodeCount',
-    'approvals',
-    'toolsAvailable',
-    'toolsExposed',
-  ] as const;
-
-  for (const key of keys) {
-    check(
-      key + ' agrees',
-      local.totals[key] === server.totals[key],
-      local.totals[key] + ' local vs ' + server.totals[key] + ' server',
-    );
-  }
-
-  console.log('\nPer node');
-  check(
-    'same set of nodes',
-    local.nodes.length === server.nodes.length,
-    local.nodes.length + ' vs ' + server.nodes.length,
-  );
-
-  for (const serverNode of server.nodes) {
-    const localNode = local.nodes.find((n) => n.nodeId === serverNode.nodeId);
-    check(
-      serverNode.nodeId + ': tokens and calls agree',
-      Boolean(localNode) &&
-        localNode!.tokensIn === serverNode.tokensIn &&
-        localNode!.tokensOut === serverNode.tokensOut &&
-        localNode!.llmCalls === serverNode.llmCalls,
-      localNode
-        ? localNode.tokensIn +
-            '/' +
-            localNode.tokensOut +
-            ' vs ' +
-            serverNode.tokensIn +
-            '/' +
-            serverNode.tokensOut
-        : 'missing locally',
-    );
-  }
+  console.log('\nEvent-derived contract');
+  check('V2 contract returned', server.version === 2);
+  check('run identity agrees', local.runId === server.runId);
+  check('run status agrees', local.status === server.status);
+  check('usage agrees', JSON.stringify(local.usage) === JSON.stringify(server.usage));
+  check('timing agrees', JSON.stringify(local.timing) === JSON.stringify(server.timing));
+  check('tool funnel agrees', JSON.stringify(local.tools) === JSON.stringify(server.tools));
+  check('approvals agree', JSON.stringify(local.approvals) === JSON.stringify(server.approvals));
+  check('per-node metrics agree', JSON.stringify(local.nodes) === JSON.stringify(server.nodes));
 
   check(
-    'wallMs agrees (finished run, so the clock is not consulted)',
-    local.totals.wallMs === server.totals.wallMs,
-    local.totals.wallMs + ' vs ' + server.totals.wallMs,
+    'model calls are lifecycle-counted',
+    server.usage.modelCalls.agent ===
+      new Set(
+        replay.events.flatMap((stored) =>
+          stored.event.type === 'model.lifecycle' ? [stored.event.lifecycle.modelCallId] : [],
+        ),
+      ).size,
+  );
+
+  const pollCount = replay.events.filter(
+    (stored) =>
+      stored.event.type === 'egress.logged' &&
+      stored.event.egress.providerId === 'hermes' &&
+      stored.event.egress.op === 'pollTask',
+  ).length;
+  check(
+    'Hermes polling is not provider work',
+    pollCount === 0 ||
+      server.usage.otherProviders.calls <
+        replay.events.filter((stored) => stored.event.type === 'egress.logged').length,
+    pollCount + ' poll row(s)',
   );
 
   finish();

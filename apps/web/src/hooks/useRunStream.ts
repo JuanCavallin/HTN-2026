@@ -49,6 +49,49 @@ export function runReducer(state: RunView, event: RunEvent | { type: 'reset' }):
         scheduleDecisions: upsert(state.scheduleDecisions, event.decision),
       };
 
+    // A session can be announced more than once on replay, so this is an
+    // upsert keyed on sessionId rather than an append -- otherwise reconnecting
+    // mid-run shows the same browser twice.
+    case 'browser.session.opened': {
+      const at = state.browserSessions.findIndex((s) => s.sessionId === event.session.sessionId);
+      if (at !== -1) {
+        const next = [...state.browserSessions];
+        next[at] = { ...next[at], ...event.session };
+        return { ...state, browserSessions: next };
+      }
+      return { ...state, browserSessions: [...state.browserSessions, event.session] };
+    }
+
+    // Marked closed IN PLACE, never removed: a finished run still has to list
+    // the sessions it used so the panel can show their decision trail.
+    case 'browser.session.closed':
+      return {
+        ...state,
+        browserSessions: state.browserSessions.map((s) =>
+          s.sessionId === event.sessionId ? { ...s, closedAt: event.at } : s,
+        ),
+      };
+
+    // The tool plane and Jev's selections. Without these the graph cannot show which tools
+    // were exposed or called: an agent run has ONE outer step, and everything a tool did
+    // arrives only as these events.
+    case 'control.decided':
+      return { ...state, controlDecisions: upsert(state.controlDecisions, event.decision) };
+
+    case 'model.lifecycle':
+      return { ...state, modelCalls: upsert(state.modelCalls, event.lifecycle) };
+
+    case 'harness.turn':
+      return { ...state, harnessTurns: upsert(state.harnessTurns, event.turn) };
+
+    // Several events per action (proposed ... succeeded), each with its own id, so this
+    // appends; the trace groups them by `action.id`.
+    case 'tool.lifecycle':
+      return { ...state, toolLifecycle: upsert(state.toolLifecycle, event.lifecycle) };
+
+    case 'session.updated':
+      return { ...state, agentSessions: upsert(state.agentSessions, event.session) };
+
     case 'log':
       return {
         ...state,
@@ -96,7 +139,10 @@ export function useRunStream(runId: string | undefined, reconnectKey = 0): RunSt
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+    // reconnectKey too: a manual reconnect resets the view below, and if the stream then
+    // replays nothing the run -- and with it the graph snapshot the canvas is drawn from --
+    // would stay gone. Refetching here is what brings the graph back.
+  }, [runId, reconnectKey]);
 
   useEffect(() => {
     dispatch({ type: 'reset' });

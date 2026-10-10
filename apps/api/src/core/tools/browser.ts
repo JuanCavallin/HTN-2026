@@ -109,32 +109,62 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
       try {
         if (operation === 'open') {
           ownsSession = false;
+          const openedPage = requestedUrl
+            ? await adapter.extract<Json>(
+                {
+                  sessionId,
+                  // The local adapter is deterministic and treats this field as
+                  // a CSS scope. An empty scope returns the visible body plus
+                  // the page title/current URL; remote browser providers can
+                  // accept the richer natural-language instruction.
+                  instruction:
+                    providerId === 'localbrowser'
+                      ? 'h1'
+                      : 'Return a compact JSON object containing the page title, visible H1 headings, and current URL.',
+                },
+                childContext(ctx, 'browser-open-read'),
+              )
+            : undefined;
+          const page = openedPage?.ok
+            ? normalizeOpenedPage(providerId, openedPage.data)
+            : undefined;
+          const h1 = page && typeof page === 'object' && !Array.isArray(page) ? page.h1 : undefined;
+          const publicPageSummary =
+            page !== undefined && action.dataLabels.every((label) => label === 'public')
+              ? (typeof h1 === 'string' ? ' The visible H1 text is "' + h1 + '".' : '') +
+                ' Opened page content: ' +
+                compactJson(page)
+              : '';
           return output(
             action,
             {
               sessionId,
               liveViewUrl: liveViewUrl ?? null,
               backend: providerId,
+              ...(page !== undefined ? { page } : {}),
             },
-            'Opened a ' + providerId + ' browser session.',
+            'Opened a ' + providerId + ' browser session.' + publicPageSummary,
           );
         }
 
         if (operation === 'search' || operation === 'extract') {
           const instruction =
             operation === 'search'
-              ? 'Return concise search results for: ' + requiredString(args, 'query')
-              : requiredString(args, 'instruction');
+              ? // Both live adapters use deterministic CSS-scoped extraction by
+                // default. An empty scope means visible body text; passing a
+                // prose instruction here was interpreted as an invalid selector.
+                ''
+              : localExtractionScope(providerId, requiredString(args, 'instruction'));
           const extracted = await adapter.extract<Json>(
             { sessionId, instruction },
             childContext(ctx, 'browser-read'),
           );
           if (!extracted.ok) throw new Error(extracted.error.message);
-          return output(
-            action,
-            extracted.data,
-            operation === 'search' ? 'Completed browser search.' : 'Extracted browser content.',
-          );
+          const summary =
+            operation === 'search'
+              ? 'Completed public web search. Results: ' + compactJson(extracted.data)
+              : 'Extracted browser content.';
+          return output(action, extracted.data, summary);
         }
 
         const table = await snapshot(adapter, sessionId, deps.maxElements, ctx);
@@ -228,7 +258,10 @@ function requestedStartUrl(operation: string, args: Record<string, Json>): strin
   if (explicit) return normalizeBrowserUrl(explicit);
   if (operation !== 'search') return undefined;
   const query = requiredString(args, 'query');
-  return 'https://www.google.com/search?q=' + encodeURIComponent(query);
+  // Browser search is an explicit visual-browser fallback. Bing is used here
+  // because Google commonly challenges headless sessions before results load.
+  // Normal factual lookups route to the grounded `web.search` API instead.
+  return 'https://www.bing.com/search?q=' + encodeURIComponent(query);
 }
 
 function normalizeBrowserUrl(value: string): string {
@@ -285,6 +318,34 @@ function output(action: ToolAction, value: Json, summary: string): ToolExecution
     dataLabels: [...action.dataLabels],
     verified: true,
   };
+}
+
+function compactJson(value: Json): string {
+  const serialized = JSON.stringify(value);
+  return serialized.length <= 1_500 ? serialized : serialized.slice(0, 1_497) + '...';
+}
+
+function normalizeOpenedPage(providerId: BrowserSession['providerId'], value: Json): Json {
+  if (
+    providerId !== 'localbrowser' ||
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value)
+  ) {
+    return value;
+  }
+  const text = typeof value.text === 'string' ? value.text.trim() : undefined;
+  return { ...value, ...(text ? { h1: text } : {}) };
+}
+
+function localExtractionScope(
+  providerId: BrowserSession['providerId'],
+  instruction: string,
+): string {
+  if (providerId !== 'localbrowser') return instruction;
+  if (/\bh1\b|primary\s+heading/i.test(instruction)) return 'h1';
+  if (/\bheadings?\b/i.test(instruction)) return 'h1, h2, h3, h4, h5, h6';
+  return '';
 }
 
 function childContext(ctx: ProviderCallContext, policyRule: string): ProviderCallContext {

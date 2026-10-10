@@ -85,7 +85,14 @@ async function completeLive(
       ...(input.tools.length > 0
         ? { tools: input.tools, tool_choice: 'auto', parallel_tool_calls: false }
         : {}),
-      ...(input.maxTokens ? { max_completion_tokens: input.maxTokens } : {}),
+      ...(input.maxTokens
+        ? {
+            max_completion_tokens: Math.min(
+              input.maxTokens,
+              cfg.maxOutputTokens ?? input.maxTokens,
+            ),
+          }
+        : {}),
       session_id: ctx.runId,
       provider: { allow_fallbacks: true },
     };

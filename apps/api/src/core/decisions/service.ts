@@ -287,20 +287,12 @@ export class DecisionService {
           };
     }
 
-    if (
-      judgment.status === 'done' &&
-      (verificationFailures.length > 0 || judgment.confidence < this.minimumConfidence)
-    ) {
+    if (judgment.status === 'done' && verificationFailures.length > 0) {
       return {
         ...judgment,
         status: this.fallbackCompletion(checkpoint),
         verified: false,
-        verificationFailures: [
-          ...verificationFailures,
-          ...(judgment.confidence < this.minimumConfidence
-            ? ['completion-confidence-too-low']
-            : []),
-        ],
+        verificationFailures,
         reasonCodes: [...judgment.reasonCodes, 'done-rejected-by-verifier'],
       };
     }
@@ -309,6 +301,10 @@ export class DecisionService {
       ...judgment,
       verified: judgment.status === 'done' && verificationFailures.length === 0,
       verificationFailures,
+      reasonCodes:
+        judgment.status === 'done' && judgment.confidence < this.minimumConfidence
+          ? [...judgment.reasonCodes, 'low-confidence-completion-supported-by-verification']
+          : judgment.reasonCodes,
     };
   }
 

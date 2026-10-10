@@ -1,9 +1,13 @@
 export * from './browser.js';
 export * from './browserDecision.js';
 export * from './browserDescriptors.js';
+export * from './capabilities.js';
 export * from './composeText.js';
 export * from './elementTable.js';
 export * from './registry.js';
+export * from './selection.js';
+export * from './weather.js';
+export * from './webSearch.js';
 
 import type { BrowserAdapter } from '@htn/shared';
 import { config } from '../../config.js';
@@ -32,8 +36,12 @@ export function registerBrowserTools(
 ): BrowserToolExecutor {
   registry.registerMany(
     browserToolRegistrations({
-      localAvailable: config.providers.localbrowser.mode === 'live',
-      browserbaseAvailable: config.providers.browserbase.mode === 'live',
+      // Mock descriptors remain visible to previews and connection diagnostics,
+      // but `eligibleTaskTools` excludes them from real agent runs.
+      localAvailable: config.providers.localbrowser.mode !== 'disabled',
+      browserbaseAvailable: config.providers.browserbase.mode !== 'disabled',
+      localSimulated: config.providers.localbrowser.mode === 'mock',
+      browserbaseSimulated: config.providers.browserbase.mode === 'mock',
     }),
   );
 

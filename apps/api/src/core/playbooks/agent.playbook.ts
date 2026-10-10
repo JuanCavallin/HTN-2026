@@ -20,6 +20,7 @@ export const agentPlaybook = definePlaybook<AgentInput>({
     const agentTask = await ctx.runAgentTask({
       label: 'Run supervised agent task',
       goal: input.goal,
+      executionProfile: input.executionProfile,
       context: input.context,
       sanitizedGoal,
       dataLabels: [...dataLabels],
@@ -27,9 +28,13 @@ export const agentPlaybook = definePlaybook<AgentInput>({
       maxTurns: input.maxTurns,
     });
     return {
-      summary: 'Agent task completed with verified Jev completion.',
+      summary:
+        input.executionProfile === 'hermes_flagship'
+          ? 'Hermes flagship task completed with deterministic verification.'
+          : 'Agent task completed with verified Jev completion.',
       result: toJson({
         output: agentTask.result,
+        executionProfile: input.executionProfile,
         exposedTools: agentTask.scheduleDecision.exposedTools,
         modelTier: agentTask.scheduleDecision.modelTier,
         completion: agentTask.completionDecision,

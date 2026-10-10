@@ -7,6 +7,9 @@ import {
   formatCost,
   formatTokens,
   layoutTrace,
+  metricCoverageLabel,
+  recordedWaitLabel,
+  timeMetricPresentation,
   canInterveneLive,
   RUN_CAPABILITIES,
   LIVE_INTERVENTION_REASON,
@@ -47,6 +50,202 @@ test('unknown live measurements remain unknown instead of becoming free', () => 
   assert.equal(trace.nodes[0].costCents, undefined);
 });
 
+test('a model call with missing provider usage renders as not reported, never zero', () => {
+  const trace = buildTrace({
+    ...empty,
+    run: {
+      id: 'r',
+      title: 'Missing telemetry',
+      kind: 'agent',
+      status: 'succeeded',
+      input: {},
+      createdAt: '2026-09-22T12:00:00.000Z',
+      updatedAt: '2026-09-22T12:00:01.000Z',
+    },
+    steps: [step('a')],
+    modelCalls: [
+      {
+        id: 'model-completed',
+        modelCallId: 'call-1',
+        runId: 'r',
+        stepId: 'a',
+        sessionStateId: 'session',
+        phase: 'completed',
+        routeId: 'cloud-cheap',
+        providerId: 'openrouter',
+        configuredModelId: 'model',
+        selectedToolIds: [],
+        dataLabels: ['public'],
+        messageCount: 1,
+        at: '2026-09-22T12:00:01.000Z',
+      },
+    ],
+    egress: [
+      {
+        id: 'provider-call',
+        runId: 'r',
+        stepId: 'a',
+        providerId: 'openrouter',
+        op: 'generate',
+        destination: 'https://openrouter.ai',
+        dataSpans: [],
+        policyRule: 'public-cloud',
+        decision: 'allowed',
+        at: '2026-09-22T12:00:01.000Z',
+      },
+    ],
+  });
+
+  assert.equal(trace.tokens, undefined);
+  assert.equal(trace.costCents, undefined);
+  assert.equal(
+    metricCoverageLabel(trace.metrics.usage.total.totalTokens),
+    'not reported · 0/1 calls',
+  );
+  assert.equal(
+    metricCoverageLabel(trace.metrics.usage.total.estimatedCostCents),
+    'not reported · 0/1 calls',
+  );
+  assert.equal(recordedWaitLabel(trace.metrics), 'wait data partial');
+  assert.deepEqual(timeMetricPresentation(trace.metrics), {
+    label: 'Elapsed time',
+    value: 1_000,
+    detail: 'wall clock · active time not reported',
+  });
+  assert.equal(
+    recordedWaitLabel({
+      ...trace.metrics,
+      timing: {
+        ...trace.metrics.timing,
+        pausedMs: {
+          value: null,
+          unit: 'ms',
+          source: 'unavailable',
+          coverage: { known: 0, total: 1, ratio: 0, complete: false },
+        },
+      },
+    }),
+    'wait data partial',
+  );
+});
+
+test('model calls are deduplicated by modelCallId across lifecycle phases', () => {
+  const base = {
+    modelCallId: 'call-1',
+    runId: 'r',
+    stepId: 'a',
+    sessionStateId: 'session',
+    routeId: 'local-cheap',
+    providerId: 'ollama',
+    configuredModelId: 'qwen',
+    selectedToolIds: [],
+    dataLabels: ['private'],
+    messageCount: 1,
+  };
+  const trace = buildTrace({
+    ...empty,
+    steps: [step('a')],
+    modelCalls: [
+      { ...base, id: 'requested', phase: 'requested', at: '2026-09-22T12:00:00.000Z' },
+      { ...base, id: 'completed', phase: 'completed', at: '2026-09-22T12:00:01.000Z' },
+    ],
+  });
+
+  assert.equal(trace.metrics.usage.modelCalls.agent, 1);
+  assert.equal(trace.metrics.usage.modelCalls.total, 1);
+  assert.equal(trace.metrics.usage.modelCalls.local, 1);
+});
+
+test('partial cost keeps its estimate and exposes call coverage', () => {
+  const model = (id) => ({
+    id: `event-${id}`,
+    modelCallId: id,
+    runId: 'r',
+    stepId: 'a',
+    sessionStateId: 'session',
+    phase: 'completed',
+    routeId: 'cloud-cheap',
+    providerId: 'openrouter',
+    configuredModelId: 'model',
+    selectedToolIds: [],
+    dataLabels: ['public'],
+    messageCount: 1,
+    at: '2026-09-22T12:00:01.000Z',
+  });
+  const providerCall = (id, estimatedCostCents) => ({
+    id,
+    runId: 'r',
+    stepId: 'a',
+    providerId: 'openrouter',
+    op: 'generate',
+    destination: 'https://openrouter.ai',
+    dataSpans: [],
+    policyRule: 'public-cloud',
+    decision: 'allowed',
+    at: '2026-09-22T12:00:01.000Z',
+    ...(estimatedCostCents === undefined ? {} : { estimatedCostCents }),
+  });
+  const trace = buildTrace({
+    ...empty,
+    steps: [step('a')],
+    modelCalls: [model('call-1'), model('call-2')],
+    egress: [providerCall('egress-1', 2.5), providerCall('egress-2')],
+  });
+
+  assert.equal(trace.costCents, 2.5);
+  assert.equal(
+    metricCoverageLabel(trace.metrics.usage.total.estimatedCostCents),
+    'partial estimate · 1/2 calls',
+  );
+});
+
+test('active execution excludes approval and pause waits and labels both waits separately', () => {
+  const trace = buildTrace(
+    {
+      ...empty,
+      run: {
+        id: 'r',
+        title: 'Timed run',
+        kind: 'agent',
+        status: 'succeeded',
+        input: {},
+        createdAt: '2026-09-22T12:00:00.000Z',
+        updatedAt: '2026-09-22T12:00:10.000Z',
+        pauses: [{ at: '2026-09-22T12:00:06.000Z', resumedAt: '2026-09-22T12:00:07.000Z' }],
+      },
+      steps: [
+        {
+          ...step('a'),
+          startedAt: '2026-09-22T12:00:01.000Z',
+          endedAt: '2026-09-22T12:00:09.000Z',
+        },
+      ],
+      approvals: [
+        {
+          id: 'approval',
+          runId: 'r',
+          stepId: 'a',
+          status: 'approved',
+          createdAt: '2026-09-22T12:00:03.000Z',
+          decidedAt: '2026-09-22T12:00:05.000Z',
+        },
+      ],
+    },
+    null,
+    Date.parse('2026-09-22T12:00:10.000Z'),
+  );
+
+  assert.equal(trace.metrics.timing.wallMs.value, 10_000);
+  assert.equal(trace.metrics.timing.activeExecutionMs.value, 5_000);
+  assert.equal(trace.elapsedMs, 5_000);
+  assert.equal(recordedWaitLabel(trace.metrics), '2.0s approval wait · 1.0s paused');
+  assert.deepEqual(timeMetricPresentation(trace.metrics), {
+    label: 'Active time',
+    value: 5_000,
+    detail: '2.0s approval wait · 1.0s paused',
+  });
+});
+
 test('ledger measurements are attributed to their actual node and cents stay cents', () => {
   const trace = buildTrace({
     ...empty,
@@ -66,6 +265,53 @@ test('ledger measurements are attributed to their actual node and cents stay cen
   assert.equal(trace.nodes[0].costCents, 3.7);
   assert.equal(trace.provenance, 'mock');
   assert.equal(formatCost(3.7), '$0.037');
+});
+
+test('live trace names the actual model and verified Jev completion', () => {
+  const trace = buildTrace({
+    ...empty,
+    run: { id: 'r', status: 'succeeded' },
+    steps: [step('a')],
+    modelCalls: [
+      {
+        id: 'mdl_event',
+        modelCallId: 'mdl_call',
+        runId: 'r',
+        stepId: 'a',
+        sessionStateId: 'session',
+        phase: 'completed',
+        routeId: 'openrouter-cheap',
+        providerId: 'openrouter',
+        configuredModelId: 'openai/configured',
+        actualModelId: 'openai/actual',
+        selectedToolIds: [],
+        dataLabels: ['public'],
+        messageCount: 1,
+        at: '2026-09-20T00:00:00.000Z',
+      },
+    ],
+    controlDecisions: [
+      {
+        id: 'decision',
+        runId: 'r',
+        stepId: 'a',
+        operation: 'judge_completion',
+        candidateIds: ['done', 'continue', 'blocked'],
+        selectedIds: ['done'],
+        confidence: 0.91,
+        reasonCodes: ['jev-completion-judgment'],
+        source: 'jev',
+        at: '2026-09-20T00:00:00.000Z',
+      },
+    ],
+    agentSessions: [{ id: 'session', stepId: 'a', status: 'completed' }],
+  });
+
+  assert.equal(trace.nodes[0].route, 'openrouter · openai/actual');
+  assert.equal(trace.nodes[0].model.actualModelId, 'openai/actual');
+  assert.equal(trace.nodes[0].completion.status, 'done');
+  assert.equal(trace.nodes[0].completion.source, 'jev');
+  assert.equal(trace.nodes[0].completion.verified, true);
 });
 
 test('paused preview clock cannot advance', () => {
@@ -175,10 +421,13 @@ test('editing a route in preview changes what re-runs, and is labeled as revised
   assert.match(after.detail, /re-authorized/);
 });
 
-test('live mid-run intervention stays closed until the run API supports it', () => {
-  assert.equal(RUN_CAPABILITIES.pauseResume, false);
+test('pause/resume is live, but editing a running node stays closed', () => {
+  assert.equal(RUN_CAPABILITIES.pauseResume, true);
+  // Pausing was necessary for live editing, not sufficient -- a run executes a
+  // snapshot, so the edit still would not reach it.
+  assert.equal(RUN_CAPABILITIES.editRunningNode, false);
   assert.equal(canInterveneLive, false);
-  assert.match(LIVE_INTERVENTION_REASON, /pause and resume/);
+  assert.match(LIVE_INTERVENTION_REASON, /snapshot/);
 });
 
 test('layout is stable: adding a node never reorders the nodes already placed', () => {

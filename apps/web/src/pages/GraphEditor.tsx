@@ -14,8 +14,14 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import type { AgentGraph, Conversation, GraphEdge, GraphNodeType } from '@htn/shared';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import type {
+  AgentGraph,
+  Conversation,
+  GraphCritique,
+  GraphEdge,
+  GraphNodeType,
+} from '@htn/shared';
 import { GRAPH_NODE_TYPES } from '@htn/shared';
 import { useGraph, useGraphs } from '../hooks/useGraph';
 import { useTools } from '../hooks/useTools';
@@ -33,6 +39,17 @@ import { Card } from '../components/ui/Card';
 export function GraphEditor() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // Set only when this graph was just opened as an optimisation proposal.
+  const proposal = (
+    useLocation().state as {
+      proposal?: {
+        sourceId: string;
+        sourceName: string;
+        critique: GraphCritique;
+        suggestedAssertions: number;
+      };
+    } | null
+  )?.proposal;
   const { graphs, refresh: refreshGraphs, error: graphListError } = useGraphs();
   const { graph: loaded, refresh: refreshGraph } = useGraph(id ?? undefined);
   const { tools } = useTools();
@@ -43,6 +60,7 @@ export function GraphEditor() {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   const [launching, setLaunching] = useState(false);
+  const [optimizing, setOptimizing] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [addType, setAddType] = useState<GraphNodeType>('tool');
@@ -88,6 +106,34 @@ export function GraphEditor() {
       setLaunchError((err as Error).message);
     } finally {
       setLaunching(false);
+    }
+  };
+
+  /**
+   * Ask for an improved version of this workflow, based on its own run history. The
+   * proposal is a separate graph, opened for review -- it never runs, and never replaces
+   * this one, on its own. The critique travels in router state so the fork can say WHY.
+   */
+  const suggestImprovement = async () => {
+    if (!graph) return;
+    setOptimizing(true);
+    setLaunchError(null);
+    try {
+      const result = await api.optimizeGraph(graph.id);
+      navigate('/graphs/' + result.graph.id, {
+        state: {
+          proposal: {
+            sourceId: graph.id,
+            sourceName: graph.name,
+            critique: result.critique,
+            suggestedAssertions: result.suggestedAssertions.length,
+          },
+        },
+      });
+    } catch (err) {
+      setLaunchError((err as Error).message);
+    } finally {
+      setOptimizing(false);
     }
   };
 
@@ -264,6 +310,14 @@ export function GraphEditor() {
           >
             Run + compare to baseline
           </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void suggestImprovement()}
+            disabled={optimizing || launching || chatBusy || !graph}
+            title="Critique this workflow's own runs and propose an improved copy to review"
+          >
+            {optimizing ? 'Analysing runs…' : 'Suggest an improvement'}
+          </Button>
         </div>
       </div>
 
@@ -273,6 +327,26 @@ export function GraphEditor() {
           <button className="text-link" onClick={() => void refreshGraphs()}>
             Try again
           </button>
+        </div>
+      )}
+      {proposal && (
+        <div className="notice" role="status">
+          <strong>Proposed improvement</strong> of{' '}
+          <button className="text-link" onClick={() => navigate('/graphs/' + proposal.sourceId)}>
+            {proposal.sourceName}
+          </button>
+          , from {proposal.critique.runsAnalyzed} past run
+          {proposal.critique.runsAnalyzed === 1 ? '' : 's'}:{' '}
+          {proposal.critique.assertionFailures.length} failing check(s),{' '}
+          {proposal.critique.costOutliers.length} cost outlier(s),{' '}
+          {proposal.critique.latencyOutliers.length} latency outlier(s),{' '}
+          {proposal.critique.toolDivergenceOutliers.length} tool-selection outlier(s).{' '}
+          {proposal.critique.lowConfidence &&
+            'Low confidence: fewer than 3 runs, so treat this as a hint. '}
+          {proposal.suggestedAssertions > 0 &&
+            proposal.suggestedAssertions +
+              ' new success check(s) were suggested and NOT applied: a proposal may not grade itself. '}
+          Nothing has run. The original workflow is unchanged.
         </div>
       )}
       {graph?.description && <p className="text-sm text-slate-400">{graph.description}</p>}

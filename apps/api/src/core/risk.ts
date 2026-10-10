@@ -9,7 +9,7 @@
  * whether a human gets asked.
  */
 
-import type { ProposedAction, Reversibility, RiskDecision } from '@htn/shared';
+import type { ProposedAction, Reversibility, RiskClass, RiskDecision } from '@htn/shared';
 
 /** Anything here is irreversible regardless of what the playbook claims. */
 const IRREVERSIBLE_KINDS = new Set([
@@ -88,4 +88,86 @@ export function describeRule(rule: string): string {
     default:
       return rule;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Revision reauthorization                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A human editing a payload does not make the edit safe. The spec is explicit:
+ * "AgentOS reauthorizes any revision". So a revision goes back through
+ * `classify()` exactly like the original did, and on top of that it may only
+ * NARROW the action.
+ *
+ * Narrowing-only matters because the approval panel showed the human one
+ * specific action at one specific risk level. If a revision could raise the
+ * risk class or reversibility, the thing they clicked "revise" on would not be
+ * the thing that ran, and the gate would have been walked around rather than
+ * through. Escalations are not refused forever — they are refused HERE, so the
+ * agent has to propose them as a fresh action with a fresh approval.
+ */
+const RISK_RANK: Record<RiskClass, number> = { auto: 0, verify: 1, ask_human: 2 };
+const REVERSIBILITY_RANK: Record<Reversibility, number> = {
+  reversible: 0,
+  recoverable: 1,
+  irreversible: 2,
+};
+
+export type RevisionAuthorization =
+  { ok: true; action: ProposedAction; decision: RiskDecision } | { ok: false; reason: string };
+
+export function reauthorizeRevision(
+  original: ProposedAction,
+  revision: { payload: unknown; amountCents?: number },
+): RevisionAuthorization {
+  // `kind` is deliberately NOT taken from the client. It is what the whole
+  // classification hangs on, so a revision that could restate it would be a
+  // permission bypass with extra steps.
+  const revised: ProposedAction = {
+    ...original,
+    payload: revision.payload,
+    amountCents: revision.amountCents ?? original.amountCents,
+  };
+
+  const before = classify(original);
+  const after = classify(revised);
+
+  if (RISK_RANK[after.riskClass] > RISK_RANK[before.riskClass]) {
+    return {
+      ok: false,
+      reason:
+        'The revision raises the risk class from ' +
+        before.riskClass +
+        ' to ' +
+        after.riskClass +
+        '. Revisions may only narrow an action; propose this as a new one.',
+    };
+  }
+
+  if (REVERSIBILITY_RANK[after.reversibility] > REVERSIBILITY_RANK[before.reversibility]) {
+    return {
+      ok: false,
+      reason:
+        'The revision makes the action less reversible (' +
+        before.reversibility +
+        ' -> ' +
+        after.reversibility +
+        '). Revisions may only narrow an action.',
+    };
+  }
+
+  if ((revised.amountCents ?? 0) > (original.amountCents ?? 0)) {
+    return {
+      ok: false,
+      reason:
+        'The revision raises the amount from ' +
+        (original.amountCents ?? 0) +
+        ' to ' +
+        (revised.amountCents ?? 0) +
+        ' cents. Revisions may only narrow an action.',
+    };
+  }
+
+  return { ok: true, action: revised, decision: after };
 }

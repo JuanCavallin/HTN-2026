@@ -18,7 +18,7 @@ try {
     apiCalls++;
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'OFFLINE_TEST', message: 'Test backend is offline' } }) });
   });
-  await page.goto(root);
+  await page.goto(root + '/?example=support');
   await page.getByRole('button', { name: 'Pause workflow', exact: true }).click();
   const clock = await page.locator('.elapsed-time').innerText();
   await page.waitForTimeout(450);
@@ -44,6 +44,7 @@ try {
 
   await page.goto(root + '/?new=1');
   await page.getByRole('heading', { name: /Big tasks/ }).waitFor();
+  await page.getByRole('combobox', { name: 'Execution mode' }).selectOption('preview');
   await page.getByRole('textbox', { name: 'Message Zephyr' }).fill('My own task');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await page.getByText('This is the sample workflow, not a generated answer', { exact: false }).waitFor();

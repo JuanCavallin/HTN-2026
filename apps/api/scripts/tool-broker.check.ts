@@ -367,7 +367,13 @@ async function checkConcreteApprovalGate(args: Json): Promise<void> {
     decidedAt: new Date().toISOString(),
   });
   await approvalBus.emit(runId, { type: 'approval.resolved', approval: approved });
-  assert.equal(settleApproval(pending.id, 'approved'), true);
+  assert.equal(
+    settleApproval(pending.id, {
+      verdict: 'approved',
+      action: { kind: 'tool:' + MAIL_SEND.id, description: pending.question },
+    }),
+    true,
+  );
   const completed = await pendingExecution;
 
   assert.equal(completed.approvalId, pending.id);

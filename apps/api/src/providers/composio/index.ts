@@ -28,6 +28,34 @@ const TOOLS = [
   { name: 'calendar.create', description: 'Create a calendar event' },
 ];
 
+const TOOLKITS = [
+  {
+    slug: 'gmail',
+    name: 'Gmail',
+    description: 'Read and send email through Gmail.',
+    authSchemes: ['oauth2'],
+    toolsCount: 1,
+    connected: false,
+    noAuth: false,
+  },
+  {
+    slug: 'github',
+    name: 'GitHub',
+    description: 'Work with repositories, issues, and pull requests.',
+    authSchemes: ['oauth2'],
+    connected: false,
+    noAuth: false,
+  },
+  {
+    slug: 'slack',
+    name: 'Slack',
+    description: 'Read and send Slack messages.',
+    authSchemes: ['oauth2'],
+    connected: false,
+    noAuth: false,
+  },
+];
+
 export function create(cfg: ProviderConfig): ToolboxAdapter {
   if (cfg.mode === 'live') return createLiveComposio(cfg);
   return createMock(cfg);
@@ -53,6 +81,33 @@ function createMock(cfg: ProviderConfig): ToolboxAdapter {
           const text = (tool.name + ' ' + tool.description).toLowerCase();
           return terms.length === 0 || terms.some((term) => text.includes(term));
         }).slice(0, input.limit ?? 24);
+      });
+    },
+    async listConnectedToolkits(ctx) {
+      return mockCall('composio', 'listConnectedToolkits', cfg.mode, ctx, () =>
+        TOOLKITS.filter((toolkit) => toolkit.connected || toolkit.noAuth),
+      );
+    },
+    async listToolkitTools(input, ctx) {
+      return mockCall('composio', 'listToolkitTools', cfg.mode, ctx, () => {
+        const toolkits = new Set(input.toolkits.map((toolkit) => toolkit.toLowerCase()));
+        return TOOLS.filter((tool) => {
+          const toolkit = 'toolkit' in tool && typeof tool.toolkit === 'string' ? tool.toolkit : '';
+          return toolkits.has(toolkit);
+        }).slice(0, Math.max(1, input.limitPerToolkit ?? 1_000) * toolkits.size);
+      });
+    },
+    async listToolkits(input, ctx) {
+      return mockCall('composio', 'listToolkits', cfg.mode, ctx, () => {
+        const query = input.search?.trim().toLowerCase();
+        const items = query
+          ? TOOLKITS.filter((toolkit) =>
+              (toolkit.name + ' ' + toolkit.slug + ' ' + toolkit.description)
+                .toLowerCase()
+                .includes(query),
+            )
+          : TOOLKITS;
+        return { items: items.slice(0, input.limit ?? 1_000), totalItems: items.length };
       });
     },
     async connectUrl(app, ctx) {

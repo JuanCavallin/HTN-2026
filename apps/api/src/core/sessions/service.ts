@@ -1,6 +1,7 @@
 import type {
   AgentSessionState,
   AgentSessionStatus,
+  AgentExecutionProfile,
   DataLabel,
   SessionBudget,
   SessionCheckpoint,
@@ -18,6 +19,7 @@ export interface CreateSessionStateInput {
   runId: string;
   stepId: string;
   harness: string;
+  executionProfile?: AgentExecutionProfile;
   objective: string;
   sanitizedObjective?: string;
   dataLabels: DataLabel[];
@@ -46,6 +48,7 @@ export class SessionStateService {
       runId: input.runId,
       stepId: input.stepId,
       harness: input.harness,
+      executionProfile: input.executionProfile ?? 'adaptive',
       objective: input.objective,
       sanitizedObjective: input.sanitizedObjective,
       dataLabels: [...new Set(input.dataLabels)],
@@ -54,6 +57,7 @@ export class SessionStateService {
       contextVersion: 0,
       context: [],
       candidateModelRouteIds: input.candidateModelRouteIds ?? [],
+      modelRouteHistory: [],
       candidateToolIds: input.candidateToolIds ?? [],
       selectedToolIds: [],
       budget: input.budget,
@@ -92,8 +96,18 @@ export class SessionStateService {
     if (entries.length === 0) return this.require(id);
     return this.serialize(id, async () => {
       const current = await this.require(id);
+      const seenSourceKeys = new Set(
+        current.context.flatMap((entry) => (entry.sourceKey ? [entry.sourceKey] : [])),
+      );
+      const uniqueEntries = entries.filter((entry) => {
+        if (!entry.sourceKey) return true;
+        if (seenSourceKeys.has(entry.sourceKey)) return false;
+        seenSourceKeys.add(entry.sourceKey);
+        return true;
+      });
+      if (uniqueEntries.length === 0) return current;
       const at = nowIso();
-      const appended = entries.map((entry) => ({ ...entry, id: newId('ctx'), at }));
+      const appended = uniqueEntries.map((entry) => ({ ...entry, id: newId('ctx'), at }));
       return this.savePatch(id, {
         context: [...current.context, ...appended].slice(-MAX_CONTEXT_ENTRIES),
         contextVersion: current.contextVersion + 1,
@@ -113,9 +127,29 @@ export class SessionStateService {
       candidateToolIds?: string[];
       selectedToolIds?: string[];
       selectedToolVersions?: Record<string, string>;
+      modelCallId?: string;
     },
   ): Promise<AgentSessionState> {
-    return this.savePatch(id, input);
+    return this.serialize(id, async () => {
+      const current = await this.require(id);
+      const { modelCallId, ...routing } = input;
+      return this.savePatch(id, {
+        ...routing,
+        ...(modelCallId
+          ? {
+              modelRouteHistory: [
+                ...(current.modelRouteHistory ?? []),
+                {
+                  modelCallId,
+                  routeId: input.selectedModelRouteId,
+                  turn: current.turn,
+                  at: nowIso(),
+                },
+              ].slice(-200),
+            }
+          : {}),
+      });
+    });
   }
 
   async grantToolExposure(

@@ -1,0 +1,288 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-20T00:00:00.000Z",
+  "title": "Design System: Zephyr",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Pale Sage",
+        "canonical": "#d0dfb5",
+        "tonalRamp": [
+          "#1e251e",
+          "#5f7a54",
+          "#98ad7c",
+          "#afc294",
+          "#b1c0a4",
+          "#c0d2a9",
+          "#d0dfb5",
+          "#deedbf"
+        ]
+      },
+      "accent-bright": {
+        "role": "primary",
+        "displayName": "Sage Lift",
+        "canonical": "#deedbf",
+        "tonalRamp": []
+      },
+      "accent-ink": {
+        "role": "primary",
+        "displayName": "Sage Ink",
+        "canonical": "#182116",
+        "tonalRamp": []
+      },
+      "edge-done": {
+        "role": "secondary",
+        "displayName": "Edge Done",
+        "canonical": "#6f8a75",
+        "tonalRamp": []
+      },
+      "amber": {
+        "role": "tertiary",
+        "displayName": "Amber",
+        "canonical": "#e4bd79",
+        "tonalRamp": ["#222119", "#25231a", "#46412a", "#b39a62", "#e3cb97", "#e4bd79"]
+      },
+      "danger": {
+        "role": "tertiary",
+        "displayName": "Alarm Rose",
+        "canonical": "#f1a6a0",
+        "tonalRamp": ["#2c1d1c", "#b17873", "#f1a6a0", "#f2bbb3"]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Canvas",
+        "canonical": "#070908",
+        "tonalRamp": [
+          "#070908",
+          "#090c0a",
+          "#0b0e0d",
+          "#0e1210",
+          "#121614",
+          "#1a1f1c",
+          "#1d231d",
+          "#1f2720"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Text",
+        "canonical": "#e9eee7",
+        "tonalRamp": [
+          "#687660",
+          "#6f7c6b",
+          "#798576",
+          "#8e9b80",
+          "#9aa69b",
+          "#b0b9b0",
+          "#dce4d8",
+          "#e9eee7"
+        ]
+      },
+      "node-planned-text": {
+        "role": "neutral",
+        "displayName": "Planned Text",
+        "canonical": "#78856f",
+        "tonalRamp": ["#0e1210", "#232b24", "#78856f"]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#242a25",
+        "tonalRamp": ["#242a25", "#2b3425", "#2f3b2c", "#3c4b31", "#4d5e44", "#5f7a54"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The empty-state heading only. One per screen, and most screens have none."
+      },
+      "headline": { "displayName": "Headline", "purpose": "Page and section headings." },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Panel headings, node titles, the wordmark's size peer."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Conversation messages and the composer. The lane caps at 860px so the measure stays readable when the graph pane is collapsed."
+      },
+      "label": { "displayName": "Label", "purpose": "Buttons, tabs, controls, inline links." },
+      "micro": {
+        "displayName": "Micro",
+        "purpose": "Measurements, counts, provenance, status. The densest and most-used size in the app."
+      },
+      "wordmark": {
+        "displayName": "Wordmark",
+        "purpose": "\"Zephyr\" in the nav, uppercased via CSS text-transform so the accessible name is not spelled out letter by letter."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "The only easing in the system. Exponential ease-out from an already-visible default."
+      },
+      {
+        "name": "reflow",
+        "value": "grid-template-columns 300ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Opening the inspector. Animating the grid is what makes selection read as the layout reflowing rather than a panel landing on top of the graph."
+      },
+      {
+        "name": "node-state",
+        "value": "background-color 300ms, border-color 300ms, color 300ms, opacity 300ms",
+        "purpose": "A trace node becoming real. All four properties move together so the change is legible as a transition rather than a repaint."
+      },
+      {
+        "name": "field-focus",
+        "value": "border-color 150ms ease-out",
+        "purpose": "The composer border lifting to mark-strong, so the field lights up as one object."
+      }
+    ],
+    "breakpoints": [
+      { "name": "mobile", "value": "760px" },
+      { "name": "tablet", "value": "1000px" },
+      { "name": "laptop", "value": "1250px" },
+      { "name": "wide", "value": "1700px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The only filled-accent control on a screen. Starting a run, sending, approving.",
+      "html": "<button class=\"ds-btn-primary\">Start run</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 14px; border: 1px solid transparent; border-radius: 7px; font: 500 11px/1.5 'Segoe UI', ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.2px; color: var(--accent-ink, #182116); background: var(--accent, #d0dfb5); cursor: pointer; } .ds-btn-primary:hover:not(:disabled) { background: var(--accent-bright, #deedbf); } .ds-btn-primary:focus-visible { outline: 2px solid var(--accent, #d0dfb5); outline-offset: 4px; } .ds-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Everything that is not the one primary action. Accent-tinted type, never an accent fill.",
+      "html": "<button class=\"ds-btn-secondary\">Pause workflow</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 14px; border: 1px solid var(--line-3, #2f3b2c); border-radius: 7px; font: 500 11px/1.5 'Segoe UI', ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.2px; color: var(--accent-text-2, #d0ddbd); background: var(--surface-3, #1d231d); cursor: pointer; } .ds-btn-secondary:hover:not(:disabled) { background: var(--line-2, #2b3425); border-color: var(--accent-line, #5f7a54); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--accent, #d0dfb5); outline-offset: 4px; }"
+    },
+    {
+      "name": "Icon Button",
+      "kind": "button",
+      "refersTo": "button-icon",
+      "description": "Transparent at rest; the ground appears only on hover. Used for close, expand, fit-to-view.",
+      "html": "<button class=\"ds-btn-icon\" aria-label=\"Close decision detail\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M18 6 6 18M6 6l12 12\"/></svg></button>",
+      "css": ".ds-btn-icon { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--accent-text, #c0d2a9); border-radius: 5px; padding: 6px; cursor: pointer; } .ds-btn-icon:hover { background: var(--hover, #1f2720); color: var(--text, #e9eee7); } .ds-btn-icon:focus-visible { outline: 2px solid var(--accent, #d0dfb5); outline-offset: 4px; }"
+    },
+    {
+      "name": "Composer",
+      "kind": "input",
+      "refersTo": "composer",
+      "description": "The task field. The container carries the border and the focus state, so the field lights up as one object.",
+      "html": "<div class=\"ds-composer\"><textarea placeholder=\"Message Zephyr\" rows=\"3\"></textarea></div>",
+      "css": ".ds-composer { border: 1px solid var(--line-4, #3c4b31); border-radius: 13px; background: var(--raised-panel, #1a1f1c); overflow: hidden; transition: border-color 150ms ease-out; } .ds-composer:focus-within { border-color: var(--mark-strong, #afc294); } .ds-composer textarea { width: 100%; border: 0; background: transparent; resize: vertical; min-height: 65px; max-height: 180px; color: var(--text, #e9eee7); padding: 17px 18px 5px; font: 400 13px/1.65 'Segoe UI', ui-sans-serif, system-ui, sans-serif; outline: none; caret-color: var(--accent, #d0dfb5); } .ds-composer textarea::placeholder { color: var(--secondary, #b0b9b0); }"
+    },
+    {
+      "name": "Trace Node — materialized",
+      "kind": "card",
+      "refersTo": "node-materialized",
+      "description": "Work actually reported: full-brightness type, solid border, real numbers.",
+      "html": "<div class=\"ds-node\"><span class=\"ds-node-dot\"></span><div class=\"ds-node-head\">Read account context</div><div class=\"ds-node-status\">running</div><div class=\"ds-node-desc\">Loading the synthetic customer file from local storage.</div><div class=\"ds-node-measure\"><span>1.4s</span><span>1.1k tokens</span></div></div>",
+      "css": ".ds-node { position: relative; width: 210px; border-radius: 10px; background: var(--node-fill, #161b17); border: 1px solid var(--line-3, #2f3b2c); color: var(--text, #e9eee7); padding: 12px 13px 0; font-family: 'Segoe UI', ui-sans-serif, system-ui, sans-serif; transition: background-color 300ms cubic-bezier(0.22,1,0.36,1), border-color 300ms cubic-bezier(0.22,1,0.36,1), color 300ms cubic-bezier(0.22,1,0.36,1), opacity 300ms cubic-bezier(0.22,1,0.36,1); } .ds-node-dot { position: absolute; left: -3px; top: 50%; width: 6px; height: 6px; margin-top: -3px; border-radius: 50%; border: 1px solid var(--mark, #8e9b80); background: var(--canvas, #070908); } .ds-node-head { font: 500 12px/1.4 inherit; letter-spacing: -0.3px; } .ds-node-status { font: 500 10px/1.7 inherit; letter-spacing: 0.08em; color: var(--accent-text, #c0d2a9); } .ds-node-desc { font: 400 11px/1.55 inherit; color: var(--quiet, #9aa69b); margin: 6px 0 10px; } .ds-node-measure { display: flex; gap: 10px; border-top: 1px solid var(--line, #242a25); padding: 8px 0; font: 500 10px/1.7 inherit; letter-spacing: 0.08em; color: var(--faint, #6f7c6b); }"
+    },
+    {
+      "name": "Trace Node — planned",
+      "kind": "card",
+      "refersTo": "node-planned",
+      "description": "Structure we were told about but have not observed. Dashed, recessive, and carrying no measurements — the em dash is mandatory, a zero is a defect.",
+      "html": "<div class=\"ds-node-planned\"><div class=\"ds-node-head\">Draft account brief</div><div class=\"ds-node-status\">planned</div><div class=\"ds-node-desc\">Compose the brief from the research results.</div><div class=\"ds-node-measure\"><span>&mdash;</span><span>&mdash;</span></div></div>",
+      "css": ".ds-node-planned { width: 210px; border-radius: 10px; background: var(--node-planned-fill, #0e1210); border: 1px dashed var(--node-planned-line, #232b24); color: var(--node-planned-text, #78856f); padding: 12px 13px 0; font-family: 'Segoe UI', ui-sans-serif, system-ui, sans-serif; } .ds-node-planned .ds-node-head { font: 500 12px/1.4 inherit; letter-spacing: -0.3px; } .ds-node-planned .ds-node-status { font: 500 10px/1.7 inherit; letter-spacing: 0.08em; } .ds-node-planned .ds-node-desc { font: 400 11px/1.55 inherit; margin: 6px 0 10px; } .ds-node-planned .ds-node-measure { display: flex; gap: 10px; border-top: 1px solid var(--surface-3, #1d231d); padding: 8px 0; font: 500 10px/1.7 inherit; letter-spacing: 0.08em; }"
+    },
+    {
+      "name": "Metrics Strip",
+      "kind": "nav",
+      "refersTo": "metrics-strip",
+      "description": "The fixed measurement floor. It spans the full width and never scrolls away — on an instrument panel the gauges do not leave the frame.",
+      "html": "<div class=\"ds-strip\"><span class=\"ds-strip-item\"><b>Elapsed</b>00:41</span><span class=\"ds-strip-item\"><b>Tokens</b>12.4k</span><span class=\"ds-strip-item\"><b>Est. cost</b>$0.031</span><span class=\"ds-strip-item\"><b>Frontier calls</b>1</span></div>",
+      "css": ".ds-strip { display: flex; align-items: center; gap: 30px; border-top: 1px solid var(--line, #242a25); background: var(--rail, #090c0a); padding: 13px 26px; font-family: 'Segoe UI', ui-sans-serif, system-ui, sans-serif; } .ds-strip-item { display: inline-flex; flex-direction: column; gap: 4px; font: 500 12px/1.4 inherit; color: var(--text-2, #dce4d8); } .ds-strip-item b { font: 500 10px/1.7 inherit; letter-spacing: 0.08em; color: var(--faint, #6f7c6b); }"
+    },
+    {
+      "name": "Error Notice",
+      "kind": "custom",
+      "refersTo": "notice-error",
+      "description": "A failed live request. It shows as an error and is never replaced by a successful mock.",
+      "html": "<div class=\"ds-notice-error\">Hermes did not respond on the ACP socket. The run is paused; nothing was sent.</div>",
+      "css": ".ds-notice-error { background: var(--danger-soft, #2c1d1c); color: var(--danger-text, #f2bbb3); border-radius: 8px; font: 400 12px/1.7 'Segoe UI', ui-sans-serif, system-ui, sans-serif; padding: 13px 15px; overflow-wrap: anywhere; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Instrument Panel",
+    "overview": "Zephyr is the glass cockpit for a running agent. The person using it is not browsing a product; they are watching a machine work and deciding whether to let it continue. So the interface behaves like instrumentation: dark, dense, unlit except where there is something to report, and absolutely literal about what it knows. Nothing here is decorative, because on an instrument panel a light that means nothing is a defect.\n\nThe whole visual system is one idea — brightness is evidence. The canvas is the darkest thing in the app and everything rises off it in a fixed order: unexecuted structure barely above the ground, materialized work above that, the accent reserved for the single thing that is live or chosen. There are no shadows anywhere in this system. Depth is entirely tonal, which is why the ladder is generated rather than hand-written: one hand-edited value puts a surface on the wrong rung and the reading breaks silently.\n\nThe five worlds (sage, slate, ember, mono, daylight) are the same ladder re-hued in OKLCH at constant lightness. Changing theme changes the hue of the instrument, never its architecture. daylight is the one deliberate exception: on a light ground \"canvas is darkest\" cannot hold, so it inverts to \"canvas is quietest, executed work is most inked\" — the rule underneath survives, which is the part that matters.",
+    "keyCharacteristics": [
+      "A generated OKLCH luminance ladder, identical across every dark world",
+      "Zero shadows; depth is tonal layering only",
+      "One typeface, no monospace — measurement is a size and weight, not a costume",
+      "The accent appears on the live, selected, or chosen thing and nowhere else",
+      "Unknown measurements render an em dash, never 0",
+      "Planned structure is dim and dashed; it never borrows the appearance of executed work"
+    ],
+    "rules": [
+      {
+        "name": "The Ladder Rule",
+        "body": "Every dark world is the same OKLCH lightness ladder, re-hued. Tokens are generated by tools/theme/generate.mjs and spliced into src/workspace.css. Hand-edit one value and you break the invariant tests/theme.test.mjs exists to protect — regenerate instead.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Bright Thing Rule",
+        "body": "accent and accent-bright mark what is live, selected, or chosen. They are never used to make a section look important.",
+        "section": "colors"
+      },
+      {
+        "name": "The Sealed Blocks Rule",
+        "body": "No color literal may appear anywhere outside the theme blocks at the top of src/workspace.css. A test enforces it. A one-off hex is how a ladder dies.",
+        "section": "colors"
+      },
+      {
+        "name": "The Signal Invariance Rule",
+        "body": "Amber and alarm rose do not re-hue with the theme. A person who learns \"amber means a human is needed\" in sage must not have to relearn it in ember.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Costume Rule",
+        "body": "There is no monospace face in this system. Numbers are distinguished by size, weight and color, not by pretending to be code. Use a tabular variant if digits jitter; do not reach for a mono family.",
+        "section": "typography"
+      },
+      {
+        "name": "The Em Dash Rule",
+        "body": "An unknown measurement renders an em dash. It never renders 0, -, n/a or an empty cell. A measured zero renders 0 and must remain distinguishable from unknown.",
+        "section": "typography"
+      },
+      {
+        "name": "The Canvas Floor Rule",
+        "body": "In every dark world, canvas is the darkest surface in the app and nothing may sit below it. In daylight the rule inverts to its light-ground equivalent: canvas is the quietest surface and executed work carries the most ink.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Recessive Plan Rule",
+        "body": "Planned structure sits below materialized work on the ladder in all five worlds, daylight included. Dimming is not a styling preference here; it is the visual form of \"we have not observed this yet.\"",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do regenerate the theme with node tools/theme/generate.mjs and python tools/theme/splice.py, then run node --test \"tests/*.test.mjs\". Never hand-edit a token.",
+      "Do place a new surface on an existing rung of the ladder and give it the matching 1px line-* border.",
+      "Do render an unknown measurement as an em dash, and keep a measured 0 distinguishable from it.",
+      "Do spend the accent on exactly one thing per screen: the live, selected, or chosen item.",
+      "Do keep planned structure recessive and dashed in all five worlds, daylight included.",
+      "Do label provenance truthfully — live, mock, fixture and replay are four different things and must look like it.",
+      "Do theme the browser's own surfaces (selection, caret, scrollbar, focus ring) from the palette."
+    ],
+    "donts": [
+      "Don't add a box-shadow. This system has none; depth is tonal.",
+      "Don't write a color literal outside the theme blocks in src/workspace.css. A test fails on it, and the ladder is the reason.",
+      "Don't introduce a monospace face to make numbers look technical.",
+      "Don't re-hue amber or alarm rose per theme; their constancy is what makes them readable.",
+      "Don't give a planned node measurements, or let it borrow the appearance of executed work.",
+      "Don't put a permanent navigation rail back. The drawer exists so the graph keeps the width.",
+      "Don't use border weight above 1px for emphasis; move the line up a rung instead.",
+      "Don't silently fall back to preview behaviour on a live run — a failed live request shows as an error, never as a successful mock."
+    ]
+  }
+}

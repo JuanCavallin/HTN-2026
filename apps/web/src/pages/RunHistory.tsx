@@ -104,7 +104,13 @@ export function RunHistory() {
               <span>
                 <strong>{run.title}</strong>
                 <small>
-                  {run.kind} · {run.id}
+                  {run.kind === 'agent'
+                    ? (run.input as { executionProfile?: unknown }).executionProfile ===
+                      'hermes_flagship'
+                      ? 'Hermes flagship'
+                      : 'Zephyr adaptive'
+                    : run.kind}{' '}
+                  · {run.id}
                 </small>
               </span>
               <span className={`run-status-label ${run.status}`}>

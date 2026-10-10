@@ -5,6 +5,7 @@ import type {
   AgentGraph,
   AgentSessionState,
   Approval,
+  Conversation,
   EgressEvent,
   McpConnection,
   PiiSpanWithValue,
@@ -97,6 +98,12 @@ export function createSqliteStore(path: string): SqliteStore {
     CREATE INDEX IF NOT EXISTS schedule_run_at ON schedule_decisions(run_id, at);
 
     CREATE TABLE IF NOT EXISTS graphs (
+      id TEXT PRIMARY KEY,
+      updated_at TEXT NOT NULL,
+      body TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS conversations (
       id TEXT PRIMARY KEY,
       updated_at TEXT NOT NULL,
       body TEXT NOT NULL
@@ -343,6 +350,24 @@ export function createSqliteStore(path: string): SqliteStore {
     },
     async deleteGraph(id) {
       return Number(db.prepare('DELETE FROM graphs WHERE id = ?').run(id).changes) > 0;
+    },
+
+    /* ------------------------------------------------------- Conversations */
+
+    async saveConversation(conversation) {
+      db.prepare(
+        `INSERT INTO conversations(id, updated_at, body) VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at, body=excluded.body`,
+      ).run(conversation.id, conversation.updatedAt, encode(conversation));
+      return clone(conversation);
+    },
+    async getConversation(id) {
+      return readOne<Conversation>(db, 'SELECT body FROM conversations WHERE id = ?', id);
+    },
+    async listConversations() {
+      return readRows<Conversation>(
+        db.prepare('SELECT body FROM conversations ORDER BY updated_at DESC').all(),
+      );
     },
 
     async appendEvent(runId: string, event: RunEvent) {

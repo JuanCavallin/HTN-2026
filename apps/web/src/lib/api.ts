@@ -5,14 +5,19 @@
 
 import type {
   AgentGraph,
+  AgentExecutionProfile,
   Approval,
   ApprovalDecision,
   Conversation,
   ConversationMessage,
+  CreateMcpConnectionInput,
   EgressEvent,
+  GraphAssertion,
+  GraphCritique,
   GraphDelegation,
   GraphEdge,
   GraphNode,
+  McpConnection,
   PiiSpan,
   Run,
   RunAnalytics,
@@ -60,6 +65,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * One reviewed tool. `name` is the AgentOS id (`mail.send`), never a vendor slug. The
+ * provider fields are additive and optional so an older API still parses; without them a
+ * tool simply renders without a provider badge.
+ */
+export interface ToolCatalogEntry {
+  name: string;
+  description: string;
+  availability?: 'available' | 'unavailable' | 'requires_connection';
+  /** Who executes it: 'composio', 'browserbase', 'localbrowser', 'mcp', ... */
+  providerId?: string;
+  family?: string;
+  effect?: 'read' | 'write' | 'destructive' | 'unknown';
+  reversibility?: string;
+}
+
 export const api = {
   health: () => request<{ ok: boolean; uptimeSeconds: number }>('/health'),
 
@@ -72,8 +93,7 @@ export const api = {
     request<{ playbooks: { kind: string; title: string; directLaunch: boolean }[] }>('/playbooks'),
 
   /** The node tool-picker's catalog. Served by whatever backs `toolbox`. */
-  tools: () =>
-    request<{ tools: { name: string; description: string }[]; cached: boolean }>('/tools'),
+  tools: () => request<{ tools: ToolCatalogEntry[]; cached: boolean }>('/tools'),
 
   /**
    * Server-computed run metrics. For a LIVE run prefer calling rollup() from
@@ -139,20 +159,17 @@ export const api = {
 
   /* --------------------------------------------------------- Conversations */
 
-  /** `graphId` seeds the conversation so its first message EDITS that graph. */
+  /**
+   * Chat that AUTHORS a workflow graph; it never launches a run. `graphId` seeds the
+   * conversation so its first message EDITS that graph instead of building a new one.
+   */
   createConversation: (graphId?: string) =>
     request<{ conversation: Conversation }>('/conversations', {
       method: 'POST',
       body: JSON.stringify({ graphId }),
     }),
 
-  conversation: (id: string) =>
-    request<{ conversation: Conversation; graph: AgentGraph | null }>('/conversations/' + id),
-
-  /**
-   * ONE endpoint for both building and editing. The first turn creates a graph;
-   * a later turn modifies the same document and bumps its version.
-   */
+  /** One endpoint for both building and editing; an edit bumps the graph's version. */
   sendMessage: (id: string, text: string) =>
     request<{
       conversation: Conversation;
@@ -163,6 +180,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ text }),
     }),
+
+  /**
+   * Self-improvement: critiques this graph's own runs and asks the synthesiser for a better
+   * version. Always lands as a NEW forked graph to review; the source is never modified.
+   */
+  optimizeGraph: (graphId: string) =>
+    request<{
+      graph: AgentGraph;
+      critique: GraphCritique;
+      suggestedAssertions: GraphAssertion[];
+    }>('/graphs/' + graphId + '/optimize', { method: 'POST' }),
 
   /** Launch a run of a graph. The run snapshots the graph as it is right now. */
   runGraph: (graphId: string, variables: Record<string, unknown> = {}) =>
@@ -181,12 +209,51 @@ export const api = {
     return request<{ runs: Run[] }>('/runs' + (qs ? '?' + qs : ''));
   },
 
-  createRun: (kind: string, input: unknown) =>
-    request<{ run: Run }>('/runs', { method: 'POST', body: JSON.stringify({ kind, input }) }),
+  createRun: (kind: string, input: unknown, title?: string) =>
+    request<{ run: Run }>('/runs', {
+      method: 'POST',
+      body: JSON.stringify({ kind, input, title }),
+    }),
+
+  /**
+   * The main composer's launch path: one supervised `agent` run from a plain goal.
+   * Labels and sanitisation are left to the backend's redaction pass on purpose --
+   * see docs/frontend-handoff.md, "Starting the real agent flow".
+   */
+  startAgentTask: (goal: string, executionProfile: AgentExecutionProfile = 'adaptive') =>
+    request<{ run: Run }>('/runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: 'agent',
+        title: goal.slice(0, 200),
+        input: { goal, executionProfile },
+      }),
+    }),
 
   getRun: (id: string) => request<RunDetail>('/runs/' + id),
 
   cancelRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/cancel', { method: 'POST' }),
+
+  /**
+   * A CURRENT viewer URL for a handoff's browser session.
+   *
+   * Fetched WHEN THE PERSON CLICKS, never cached: Browserbase's debug URL is
+   * signed with a short-lived token, so the one captured when the session
+   * opened renders a blank, uninteractive page by the time anyone follows it.
+   */
+  browserLiveView: (runId: string, sessionId: string) =>
+    request<{ liveViewUrl: string | null; pageUrl: string | null; interactive: boolean }>(
+      '/runs/' + runId + '/browser/' + sessionId + '/live-view',
+    ),
+
+  /**
+   * Pause is cooperative: this resolves once the server has accepted the
+   * request, and the run reports status 'paused' over SSE when it actually
+   * reaches a step boundary. Do not render "paused" off this response.
+   */
+  pauseRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/pause', { method: 'POST' }),
+
+  resumeRun: (id: string) => request<{ run: Run }>('/runs/' + id + '/resume', { method: 'POST' }),
 
   /** "Save as a new task": fork the graph THIS run executed into a new document. */
   saveRunAsGraph: (id: string) =>
@@ -197,4 +264,76 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(decision),
     }),
+
+  /* ------------------------------------------------------------ Connections */
+
+  listMcpConnections: () => request<{ connections: McpConnection[] }>('/mcp-connections'),
+
+  addMcpConnection: (input: CreateMcpConnectionInput) =>
+    request<{ connection: McpConnection }>('/mcp-connections', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  refreshMcpConnection: (id: string) =>
+    request<{ connection: McpConnection }>('/mcp-connections/' + id + '/refresh', {
+      method: 'POST',
+    }),
+
+  setMcpConnectionEnabled: (id: string, enabled: boolean) =>
+    request<{ connection: McpConnection }>('/mcp-connections/' + id, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** 204 No Content on success; `request` assumes a JSON body, so this bypasses it. */
+  removeMcpConnection: async (id: string): Promise<void> => {
+    const res = await fetch('/api/mcp-connections/' + id, { method: 'DELETE' });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as {
+        error?: { code?: string; message?: string };
+      } | null;
+      throw new ApiError(
+        res.status,
+        body?.error?.code ?? 'UNKNOWN',
+        body?.error?.message ?? res.statusText,
+      );
+    }
+  },
+
+  /** Provider-native Composio tools, with their connected-account state. */
+  composioTools: () =>
+    request<{
+      tools: { name: string; toolkit?: string; version?: string; connected: boolean }[];
+    }>('/providers/composio/tools'),
+
+  composioToolkits: (search?: string) =>
+    request<{
+      items: {
+        slug: string;
+        name: string;
+        description?: string;
+        logoUrl?: string;
+        authSchemes: string[];
+        toolsCount?: number;
+        connected: boolean;
+        noAuth: boolean;
+      }[];
+      nextCursor?: string;
+      totalItems?: number;
+    }>('/providers/composio/toolkits' + (search ? '?search=' + encodeURIComponent(search) : '')),
+
+  composioConnect: (toolkit: string) =>
+    request<{ url: string }>('/providers/composio/connect', {
+      method: 'POST',
+      body: JSON.stringify({ toolkit }),
+    }),
+
+  composioRefresh: () =>
+    request<{
+      registered: string[];
+      skipped: string[];
+      requiresConnection: string[];
+      warning?: string;
+    }>('/providers/composio/refresh', { method: 'POST' }),
 };

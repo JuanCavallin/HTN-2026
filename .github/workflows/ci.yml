@@ -1,0 +1,36 @@
+# CI exists because a stale `pnpm install` once broke `tsc` on main for days
+# without anyone noticing: every check below already existed in the repo, and
+# nothing ran them.
+#
+# `check:analytics` is deliberately NOT here. It needs a live API on :8787 and
+# would have to start and health-poll the server first; a check that is flaky in
+# CI teaches people to ignore CI. Run it locally against `pnpm dev:api`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --frozen-lockfile is the point: it fails when package.json and the
+      # lockfile disagree, which is the exact drift that went unnoticed.
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+
+      - run: pnpm test
+
+      - run: pnpm build

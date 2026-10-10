@@ -332,6 +332,43 @@ function TypeFields({
               <option value="model">model -- one extra completion infers the args</option>
             </select>
           </Field>
+          {node.config.argsFrom === 'model' && (
+            <>
+              <Field
+                label="Argument model tier"
+                hint="Only affects how arguments are generated, not which tool is picked."
+              >
+                <select
+                  className={inputClass}
+                  value={node.config.argsModelTier ?? ''}
+                  onChange={(e) => onCommit({ argsModelTier: e.target.value || undefined })}
+                >
+                  <option value="">default (cheap)</option>
+                  <option value="cheap">cheap</option>
+                  <option value="standard">standard</option>
+                  <option value="frontier">frontier</option>
+                </select>
+              </Field>
+              <Field
+                label="Argument temperature (optional)"
+                hint="Only affects how arguments are generated, not which tool is picked."
+              >
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  className={inputClass}
+                  defaultValue={node.config.argsTemperature ?? ''}
+                  onBlur={(e) =>
+                    onCommit({
+                      argsTemperature: e.target.value ? Number(e.target.value) : undefined,
+                    })
+                  }
+                />
+              </Field>
+            </>
+          )}
           <JsonField
             label="Args per candidate tool"
             value={node.config.args}
@@ -406,6 +443,19 @@ function TypeFields({
               defaultValue={node.config.maxTokens ?? ''}
               onBlur={(e) =>
                 onCommit({ maxTokens: e.target.value ? Number(e.target.value) : undefined })
+              }
+            />
+          </Field>
+          <Field label="Temperature (optional)">
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.1}
+              className={inputClass}
+              defaultValue={node.config.temperature ?? ''}
+              onBlur={(e) =>
+                onCommit({ temperature: e.target.value ? Number(e.target.value) : undefined })
               }
             />
           </Field>
@@ -493,6 +543,34 @@ function TypeFields({
                   onBlur={(e) =>
                     onCommit({
                       inactivityTimeoutMs: e.target.value ? Number(e.target.value) : undefined,
+                    })
+                  }
+                />
+              </Field>
+              <Field label="Max duration (ms)" hint="Stop the task after this many ms">
+                <input
+                  type="number"
+                  min={1000}
+                  max={1_800_000}
+                  className={inputClass}
+                  defaultValue={node.config.maxDurationMs ?? ''}
+                  onBlur={(e) =>
+                    onCommit({
+                      maxDurationMs: e.target.value ? Number(e.target.value) : undefined,
+                    })
+                  }
+                />
+              </Field>
+              <Field label="Max failed tool calls" hint="Stop after this many failed tool calls">
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  className={inputClass}
+                  defaultValue={node.config.maxFailedToolCalls ?? ''}
+                  onBlur={(e) =>
+                    onCommit({
+                      maxFailedToolCalls: e.target.value ? Number(e.target.value) : undefined,
                     })
                   }
                 />
@@ -621,6 +699,79 @@ function TypeFields({
               defaultValue={node.config.amountCents ?? ''}
               onBlur={(e) =>
                 onCommit({ amountCents: e.target.value ? Number(e.target.value) : undefined })
+              }
+            />
+          </Field>
+        </>
+      );
+
+    case 'handoff':
+      return (
+        <>
+          <div className="rounded border border-rose-500/30 bg-rose-500/5 px-2.5 py-2 text-[11px] leading-relaxed text-rose-200/80">
+            The agent never performs this step. A person acts directly in the live browser, and
+            nothing they type passes through this system — there is no field here to put a secret
+            in, by design.
+          </div>
+          <Field
+            label="Instruction"
+            hint="Shown VERBATIM to the person. Say what to do, and that we cannot see it."
+          >
+            <textarea
+              className={inputClass + ' min-h-[3rem]'}
+              defaultValue={node.config.instruction}
+              onBlur={(e) =>
+                e.target.value.trim() && onCommit({ instruction: e.target.value.trim() })
+              }
+            />
+          </Field>
+          <Field label="Open at URL (optional)" hint="Leave blank to take over an existing session">
+            <input
+              className={inputClass}
+              defaultValue={node.config.url ?? ''}
+              onBlur={(e) => onCommit({ url: e.target.value.trim() || undefined })}
+            />
+          </Field>
+          <Field
+            label="Reuse session (optional)"
+            hint='A ref such as "{{open_portal.sessionId}}". Set this instead of a URL.'
+          >
+            <input
+              className={inputClass}
+              defaultValue={node.config.sessionId ?? ''}
+              onBlur={(e) => onCommit({ sessionId: e.target.value.trim() || undefined })}
+            />
+          </Field>
+          <Field label="Resume when">
+            <select
+              className={inputClass}
+              value={node.config.resumeWhen}
+              onChange={(e) => onCommit({ resumeWhen: e.target.value })}
+            >
+              <option value="human_confirms">the person clicks Done</option>
+              <option value="url_matches">the page reaches an expected URL</option>
+            </select>
+          </Field>
+          {node.config.resumeWhen === 'url_matches' && (
+            <Field label="Expected URL" hint="Matched as a prefix">
+              <input
+                className={inputClass}
+                defaultValue={node.config.expectUrl ?? ''}
+                onBlur={(e) => onCommit({ expectUrl: e.target.value.trim() || undefined })}
+              />
+            </Field>
+          )}
+          <Field
+            label="Timeout, ms (optional)"
+            hint="Fails the run. It never falls through to letting the agent try."
+          >
+            <input
+              type="number"
+              min={5000}
+              className={inputClass}
+              defaultValue={node.config.timeoutMs ?? ''}
+              onBlur={(e) =>
+                onCommit({ timeoutMs: e.target.value ? Number(e.target.value) : undefined })
               }
             />
           </Field>
