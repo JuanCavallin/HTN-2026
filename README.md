@@ -25,7 +25,7 @@ authorized, and what needs a human first.
 
 **Start here:** [demo script](docs/DEMO.md) · [keys for the demo laptop](docs/DEMO-KEYS.md) · [sponsor tracks](docs/SPONSORS.md) ·
 [Devpost copy](docs/DEVPOST.md) · [design spec](docs/agentos-design.md) ·
-[workflow roadmap](docs/workflow-roadmap.md)
+[workflow roadmap](docs/workflow-roadmap.md) · [measured metrics](docs/metrics.md)
 
 ## Quick start
 
@@ -52,6 +52,7 @@ the full demo runs end to end — deliberately, not as a placeholder. To go live
 | `pnpm check:providers`  | live Ollama + provider wiring check                               |
 | `pnpm test:jev`         | one live Jev decision through the Vercel AI Gateway               |
 | `pnpm test:jev:routing` | Jev's privacy × intelligence routing on sample tasks              |
+| `pnpm bench:browser`    | browser benchmark on live sites; needs Chrome (docs/metrics.md)   |
 | `pnpm format`           | prettier (respects `.prettierignore`)                             |
 
 ## How a run works
@@ -100,6 +101,21 @@ Playbook kinds (`apps/api/src/core/playbooks/registry.ts`): **`agent`** — the 
 one supervised task from a plain goal · **`demo`** — scripted tour of every subsystem, works
 with zero keys · **`graph`** — run a workflow authored on the canvas · **`baseline`** — a
 single LLM call, the control for the Compare page.
+
+## Measured
+
+Method, per-site data and the commands to rerun all of these are in
+[docs/metrics.md](docs/metrics.md). The browser figures are medians over 13 live sites,
+measured on 2026-10-09 with local Chrome.
+
+| What                                                              | Result                                                              |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Jev's browser request vs the page's raw DOM                       | **98.5% fewer tokens** (81.7% fewer than a full accessibility tree) |
+| Page snapshot: one in-page script vs per-element Playwright calls | **3.6 s → 19 ms**, 191x faster (lowest 92x)                         |
+| Pre-action target check: 1 call vs 4                              | 19.8 ms → 1.2 ms, 15x faster                                        |
+| Tools handed to the harness per task                              | at most **8**, from a 1,000+ tool catalog                           |
+| Exact-action broker                                               | **13** error codes, every one fails closed                          |
+| Test assertions run in CI                                         | **503** across 19 test files                                        |
 
 ## The app
 

@@ -33,7 +33,8 @@
     "check:browser-tools": "pnpm --filter @htn/api check:browser-tools",
     "check:providers": "pnpm --filter @htn/api check:providers",
     "test:jev": "pnpm --filter @htn/api test:jev",
-    "test:jev:routing": "pnpm --filter @htn/api test:jev:routing"
+    "test:jev:routing": "pnpm --filter @htn/api test:jev:routing",
+    "bench:browser": "pnpm --filter @htn/api bench:browser"
   },
   "devDependencies": {
     "concurrently": "^10.0.5",
