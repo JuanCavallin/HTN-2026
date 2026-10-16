@@ -114,8 +114,8 @@ measured on 2026-10-09 with local Chrome.
 | Page snapshot: one in-page script vs per-element Playwright calls | **3.6 s → 19 ms**, 191x faster (lowest 92x)                         |
 | Pre-action target check: 1 call vs 4                              | 19.8 ms → 1.2 ms, 15x faster                                        |
 | Tools handed to the harness per task                              | at most **8**, from a 1,000+ tool catalog                           |
-| Exact-action broker                                               | **13** error codes, every one fails closed                          |
-| Test assertions run in CI                                         | **503** across 19 test files                                        |
+| Exact-action broker                                               | **14** error codes, every one fails closed                          |
+| Test assertions run in CI                                         | **942** across 29 test files                                        |
 
 ## The app
 
