@@ -1,5 +1,7 @@
 # Supervised browser verification
 
+**Latest readiness review:** [2026-10-17 agent/benchmark/live-supervision audit](./agent-readiness-audit-2026-10-17.md). It identifies current privacy, benchmark-provenance and quality-scoring gaps; the October 5 checks below are historical verification, not proof that a live benchmark is ready today.
+
 Verified on **2026-10-05**, Windows, Node 22, with installed Chrome. Browser-specific implementation and evidence below; broader Action workspace, model, search and Composio results can be recorded separately.
 
 ## Configuration and implementation
