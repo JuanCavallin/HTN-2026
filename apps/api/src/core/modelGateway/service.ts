@@ -126,6 +126,8 @@ const TOOL_BUDGET_EXHAUSTED_INSTRUCTION =
  * gateway ends it itself rather than paying for another model and Jev call.
  */
 const MODEL_CALL_HEADROOM = 4;
+/** Bound on remembered per-task model picks; the oldest is forgotten first. */
+const MAX_TASK_MODEL_CHOICES = 2000;
 
 const TURN_LIMIT_REPLY =
   '[AgentOS] Stopped this agent run: it reached its limit of model calls without ' +
@@ -141,6 +143,13 @@ export class ModelGatewayService {
   private readonly turnToolCalls = new Map<string, number>();
   /** Model calls made per `${sessionStateId}:${turn}`, for the same reason. */
   private readonly turnModelCalls = new Map<string, number>();
+  /**
+   * Jev's model pick per agent task, keyed by `${sessionStateId}|labels|eligible
+   * route ids`. One task asks once instead of once per turn; a label change or a
+   * different eligible set (credentials, tool support) is a new key, so it asks
+   * again. In memory: a restart simply asks again.
+   */
+  private readonly taskModelChoices = new Map<string, string>();
 
   constructor(
     private readonly decisionService: DecisionService,
@@ -299,6 +308,15 @@ export class ModelGatewayService {
       Awaited<ReturnType<DecisionService['selectModel']>>,
       'selectedRouteId' | 'confidence' | 'reasonCodes'
     >;
+    const choiceKey = [
+      session.id,
+      [...session.dataLabels].sort().join(','),
+      modelCandidates
+        .map((route) => route.id)
+        .sort()
+        .join(','),
+    ].join('|');
+    const reusedRouteId = pinnedRoute ? undefined : this.taskModelChoices.get(choiceKey);
     try {
       modelDecision = pinnedRoute
         ? {
@@ -306,7 +324,9 @@ export class ModelGatewayService {
             confidence: 1,
             reasonCodes: ['baseline-pinned-' + pinnedRoute.costTier],
           }
-        : await this.decisionService.selectModel(decisionState, modelCandidates, callContext);
+        : reusedRouteId
+          ? { selectedRouteId: reusedRouteId, confidence: 1, reasonCodes: ['task-model-reused'] }
+          : await this.decisionService.selectModel(decisionState, modelCandidates, callContext);
     } catch (error) {
       if (!(error instanceof NoEligibleModelRouteError)) throw error;
       // The session now holds data no available model may see -- typically a
@@ -323,15 +343,26 @@ export class ModelGatewayService {
       (route) => route.id === modelDecision.selectedRouteId,
     );
     if (!selectedRoute) throw new Error('Selected model route is no longer available.');
-    await this.emitDecision(
-      session.runId,
-      session.stepId,
-      'select_model',
-      modelCandidates.map((route) => route.id),
-      [selectedRoute.id],
-      modelDecision.confidence,
-      modelDecision.reasonCodes,
-    );
+    // A reused pick is not a new decision: logging it again would show Jev
+    // calls that never happened. The `requested` lifecycle still names the route.
+    if (!reusedRouteId) {
+      await this.emitDecision(
+        session.runId,
+        session.stepId,
+        'select_model',
+        modelCandidates.map((route) => route.id),
+        [selectedRoute.id],
+        modelDecision.confidence,
+        modelDecision.reasonCodes,
+      );
+      if (!pinnedRoute) {
+        this.taskModelChoices.set(choiceKey, selectedRoute.id);
+        if (this.taskModelChoices.size > MAX_TASK_MODEL_CHOICES) {
+          const oldest = this.taskModelChoices.keys().next().value;
+          if (oldest !== undefined) this.taskModelChoices.delete(oldest);
+        }
+      }
+    }
 
     const selectedToolSchemas = await Promise.all(
       selectedRequestTools.map(async ({ requestName, registered }): Promise<OpenAiTool> => {

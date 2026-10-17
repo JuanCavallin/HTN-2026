@@ -423,6 +423,70 @@ async function main(): Promise<void> {
     }
   }
 
+  {
+    // One agent task asks Jev for its model once, not once per turn. A label
+    // change or a different eligible route set asks again.
+    const counting = new DecisionService(createJev({ mode: 'mock', keyVar: 'JEV_API_KEY' }));
+    const realSelect = counting.selectModel.bind(counting);
+    let selections = 0;
+    counting.selectModel = async (...args) => {
+      selections += 1;
+      return realSelect(...args);
+    };
+    let cloudAvailable = true;
+    const memo = new ModelGatewayService(counting, sessions, model, catalog, bus, {
+      modelRoutes: () => [TOOL_ROUTE, CLOUD_TOOL_ROUTE],
+      routeAvailable: (route) => route.deployment === 'local' || cloudAvailable,
+      backend: {
+        async complete(input) {
+          backendRoute = input.route;
+          return { text: 'ok', tokensIn: 1, tokensOut: 1 };
+        },
+      },
+    });
+    const task = await sessions.create({
+      runId: 'gateway_memo',
+      stepId: 'gateway_memo_step',
+      harness: 'hermes',
+      objective: 'Summarize public notes.',
+      sanitizedObjective: 'Summarize public notes.',
+      dataLabels: ['public'],
+      budget: { stepsRemaining: 3 },
+    });
+    const memoCall = async () => {
+      const issued = sessions.issueGatewayCredentials(task.id);
+      return memo.complete(
+        { messages: [{ role: 'user', content: 'Summarize public notes.' }] },
+        await sessions.resolveGatewayToken(issued.model, 'model'),
+      );
+    };
+    await sessions.beginTurn(task.id);
+    await memoCall();
+    const firstRoute = backendRoute?.id;
+    await memoCall();
+    await sessions.beginTurn(task.id);
+    await memoCall();
+    assert.equal(selections, 1, 'three model calls in one task make one Jev model choice');
+    assert.equal(backendRoute?.id, firstRoute, 'reused choice keeps the same route');
+    const memoDecisions = (await store.eventsSince('gateway_memo', 0)).filter(
+      (event) =>
+        event.event.type === 'control.decided' && event.event.decision.operation === 'select_model',
+    );
+    assert.equal(memoDecisions.length, 1, 'a reused choice is not logged as a new decision');
+
+    cloudAvailable = false;
+    await memoCall();
+    assert.equal(selections, 2, 'a changed eligible route set (credentials) asks Jev again');
+
+    await sessions.appendContext(task.id, [
+      { role: 'tool', summary: 'private result', dataLabels: ['private'] },
+    ]);
+    cloudAvailable = true;
+    await memoCall();
+    assert.equal(selections, 3, 'a data-label change asks Jev again');
+    assert.equal(backendRoute?.id, TOOL_ROUTE.id, 'private data stays on the local route');
+  }
+
   console.log('model gateway check: ok');
 }
 
