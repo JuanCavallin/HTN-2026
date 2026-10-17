@@ -216,7 +216,9 @@ function stableJson(value: unknown): string {
 
 function isSeparateBrowserOperation(toolId: string): boolean {
   return (
-    (toolId.startsWith('browserbase.') || toolId.startsWith('localbrowser.')) &&
+    (toolId.startsWith('browserbase.') ||
+      toolId.startsWith('browserless.') ||
+      toolId.startsWith('localbrowser.')) &&
     ['open', 'search', 'read'].includes(toolId.slice(toolId.lastIndexOf('.') + 1))
   );
 }

@@ -21,6 +21,7 @@ import { InMemoryToolExecutorRegistry } from '../core/tools/executors.js';
 import { InMemoryToolRegistry } from '../core/tools/registry.js';
 import { registerCoreLocalTools } from '../core/tools/local.js';
 import { registerDocumentTools } from '../core/tools/documents.js';
+import { registerBenchmarkFixture } from '../core/tools/benchmarkFixture.js';
 import { registerSearchTool } from '../core/tools/search.js';
 import { credentials } from './credentials.js';
 import { resolveBrowserSessionProvider } from '../providers/withBrowserOwnership.js';
@@ -73,6 +74,7 @@ export const toolBroker = new ToolBroker(
   },
 );
 registerCoreLocalTools(toolRegistry, toolExecutors, sessionStateService);
+registerBenchmarkFixture(toolRegistry, toolExecutors);
 registerDocumentTools(toolRegistry, toolExecutors, { mode: config.mock.all ? 'mock' : 'live' });
 registerSearchTool(toolRegistry, toolExecutors, {
   browser: () => providers.provider('browser'),

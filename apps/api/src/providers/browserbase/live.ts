@@ -759,7 +759,9 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         // every call is a network hop. Collapsing them is the single cheapest
         // latency win available here.
         const state = await page
-          .evaluate<TargetState | null, undefined>(validateTargetScript(domIndex))
+          .evaluate<TargetState | null, undefined>(
+            validateTargetScript(domIndex, { label: row.label, role: row.role }),
+          )
           .catch(() => null);
 
         const rejection = rejectionFor(state);

@@ -110,15 +110,29 @@ export const COLLECT_ROWS = `(() => {
  * The checks themselves are unchanged and still fail closed: anything this
  * cannot positively confirm comes back as not-actionable.
  */
-export function validateTargetScript(domIndex: number): string {
+export function validateTargetScript(
+  domIndex: number,
+  reviewed?: { label: string; role: string },
+): string {
   return `(() => {
      const SEL = ${JSON.stringify(INTERACTIVE_SELECTOR)};
      const el = document.querySelectorAll(SEL)[${domIndex}];
      if (!el) return { exists: false };
+     const reviewed = ${JSON.stringify(reviewed ?? null)};
+     if (reviewed) {
+       const tag = el.tagName.toLowerCase();
+       const type = el.getAttribute('type');
+       const inferred = tag === 'a' ? 'link' : tag === 'button' ? 'button' : tag === 'select' ? 'combobox' : tag === 'textarea' ? 'textbox' : tag === 'input' ? (type === 'checkbox' ? 'checkbox' : type === 'radio' ? 'radio' : ['submit','button','reset'].includes(type) ? 'button' : 'textbox') : tag || 'element';
+       const role = el.getAttribute('role') || inferred;
+       const name = (el.getAttribute('aria-label') || (el.innerText || '').trim() || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || '').replace(/\\s+/g,' ').trim();
+       const label = name.length > 80 ? name.slice(0,79)+'…' : name;
+       if (role !== reviewed.role || label !== reviewed.label) return {exists:true,identityMatches:false};
+     }
 
      const rect = el.getBoundingClientRect();
      const style = window.getComputedStyle(el);
      const visible =
+       !el.closest('[hidden], [aria-hidden="true"]') &&
        rect.width > 0 && rect.height > 0 &&
        style.visibility !== 'hidden' && style.display !== 'none' &&
        Number(style.opacity) !== 0;
@@ -143,12 +157,14 @@ export interface TargetState {
   visible?: boolean;
   enabled?: boolean;
   occluded?: boolean;
+  identityMatches?: boolean;
 }
 
 /** Everything unproven is treated as not-actionable. */
 export function rejectionFor(state: TargetState | null): TargetRejection | null {
   if (!state || typeof state !== 'object') return 'occluded';
   if (!state.exists) return 'detached';
+  if (state.identityMatches === false) return 'stale_snapshot';
   if (!state.visible || !state.enabled) return 'not_interactable';
   if (state.occluded !== false) return 'occluded';
   return null;

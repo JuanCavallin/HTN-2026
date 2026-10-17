@@ -27,6 +27,7 @@
     "check:gemini": "tsx scripts/gemini-backend.check.ts",
     "check:anthropic": "tsx scripts/anthropic-backend.check.ts",
     "check:composio-catalog": "tsx scripts/composio-catalog.check.ts",
+    "check:composio-results": "tsx scripts/composio-results.check.ts",
     "check:browser-tools": "tsx scripts/browser-tools.check.ts",
     "check:browser-integration": "tsx scripts/browser-integration.check.ts",
     "check:browser-http": "tsx scripts/browser-http.check.ts",

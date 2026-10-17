@@ -16,6 +16,8 @@ export const graphRunInputSchema = z.object({
   variables: z.record(z.string(), z.unknown()).default({}),
   /** Groups this run with the baseline runs launched alongside it. */
   pairId: z.string().min(1).max(100).optional(),
+  /** Server-generated immutable experiment metadata; never trusted from the caller. */
+  benchmarkExperiment: z.record(z.string(), z.unknown()).optional(),
   /**
    * Filled in by the orchestrator at run start, not by the caller. This is the
    * snapshot that makes an old run page stable across later edits.

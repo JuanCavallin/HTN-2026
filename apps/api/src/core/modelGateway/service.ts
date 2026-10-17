@@ -12,6 +12,7 @@ import type {
 import { newId, nowIso } from '../../lib/ids.js';
 import type { RunBus } from '../bus.js';
 import { NoEligibleModelRouteError, type DecisionService } from '../decisions/service.js';
+import { eligibleModelRoutes } from '../decisions/eligibility.js';
 import { decisionStateFromSession } from '../sessions/decisionState.js';
 import type { GatewayTurnBinding, SessionStateService } from '../sessions/service.js';
 import { KeyedLock } from '../locks.js';
@@ -258,13 +259,24 @@ export class ModelGatewayService {
     const selectedRequestTools = requestTools.filter((tool) =>
       selectedIds.has(tool.registered.descriptor.id),
     );
-    const availableRoutes = this.routes.filter(
-      (route) => route.enabled && this.routeAvailable(route, callContext),
+    // Privacy eligibility applies before ANY selection, including the baseline
+    // pin below, so no route choice can reach a model barred from the data.
+    const credentialedRoutes = this.routes.filter(
+      (route) =>
+        route.enabled &&
+        this.routeAvailable(route, callContext) &&
+        (selectedTools.length === 0 || route.supportsTools),
     );
-    const modelCandidates =
-      selectedTools.length > 0
-        ? availableRoutes.filter((route) => route.supportsTools)
-        : availableRoutes;
+    const modelCandidates = eligibleModelRoutes(decisionState, credentialedRoutes);
+    if (modelCandidates.length === 0 && credentialedRoutes.length > 0) {
+      return this.finalReply(
+        session,
+        '[AgentOS] Stopped this agent run: its data is now labelled ' +
+          session.dataLabels.join(', ') +
+          ', and no available model is allowed to see that. Only a local model may continue ' +
+          'a task like this; turn on Ollama to run it locally.',
+      );
+    }
     if (modelCandidates.length === 0) {
       return this.finalReply(
         session,
@@ -273,13 +285,16 @@ export class ModelGatewayService {
       );
     }
     // The all-tools baseline arm pins a cost tier so it measures "frontier
-    // model" rather than whatever Jev would pick. Falls back to the normal
-    // choice when no route of that tier is available.
+    // model" rather than whatever Jev would pick. With no eligible route of
+    // that tier the baseline is unavailable; it never falls back to Jev.
     const pinnedRoute = session.pinnedCostTier
       ? modelCandidates.find(
           (route) => route.deployment !== 'local' && route.costTier === session.pinnedCostTier,
         )
       : undefined;
+    if (session.pinnedCostTier && !pinnedRoute) {
+      return this.finalReply(session, '[AgentOS] Baseline unavailable: no privacy-eligible ' + session.pinnedCostTier + ' cloud model is configured. No alternative route was used.');
+    }
     let modelDecision: Pick<
       Awaited<ReturnType<DecisionService['selectModel']>>,
       'selectedRouteId' | 'confidence' | 'reasonCodes'
@@ -385,7 +400,12 @@ export class ModelGatewayService {
     try {
       await waitWhilePaused(session.runId, callContext.signal);
       callContext.signal?.throwIfAborted();
-      await this.sessions.requireGatewayTurn(binding);
+      // Labels or credentials can change while paused; recheck eligibility
+      // against the current session state, not the one routing saw.
+      const dispatchState = await this.sessions.requireGatewayTurn(binding);
+      if (!eligibleModelRoutes(decisionStateFromSession(dispatchState), [selectedRoute]).length || !this.routeAvailable(selectedRoute, callContext)) {
+        return this.finalReply(dispatchState, '[AgentOS] Model context or credentials changed. Review the current privacy requirements before continuing.');
+      }
       completed = await this.backend.complete(
         {
           route: selectedRoute,
@@ -471,7 +491,7 @@ export class ModelGatewayService {
     await this.sessions.appendContext(session.id, [
       {
         role: 'assistant',
-        summary: compactSummary(completed.text || '(model proposed tool calls)'),
+        summary: session.dataLabels.every(label => label === 'public') ? compactSummary(completed.text || '(model proposed tool calls)') : '(Private model result withheld from persisted context.)',
         // A model answer may incorporate a harness system prompt, so it is not
         // automatically promoted into remote-safe Jev context.
         sanitizedSummary: undefined,
@@ -700,7 +720,9 @@ function ioPreview(
 
 function isSeparateBrowserOperation(toolId: string): boolean {
   return (
-    (toolId.startsWith('browserbase.') || toolId.startsWith('localbrowser.')) &&
+    (toolId.startsWith('browserbase.') ||
+      toolId.startsWith('browserless.') ||
+      toolId.startsWith('localbrowser.')) &&
     ['open', 'search', 'read'].includes(toolId.slice(toolId.lastIndexOf('.') + 1))
   );
 }
@@ -745,7 +767,7 @@ function summarizeMessage(
     (role === 'tool' && Boolean(trustedToolEntry) && labelsArePublic(dataLabels));
   return {
     role,
-    summary,
+    summary: labelsArePublic(dataLabels) ? summary : '(Private harness message withheld from persisted context.)',
     sanitizedSummary: maySanitize ? summary : undefined,
     dataLabels,
     tokenEstimate: Math.ceil(text.length / 4),

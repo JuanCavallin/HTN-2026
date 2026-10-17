@@ -90,10 +90,16 @@ export const baselinePlaybook = definePlaybook<BaselineInput>({
 
     // Self-reported confidence, NOT calibrated like Jev's probabilities —
     // label it as such anywhere it's shown next to a real confidence number.
+    // Graph-derived fields arrive under `outcomes`, keyed by assertion id; the
+    // legacy case-file reply puts its one field at the top level.
     const summaryField = answerFields[0]?.name;
+    const outcomes =
+      reply.outcomes && typeof reply.outcomes === 'object' && !Array.isArray(reply.outcomes)
+        ? (reply.outcomes as Record<string, unknown>)
+        : reply;
     const headline =
-      summaryField && typeof reply[summaryField] === 'string'
-        ? String(reply[summaryField])
+      summaryField && typeof outcomes[summaryField] === 'string'
+        ? String(outcomes[summaryField])
         : 'answer returned';
     return {
       summary:

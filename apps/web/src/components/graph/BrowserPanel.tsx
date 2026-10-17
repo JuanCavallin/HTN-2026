@@ -128,6 +128,18 @@ export function BrowserPanel({
   const inputQueue = useRef(Promise.resolve());
   const live = !session.closedAt;
   const decisions = steps.map(decisionOf).filter((item): item is StreamedDecision => item !== null);
+  const handoffPayload = handoff?.proposedAction;
+  const handoffReview =
+    handoffPayload && typeof handoffPayload === 'object' && !Array.isArray(handoffPayload)
+      ? handoffPayload.review
+      : undefined;
+  const manualInstruction =
+    handoffReview &&
+    typeof handoffReview === 'object' &&
+    !Array.isArray(handoffReview) &&
+    typeof handoffReview.instruction === 'string'
+      ? handoffReview.instruction
+      : undefined;
   const controlling =
     viewer?.owner === 'human' &&
     viewer.phase === 'human_control' &&
@@ -424,6 +436,9 @@ export function BrowserPanel({
         <section className="browser-handoff">
           <Badge tone="warn">Your turn</Badge>
           <p>{handoff.question}</p>
+          {manualInstruction && manualInstruction !== handoff.question && (
+            <p>{manualInstruction}</p>
+          )}
           <small>
             Complete the manual step, then continue. The agent may inspect the resulting page after
             handoff.

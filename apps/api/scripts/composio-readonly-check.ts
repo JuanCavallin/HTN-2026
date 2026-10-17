@@ -3,7 +3,7 @@ import { createLiveComposio } from '../src/providers/composio/live.js';
 import { ComposioToolCatalog } from '../src/providers/composio/register.js';
 import { withEgress } from '../src/providers/withEgress.js';
 import { InMemoryToolRegistry } from '../src/core/tools/registry.js';
-import { InMemoryToolExecutorRegistry } from '../src/core/tools/executors.js';
+import { InMemoryToolExecutorRegistry, modelToolText } from '../src/core/tools/executors.js';
 import { newId } from '../src/lib/ids.js';
 import type { Json, ToolboxAdapter } from '@htn/shared';
 import { ToolBroker } from '../src/core/tools/broker.js';
@@ -79,6 +79,8 @@ if (!cfg.apiKey) {
   );
   const args = candidate ? safeDefaults(candidate.inputSchema) : null;
   let executionLogId: string | null = null;
+  let usefulModelResult = false;
+  let canonicalPrivateLabel = false;
   let authorization: { allowed: boolean; policy: string; localDecision: boolean } | null = null;
   let executionError: string | null = null;
   if (catalogPassed && candidate && args) {
@@ -127,6 +129,13 @@ if (!cfg.apiKey) {
           'deterministic-local-action-policy',
         ),
       };
+      const wire: unknown = JSON.parse(modelToolText(executed));
+      const payload = isRecord(wire) && isRecord(wire.result) ? wire.result : null;
+      usefulModelResult =
+        payload !== null && isRecord(payload.data) && Object.keys(payload.data).length > 0;
+      canonicalPrivateLabel = Boolean(
+        (await sessions.get(session.id))?.dataLabels.includes('private'),
+      );
       if (isRecord(executed.output)) {
         const logId = executed.output.log_id ?? executed.output.execution_log_id;
         if (
@@ -145,7 +154,12 @@ if (!cfg.apiKey) {
     executionError =
       'No connected bounded metadata read with schema-provided defaults was available; no arguments were guessed.';
   }
-  const passed = catalogPassed && authorization?.allowed === true && executionLogId !== null;
+  const passed =
+    catalogPassed &&
+    authorization?.allowed === true &&
+    executionLogId !== null &&
+    usefulModelResult &&
+    canonicalPrivateLabel;
   console.log(
     JSON.stringify(
       {
@@ -170,6 +184,8 @@ if (!cfg.apiKey) {
         toolId: candidate?.descriptor.id ?? null,
         authorization,
         resultFieldCount,
+        usefulModelResult,
+        canonicalPrivateLabel,
         ...(health.ok ? {} : { errorCode: health.error.code, message: health.error.message }),
         ...(report?.warning || discovery?.warning
           ? { message: report?.warning ?? discovery?.warning }

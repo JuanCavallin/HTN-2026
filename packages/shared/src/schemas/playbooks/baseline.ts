@@ -51,6 +51,9 @@ export const baselineInputSchema = z.object({
   assertions: z.array(graphAssertionSchema).optional(),
   /** Fields the reply must contain so those assertions can be checked. */
   answerFields: z.array(baselineAnswerFieldSchema).optional(),
+  outcomeAssertions: z.array(graphAssertionSchema).optional(),
+  /** Server-generated experiment snapshot. Caller values are replaced during run creation. */
+  benchmarkExperiment: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type BaselineInput = z.infer<typeof baselineInputSchema>;

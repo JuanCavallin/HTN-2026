@@ -16,7 +16,16 @@
  *      first node sees it.
  */
 
-import type { AgentGraph, BaselineAnswerField, BaselineInput, GraphAssertion } from '@htn/shared';
+import { createHash } from 'node:crypto';
+import {
+  BENCHMARK_PROTOCOL,
+  outcomeAssertionsForGraph,
+  type BenchmarkExperiment,
+  type AgentGraph,
+  type BaselineAnswerField,
+  type BaselineInput,
+  type GraphAssertion,
+} from '@htn/shared';
 
 export interface BaselineTask {
   prompt: string;
@@ -30,21 +39,29 @@ export interface BaselineTask {
  * pinned N spans") is something one call cannot do; asking the model to type
  * a number into it would turn a real gap into a guess, so it is left to fail.
  */
-const ANSWER_NODE_TYPES = new Set(['judge', 'decide', 'agent_task']);
-
 export function answerFieldsFor(
   graph: AgentGraph,
   assertions: GraphAssertion[] = graph.assertions ?? [],
 ): BaselineAnswerField[] {
   const fields = new Map<string, BaselineAnswerField>();
+  const outcomeIds = new Set(
+    outcomeAssertionsForGraph({ ...graph, assertions }).map((item) => item.id),
+  );
   for (const assertion of assertions) {
     const [root, nodeId, ...rest] = assertion.path.split('.');
     const name = rest.at(-1);
-    if (root !== 'nodes' || !nodeId || !name || fields.has(name)) continue;
+    if (
+      !outcomeIds.has(assertion.id) ||
+      root !== 'nodes' ||
+      !nodeId ||
+      !name ||
+      fields.has(assertion.id)
+    )
+      continue;
     const node = graph.nodes.find((candidate) => candidate.id === nodeId);
-    if (!node || !ANSWER_NODE_TYPES.has(node.type)) continue;
-    fields.set(name, {
-      name,
+    if (!node) continue;
+    fields.set(assertion.id, {
+      name: assertion.id,
       ...(node.type === 'judge' ? { options: [...node.config.options] } : {}),
     });
   }
@@ -98,6 +115,17 @@ export function buildBaselineTask(args: {
     );
   }
 
+  // Keep manually edited task requirements in scope without handing the baseline a graph plan.
+  const requirements = graph.nodes.flatMap((node) => {
+    const config = node.config as Record<string, unknown>;
+    const items = ['goal', 'prompt', 'question', 'instruction', 'workerPrompt'].flatMap((key) =>
+      typeof config[key] === 'string' ? [withInputs(config[key] as string, variables)] : [],
+    );
+    return items;
+  });
+  if (requirements.length)
+    sections.push('Task requirements:\n' + [...new Set(requirements)].join('\n\n'));
+
   return { prompt: sections.join('\n\n'), promptSource, answerFields: answerFieldsFor(graph) };
 }
 
@@ -119,10 +147,60 @@ export function answerContract(fields: BaselineAnswerField[]): string {
     .join(', ');
   return (
     'Reply with a single JSON object and nothing else: {"answer": <string, your complete ' +
-    'result>' +
-    (extra ? ', ' + extra : '') +
+    'result>, "outcomes": {' +
+    extra +
+    '}' +
     ', "confidence": <0-1, your own self-reported confidence>, "rationale": <string>}.'
   );
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  if (value && typeof value === 'object')
+    return (
+      '{' +
+      Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, item]) => JSON.stringify(key) + ':' + canonical(item))
+        .join(',') +
+      '}'
+    );
+  return JSON.stringify(value) ?? 'null';
+}
+function hash(value: unknown): string {
+  return createHash('sha256').update(canonical(value)).digest('hex');
+}
+
+/** configuration must contain non-secret effective modes/models/tool versions/budgets only. */
+export function buildBenchmarkExperiment(args: {
+  graph: AgentGraph;
+  requests: string[];
+  variables: Record<string, unknown>;
+  configuration: unknown;
+  toolIds: string[];
+}): { task: BaselineTask; experiment: BenchmarkExperiment } {
+  const task = buildBaselineTask(args);
+  const outcomeAssertions = outcomeAssertionsForGraph(args.graph);
+  const components = {
+    protocol: BENCHMARK_PROTOCOL,
+    taskHash: hash(task.prompt),
+    graphHash: hash(args.graph),
+    configHash: hash(args.configuration),
+    inputsHash: hash(args.variables),
+    assertionsHash: hash(outcomeAssertions),
+    graphVersion: args.graph.version,
+    toolIds: [...new Set(args.toolIds)].sort(),
+  };
+  return {
+    task,
+    experiment: {
+      ...components,
+      source: 'server',
+      fingerprint: hash(components),
+      outcomeAssertions,
+    },
+  };
 }
 
 /** Pull the reply object out of model text, tolerating prose around the JSON. */

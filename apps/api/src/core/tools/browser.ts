@@ -11,8 +11,14 @@ import type {
 import { BROWSERBASE_API_DESTINATION, LOCAL_BROWSER_DESTINATION } from '@htn/shared';
 import { config } from '../../config.js';
 import type { BrowserDecider } from './browserDecision.js';
+import type { BrowserDecision } from './browserDecision.js';
 import { LOW_CONFIDENCE_THRESHOLD } from './browserDecision.js';
-import type { ToolExecutionOutput, ToolExecutor } from './executors.js';
+import {
+  PreparedActionReviewRequiredError,
+  type ToolExecutionOutput,
+  type ToolExecutor,
+} from './executors.js';
+import { browserLocation } from '../../providers/browserSafety.js';
 
 export const BROWSER_EXECUTOR_REF = 'native://browser';
 
@@ -54,6 +60,31 @@ interface BrowserSession {
   destination?: string;
 }
 
+interface PreparedBrowserAction {
+  argumentsKey: string;
+  sessionId: string;
+  review: Json;
+  requiresApproval: boolean;
+  kind: 'target' | 'research' | 'handoff';
+  table?: ElementTable;
+  decision?: BrowserDecision;
+  result?: ToolExecutionOutput;
+  manualAction?: boolean;
+}
+
+class BrowserResearchBlockedError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly reason: 'empty_page' | 'browser_challenge',
+  ) {
+    super(
+      reason === 'empty_page'
+        ? 'The browser returned no readable page evidence.'
+        : 'The browser page requires human interaction before research can continue.',
+    );
+  }
+}
+
 /**
  * Port of the teammate browser controller onto AgentOS's exact-action broker.
  * Authorization, approval, version pinning, and lifecycle events happen once
@@ -61,6 +92,12 @@ interface BrowserSession {
  */
 export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExecutor {
   const sessions = new Map<string, BrowserSession>();
+  const prepared = new Map<string, PreparedBrowserAction>();
+  const researchBindings = new Map<
+    string,
+    { argumentsKey: string; sessionId: string; disposeAfter: boolean }
+  >();
+  const staleReviews = new Map<string, number>();
   const adapterFor = (id: BrowserBackend): BrowserAdapter => {
     const adapter =
       deps.byId?.(id) ?? deps.provider(id === 'localbrowser' ? 'browser.local' : 'browser');
@@ -95,6 +132,371 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
       })
       .catch(() => undefined);
     return next;
+  }
+
+  async function handoffReview(
+    action: ToolAction,
+    ctx: ProviderCallContext,
+    sessionId: string,
+    instruction: string,
+    manualAction = false,
+  ): Promise<PreparedBrowserAction> {
+    const adapter = adapterFor(providerFor(action.toolId));
+    if (!adapter.setOwnership)
+      throw new Error('Browser backend cannot safely hand this page to a human.');
+    await adapter.setOwnership(
+      { sessionId, owner: 'human' },
+      childContext(ctx, 'browser-review-manual-handoff'),
+    );
+    const value: PreparedBrowserAction = {
+      kind: 'handoff',
+      argumentsKey: JSON.stringify(action.arguments),
+      sessionId,
+      requiresApproval: true,
+      manualAction,
+      review: {
+        kind: 'browser_handoff',
+        sessionId,
+        providerId: adapter.id,
+        instruction,
+        reason: manualAction ? 'target_requires_manual_action' : 'research_page_blocked',
+        ...(!manualAction && /^https?:/.test(sessions.get(sessionId)?.url ?? '')
+          ? { expectUrl: new URL(sessions.get(sessionId)!.url!).origin + '/' }
+          : {}),
+      },
+    };
+    prepared.set(action.id, value);
+    return value;
+  }
+
+  async function prepareTarget(
+    action: ToolAction,
+    ctx: ProviderCallContext,
+  ): Promise<PreparedBrowserAction> {
+    const providerId = providerFor(action.toolId);
+    const adapter = adapterFor(providerId);
+    const args = asObject(action.arguments);
+    const sessionId = requiredString(args, 'sessionId');
+    assertSessionProvider(sessions, sessionId, providerId, action.runId);
+    assertSensitiveDestination(action.dataLabels, sessions.get(sessionId)?.url);
+    if ((staleReviews.get(action.id) ?? 0) >= 3)
+      return handoffReview(
+        action,
+        ctx,
+        sessionId,
+        'The reviewed browser target kept changing. Complete this exact requested action manually on this page, then approve to continue. No automatic click will be replayed.',
+        true,
+      );
+    const table = await snapshot(adapter, sessionId, deps.maxElements, ctx);
+    const operation = action.toolId.split('.').at(-1);
+    const allowedOperations: BrowserOperation[] =
+      operation === 'type' ? ['TYPE_TEXT', 'SELECT'] : ['CLICK'];
+    const typedValue = optionalString(args, 'text');
+    const decision = await deps.decide({
+      credentialRunId: ctx.runId,
+      cacheScope: ctx.runId + ':' + providerId + ':' + sessionId,
+      localOnly: action.dataLabels.some((label) => label !== 'public'),
+      goal: requiredString(args, 'goal'),
+      table,
+      allowedOperations,
+      ...(typedValue ? { typeText: typedValue } : {}),
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+    });
+    const target = table.rows.find((row) => row.index === decision.index);
+    if (
+      !target ||
+      !allowedOperations.includes(decision.operation) ||
+      !(decision.operation === 'CLICK'
+        ? target.clickable
+        : decision.operation === 'TYPE_TEXT'
+          ? target.editable
+          : target.selectable)
+    )
+      return handoffReview(
+        action,
+        ctx,
+        sessionId,
+        'No unambiguous eligible control could be resolved for this exact action. Complete it manually on this same page, then approve to continue. No automatic click will be replayed.',
+        true,
+      );
+    const confidence = Number.isFinite(decision.confidence)
+      ? Math.max(0, Math.min(1, decision.confidence))
+      : 0;
+    const value: PreparedBrowserAction = {
+      kind: 'target',
+      argumentsKey: JSON.stringify(action.arguments),
+      sessionId,
+      table,
+      decision: { ...decision, confidence },
+      requiresApproval:
+        confidence < LOW_CONFIDENCE_THRESHOLD || (staleReviews.get(action.id) ?? 0) > 0,
+      review: {
+        kind: 'browser_target',
+        sessionId,
+        providerId,
+        operation: decision.operation,
+        snapshotId: table.snapshotId,
+        index: target.index,
+        label: target.label,
+        role: target.role,
+        confidence,
+        decisionSource: decision.source,
+        pageUrl: browserLocation(table.url),
+        reason:
+          (staleReviews.get(action.id) ?? 0) > 0
+            ? 'reviewed_target_changed'
+            : confidence < LOW_CONFIDENCE_THRESHOLD
+              ? 'low_target_confidence'
+              : 'resolved_target',
+      },
+    };
+    prepared.set(action.id, value);
+    return value;
+  }
+
+  async function prepareResearch(
+    action: ToolAction,
+    ctx: ProviderCallContext,
+  ): Promise<PreparedBrowserAction> {
+    const providerId = providerFor(action.toolId);
+    const adapter = adapterFor(providerId);
+    const args = asObject(action.arguments);
+    const operation = action.toolId.split('.').at(-1)!;
+    const argumentsKey = JSON.stringify(action.arguments);
+    let binding = researchBindings.get(action.id);
+    if (binding?.argumentsKey !== argumentsKey) binding = undefined;
+    const url = requestedStartUrl(operation, args);
+    assertSensitiveDestination(action.dataLabels, url);
+    if (operation === 'search') requiredString(args, 'query');
+    else requiredString(args, 'instruction');
+    let result: ToolExecutionOutput;
+    try {
+      if (!binding) {
+        const sessionId = optionalString(args, 'sessionId');
+        if (sessionId) {
+          assertSessionProvider(sessions, sessionId, providerId, action.runId);
+          assertSensitiveDestination(action.dataLabels, sessions.get(sessionId)?.url);
+          binding = { argumentsKey, sessionId, disposeAfter: false };
+          researchBindings.set(action.id, binding);
+        } else if (
+          url &&
+          action.dataLabels.every((label) => label === 'public') &&
+          adapter.navigate
+        ) {
+          try {
+            result = await pooledResearch(adapter, providerId, action, operation, url, ctx);
+          } catch (error) {
+            if (error instanceof BrowserResearchBlockedError) {
+              binding = { argumentsKey, sessionId: error.sessionId, disposeAfter: false };
+              researchBindings.set(action.id, binding);
+            }
+            throw error;
+          }
+          const pooledId = researchPool.get(action.runId + ':' + providerId)!;
+          binding = { argumentsKey, sessionId: pooledId, disposeAfter: false };
+          researchBindings.set(action.id, binding);
+          const value: PreparedBrowserAction = {
+            kind: 'research',
+            argumentsKey,
+            sessionId: pooledId,
+            result,
+            requiresApproval: false,
+            review: { kind: 'browser_research', providerId, sessionId: pooledId, operation },
+          };
+          prepared.set(action.id, value);
+          return value;
+        } else {
+          const opened = await adapter.openSession(
+            url ? { startUrl: url } : {},
+            childContext(ctx, 'browser-session-open'),
+          );
+          if (!opened.ok) throw new Error(opened.error.message);
+          binding = { argumentsKey, sessionId: opened.data.sessionId, disposeAfter: true };
+          researchBindings.set(action.id, binding);
+          sessions.set(binding.sessionId, {
+            providerId,
+            runId: action.runId,
+            url,
+            interactive: opened.data.interactive === true,
+            destination: opened.meta.destination ?? undefined,
+          });
+          await announce({
+            phase: 'opened',
+            runId: action.runId,
+            ...(ctx.stepId ? { stepId: ctx.stepId } : {}),
+            sessionId: binding.sessionId,
+            providerId,
+            interactive: opened.data.interactive === true,
+            mode: adapter.mode,
+          });
+        }
+      }
+      result = await researchOutput(adapter, binding.sessionId, action, operation, ctx);
+      const value: PreparedBrowserAction = {
+        kind: 'research',
+        argumentsKey,
+        sessionId: binding.sessionId,
+        result,
+        requiresApproval: false,
+        review: { kind: 'browser_research', providerId, sessionId: binding.sessionId, operation },
+      };
+      prepared.set(action.id, value);
+      return value;
+    } catch (error) {
+      if (!(error instanceof BrowserResearchBlockedError)) throw error;
+      return handoffReview(
+        action,
+        ctx,
+        error.sessionId,
+        error.reason === 'empty_page'
+          ? 'This page returned no readable evidence. Load the intended content in this same browser and approve to retry the read. Empty content will not be reported as success.'
+          : 'This page is blocked by a challenge, sign-in, or access check. Resolve it manually in this same browser, then approve to read the resulting page. No challenge will be solved automatically.',
+      );
+    }
+  }
+
+  async function prepareReview(
+    action: ToolAction,
+    ctx: ProviderCallContext,
+  ): Promise<{ review: Json; requiresApproval: boolean }> {
+    ctx.signal?.throwIfAborted();
+    const operation = action.toolId.split('.').at(-1);
+    const value = ['click', 'type', 'submit'].includes(operation ?? '')
+      ? await prepareTarget(action, ctx)
+      : ['search', 'read', 'extract'].includes(operation ?? '')
+        ? await prepareResearch(action, ctx)
+        : undefined;
+    return value
+      ? { review: value.review, requiresApproval: value.requiresApproval }
+      : {
+          review: { kind: 'browser_action', operation: operation ?? 'unknown' },
+          requiresApproval: false,
+        };
+  }
+
+  async function executePrepared(
+    action: ToolAction,
+    ctx: ProviderCallContext,
+  ): Promise<ToolExecutionOutput> {
+    let value = prepared.get(action.id);
+    if (!value || value.argumentsKey !== JSON.stringify(action.arguments)) {
+      await prepareReview(action, ctx);
+      value = prepared.get(action.id);
+    }
+    if (!value) throw new Error('Browser action preparation is unavailable.');
+    const approved = ctx.policyRule === 'human-approved-exact-tool-action';
+    const review = (action as ToolAction & { review?: Json }).review;
+    if (
+      (value.requiresApproval &&
+        (!approved || JSON.stringify(review) !== JSON.stringify(value.review))) ||
+      (review !== undefined && JSON.stringify(review) !== JSON.stringify(value.review))
+    )
+      throw new PreparedActionReviewRequiredError(
+        'The exact browser target requires human review before it can execute.',
+      );
+    const adapter = adapterFor(providerFor(action.toolId));
+    if (value.kind === 'handoff') {
+      if (!adapter.setOwnership) throw new Error('Browser backend cannot safely resume.');
+      await adapter.setOwnership(
+        { sessionId: value.sessionId, owner: 'agent' },
+        childContext(ctx, 'browser-review-resume'),
+      );
+      if (value.manualAction) {
+        const table = await snapshot(adapter, value.sessionId, deps.maxElements, ctx);
+        prepared.delete(action.id);
+        return output(
+          action,
+          { sessionId: value.sessionId, manualCompletion: true, url: browserLocation(table.url) },
+          'Human confirmed completion of the requested browser action; no automatic click was replayed.',
+          undefined,
+          adapter.mode,
+        );
+      }
+      prepared.delete(action.id);
+      const resumed = await prepareResearch(action, ctx);
+      if (resumed.kind === 'handoff')
+        throw new PreparedActionReviewRequiredError(
+          'The same browser page still needs human interaction; research has not succeeded.',
+        );
+      value = resumed;
+    }
+    if (value.kind === 'research') {
+      prepared.delete(action.id);
+      const result = value.result!;
+      const binding = researchBindings.get(action.id);
+      if (binding?.disposeAfter) {
+        const closed = await adapter.closeSession(
+          value.sessionId,
+          childContext(ctx, 'browser-session-release'),
+        );
+        if (!closed.ok) throw new Error('Browser research cleanup failed.');
+        sessions.delete(value.sessionId);
+        await announce({ phase: 'closed', runId: action.runId, sessionId: value.sessionId });
+      }
+      return result;
+    }
+    const table = value.table!;
+    const decision = value.decision!;
+    const target = table.rows.find((row) => row.index === decision.index)!;
+    if (!adapter.perform) throw new Error('Browser backend lacks element-level execution.');
+    ctx.signal?.throwIfAborted();
+    const performed = await adapter.perform(
+      {
+        sessionId: value.sessionId,
+        snapshotId: table.snapshotId,
+        operation: decision.operation,
+        index: decision.index,
+        ...(optionalString(asObject(action.arguments), 'text') !== undefined
+          ? { text: optionalString(asObject(action.arguments), 'text') }
+          : {}),
+      },
+      childContext(ctx, 'browser-reviewed-element-action'),
+    );
+    if (!performed.ok) {
+      if (
+        performed.error.code === 'BAD_INPUT' &&
+        [
+          'stale_snapshot',
+          'unknown_index',
+          'wrong_operation',
+          'detached',
+          'not_interactable',
+          'occluded',
+        ].includes(performed.error.message)
+      ) {
+        prepared.delete(action.id);
+        staleReviews.set(action.id, (staleReviews.get(action.id) ?? 0) + 1);
+        throw new PreparedActionReviewRequiredError(
+          'The reviewed browser target changed or is occluded. A fresh review is required; nothing was clicked or typed.',
+        );
+      }
+      throw new Error(performed.error.message);
+    }
+    prepared.delete(action.id);
+    sessions.set(value.sessionId, {
+      ...sessions.get(value.sessionId),
+      providerId: providerFor(action.toolId),
+      url: performed.data.url,
+      runId: action.runId,
+      interactive: sessions.get(value.sessionId)?.interactive ?? false,
+    });
+    return output(
+      action,
+      {
+        ...performed.data,
+        target: target.label,
+        decisionSource: decision.source,
+        confidence: decision.confidence,
+        rationale: decision.rationale,
+      },
+      'Completed ' +
+        action.toolId.split('.').at(-1) +
+        ' on reviewed browser target "' +
+        target.label +
+        '".',
+      undefined,
+      adapter.mode,
+    );
   }
 
   async function pooledResearch(
@@ -154,8 +556,20 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
 
   return {
     ref: BROWSER_EXECUTOR_REF,
+    prepareReview,
+    discardPrepared(actionId) {
+      prepared.delete(actionId);
+      researchBindings.delete(actionId);
+      staleReviews.delete(actionId);
+    },
 
     async closeRunSessions(runId, ctx) {
+      for (const [id, value] of prepared)
+        if (sessions.get(value.sessionId)?.runId === runId) {
+          prepared.delete(id);
+          researchBindings.delete(id);
+          staleReviews.delete(id);
+        }
       // The pooled sessions are in `sessions` too and are closed below.
       for (const key of [...researchPool.keys()]) {
         if (key.startsWith(runId + ':')) researchPool.delete(key);
@@ -207,6 +621,8 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
       const args = asObject(action.arguments);
       const operation = action.toolId.split('.').at(-1);
       if (!operation) throw new Error('Browser operation is missing.');
+      if (['click', 'type', 'submit', 'search', 'read', 'extract'].includes(operation))
+        return executePrepared(action, ctx);
 
       if (operation === 'close') {
         const sessionId = requiredString(args, 'sessionId');
@@ -233,16 +649,6 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
       }
       const requestedUrl = requestedStartUrl(operation, args);
       assertSensitiveDestination(action.dataLabels, requestedUrl);
-
-      const research = operation === 'search' || operation === 'read' || operation === 'extract';
-      if (research) {
-        if (operation === 'search') requiredString(args, 'query');
-        else requiredString(args, 'instruction');
-      }
-      const publicOnly = action.dataLabels.every((label) => label === 'public');
-      if (research && !suppliedSessionId && requestedUrl && publicOnly && adapter.navigate) {
-        return pooledResearch(adapter, providerId, action, operation, requestedUrl, ctx);
-      }
 
       let sessionId = suppliedSessionId;
       let ownsSession = false;
@@ -301,10 +707,6 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           );
         }
 
-        if (research) {
-          return await researchOutput(adapter, sessionId, action, operation, ctx);
-        }
-
         const table = await snapshot(adapter, sessionId, deps.maxElements, ctx);
         if (operation === 'inspect') {
           return output(
@@ -316,81 +718,7 @@ export function createBrowserExecutor(deps: BrowserExecutorDeps): BrowserToolExe
           );
         }
 
-        if (!['click', 'type', 'submit'].includes(operation)) {
-          throw new Error('Unknown browser operation: ' + action.toolId);
-        }
-
-        const goal = requiredString(args, 'goal');
-        const allowedOperations: BrowserOperation[] =
-          operation === 'type' ? ['TYPE_TEXT', 'SELECT'] : ['CLICK'];
-        const typedValue = optionalString(args, 'text');
-        const decision = await deps.decide({
-          credentialRunId: ctx.runId,
-          cacheScope: ctx.runId + ':' + providerId + ':' + sessionId,
-          localOnly: action.dataLabels.some((label) => label !== 'public'),
-          goal,
-          table,
-          allowedOperations,
-          ...(typedValue ? { typeText: typedValue } : {}),
-          ...(ctx.signal ? { signal: ctx.signal } : {}),
-        });
-
-        // Jev's pick is followed at any confidence. Refusing a low-confidence
-        // target sent the model back to retry the same click with a reworded
-        // goal until its tool budget ran out. Authorization already happened
-        // in the broker; the confidence travels with the result instead.
-        if (decision.index === undefined) {
-          throw new Error(
-            'Browser decision returned no target (' +
-              decision.operation +
-              '): ' +
-              decision.rationale,
-          );
-        }
-        const target = table.rows.find((row) => row.index === decision.index);
-        if (!target) throw new Error('Browser decision returned an index that was not offered.');
-        if (!adapter.perform) throw new Error('Browser backend lacks element-level execution.');
-
-        const performed = await adapter.perform(
-          {
-            sessionId,
-            snapshotId: table.snapshotId,
-            operation: decision.operation,
-            index: decision.index,
-            ...(typedValue !== undefined ? { text: typedValue } : {}),
-          },
-          childContext(ctx, 'browser-element-action'),
-        );
-        if (!performed.ok) throw new Error(performed.error.message);
-        sessions.set(sessionId, {
-          ...sessions.get(sessionId),
-          providerId,
-          url: performed.data.url,
-          runId: action.runId,
-          interactive: sessions.get(sessionId)?.interactive ?? false,
-        });
-
-        return output(
-          action,
-          {
-            ...performed.data,
-            target: target.label,
-            decisionSource: decision.source,
-            confidence: decision.confidence,
-            rationale: decision.rationale,
-          },
-          'Completed ' +
-            operation +
-            ' on browser target "' +
-            target.label +
-            '"' +
-            (decision.confidence < LOW_CONFIDENCE_THRESHOLD
-              ? ' (a low-confidence pick, ' + decision.confidence.toFixed(2) + ': check the page)'
-              : '') +
-            '.',
-          undefined,
-          adapter.mode,
-        );
+        throw new Error('Unknown browser operation: ' + action.toolId);
       } finally {
         if (ownsSession) {
           await adapter
@@ -442,6 +770,8 @@ async function researchOutput(
     if (extracted.ok && evidenceTextLength(extracted.data) >= MIN_SCOPED_EVIDENCE_CHARS) break;
   }
   if (!extracted?.ok) throw new Error(extracted?.error.message ?? 'Browser read failed.');
+  const issue = browserResearchIssue(extracted.data);
+  if (issue) throw new BrowserResearchBlockedError(sessionId, issue);
   const publicOnly = action.dataLabels.every((label) => label === 'public');
   const evidence = publicOnly ? boundedEvidence(extracted.data as Json) : { available: true };
   return output(
@@ -455,6 +785,33 @@ async function researchOutput(
     publicOnly ? evidence : undefined,
     adapter.mode,
   );
+}
+
+/** Challenge text is evidence of a blocked read, never a completed search. */
+export function browserResearchIssue(
+  value: unknown,
+): 'empty_page' | 'browser_challenge' | undefined {
+  const source =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const text = (
+    typeof value === 'string' ? value : typeof source?.text === 'string' ? source.text : ''
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return 'empty_page';
+  const title = typeof source?.title === 'string' ? source.title : '';
+  if (
+    /^(?:access denied|just a moment|attention required|verify you are human|robot check|security check)/i.test(
+      title.trim(),
+    ) ||
+    /verify (?:that )?(?:you are|you're) (?:a )?human|prove (?:that )?(?:you are|you're) not a robot|unusual traffic|access denied|complete (?:the|this) (?:captcha|security check)|enable javascript and cookies to continue|bots use duckduckgo too|checking (?:your browser|if the site connection is secure)|challenge-platform/i.test(
+      text,
+    )
+  )
+    return 'browser_challenge';
+  return undefined;
 }
 
 function evidenceTextLength(value: unknown): number {

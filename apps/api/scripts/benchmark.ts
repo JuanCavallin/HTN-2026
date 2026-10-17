@@ -17,10 +17,11 @@
  *   --arms <list>            graph,baseline,baseline_agent (default graph,baseline)
  *   --variables <json>       the run's {{input.*}} (default {"target":"ACME-2026-TERM-FEES"})
  *   --timeout-min <n>        give up on one run after this long (default 15)
- *   --approve                auto-approve pending approvals, but ONLY on runs whose
- *                            calls were all mocked. A live run's approval guards a real,
- *                            possibly irreversible action, so it always waits for a person
- *                            in the UI (that wait is excluded from active time).
+ *   --approve                auto-approve a pending approval ONLY when the server reports
+ *                            MOCK_ALL with every provider mocked AND the pending action's own
+ *                            proposed evidence is mock. Anything else may guard a real,
+ *                            possibly irreversible action, so it waits for a person in the UI
+ *                            (that wait is excluded from active time). Never use for live runs.
  *   --out <file>             also write the raw samples and report as JSON
  *
  * Every live run costs real money; B1 (baseline_agent) is a full agent run.
@@ -31,13 +32,16 @@ import {
   BENCHMARK_ARM_LABELS,
   benchmarkSample,
   buildBenchmarkReport,
+  canAutoApproveMockBenchmark,
   isBenchmarkArm,
   isTerminal,
-  summarise,
+  type ActionEvidence,
+  type Approval,
   type ArmStats,
   type BenchmarkArm,
   type BenchmarkSample,
   type PairedSaving,
+  type ProviderStatus,
   type RollupInput,
   type Run,
 } from '@htn/shared';
@@ -96,6 +100,27 @@ function launch(arm: BenchmarkArm, graphId: string, pairId: string): Promise<{ r
   });
 }
 
+async function provablyMockApproval(approval: Approval): Promise<boolean> {
+  const action = approval.proposedAction;
+  const actionId =
+    action && typeof action === 'object' && !Array.isArray(action) ? action.actionId : undefined;
+  if (typeof actionId !== 'string') return false;
+  const [status, egress, evidence] = await Promise.all([
+    api<{ mockAll: boolean; providers: ProviderStatus[] }>('/api/providers'),
+    api<Detail>('/api/runs/' + approval.runId).then((detail) => detail.egress),
+    api<{ evidence: ActionEvidence[] }>(
+      '/api/runs/' + approval.runId + '/actions/' + actionId + '/evidence',
+    ).then((body) => body.evidence),
+  ]);
+  return canAutoApproveMockBenchmark({
+    mockAll: status.mockAll === true,
+    providers: status.providers,
+    approval,
+    evidence,
+    egress,
+  });
+}
+
 async function settle(runId: string): Promise<Detail> {
   const deadline = Date.now() + timeoutMs;
   const warned = new Set<string>();
@@ -104,10 +129,11 @@ async function settle(runId: string): Promise<Detail> {
     if (isTerminal(detail.run.status)) return detail;
     for (const approval of detail.approvals ?? []) {
       if (approval.status !== 'pending') continue;
-      // Same definition the ledger uses: post-hoc hermes-internal:// reports
-      // are not real calls, so a run is "live" only if summarise() says so.
-      const allMocked = summarise(detail.egress).live === 0;
-      if (autoApprove && allMocked) {
+      // No live egress YET is not proof of a mock: a run's first real write is
+      // pending with an empty ledger. Approve only when the server says every
+      // provider is mocked and the pending action's own evidence is mock.
+      const provablyMock = autoApprove && (await provablyMockApproval(approval));
+      if (provablyMock) {
         await api('/api/approvals/' + approval.id + '/decide', {
           method: 'POST',
           body: JSON.stringify({ decision: 'approved', note: 'benchmark --approve (mock run)' }),
@@ -118,7 +144,7 @@ async function settle(runId: string): Promise<Detail> {
           '    run ' +
             runId +
             ' is waiting on an approval; decide it in the UI' +
-            (autoApprove ? ' (live calls, so not auto-approved)' : '') +
+            (autoApprove ? ' (not provably mocked, so not auto-approved)' : '') +
             '. Wait time is excluded from active time.',
         );
       }

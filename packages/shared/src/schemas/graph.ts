@@ -415,6 +415,8 @@ export type GraphEdge = z.infer<typeof graphEdgeSchema>;
 export const graphAssertionSchema = z.object({
   id: z.string().min(1),
   description: z.string().min(1),
+  /** Outcome checks grade every benchmark arm; pipeline checks describe orchestration only. */
+  scope: z.enum(['outcome', 'pipeline']).optional(),
   /** Dot-path into the run result, e.g. "verdict" or "flaggedSources.0". */
   path: z.string().min(1),
   /** The value at `path`, stringified, must equal this. */
@@ -507,6 +509,16 @@ export const agentGraphSchema = z
     assertions: z.array(graphAssertionSchema).optional(),
   })
   .superRefine((graph, ctx) => {
+    const assertionIds = new Set<string>();
+    for (const [index, assertion] of (graph.assertions ?? []).entries()) {
+      if (assertionIds.has(assertion.id))
+        ctx.addIssue({
+          code: 'custom',
+          path: ['assertions', index, 'id'],
+          message: 'Duplicate assertion id "' + assertion.id + '"',
+        });
+      assertionIds.add(assertion.id);
+    }
     // The interpreter assumes all three of these hold. Enforce them at the
     // boundary so a malformed graph is a 400, never a hung run.
     const ids = new Set<string>();

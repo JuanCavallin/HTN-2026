@@ -25,8 +25,86 @@
  */
 
 import { evaluateAssertions, rollup, type AssertionResult, type RollupInput } from './analytics.js';
-import type { Run } from './domain.js';
+import type { Approval, EgressEvent, Run } from './domain.js';
+import type { ActionEvidence } from './actionEvidence.js';
 import type { AgentGraph, GraphAssertion } from './schemas/graph.js';
+
+export const BENCHMARK_PROTOCOL = 'agentos-benchmark-v2' as const;
+export interface BenchmarkExperiment extends Record<string, unknown> {
+  protocol: typeof BENCHMARK_PROTOCOL;
+  source: 'server';
+  fingerprint: string;
+  taskHash: string;
+  graphHash: string;
+  configHash: string;
+  inputsHash: string;
+  assertionsHash: string;
+  graphVersion: number;
+  toolIds: string[];
+  outcomeAssertions: GraphAssertion[];
+}
+
+/** Explicit scope wins; legacy answer nodes remain comparable, internal pipeline nodes do not. */
+export function outcomeAssertionsForGraph(graph: AgentGraph): GraphAssertion[] {
+  return (graph.assertions ?? []).filter((assertion) => {
+    if (assertion.scope) return assertion.scope === 'outcome';
+    const [root, id] = assertion.path.split('.');
+    const node = graph.nodes.find((candidate) => candidate.id === id);
+    return root === 'nodes' && !!node && ['judge', 'decide', 'agent_task'].includes(node.type);
+  });
+}
+
+export function experimentForRun(run: Run): BenchmarkExperiment | undefined {
+  const value = (run.input as { benchmarkExperiment?: BenchmarkExperiment } | null)
+    ?.benchmarkExperiment;
+  return value?.protocol === BENCHMARK_PROTOCOL &&
+    value.source === 'server' &&
+    /^[a-f0-9]{64}$/.test(value.fingerprint)
+    ? value
+    : undefined;
+}
+
+/** Empty history is not a proof of simulation. Every positive condition is server metadata. */
+export function canAutoApproveMockBenchmark(input: {
+  mockAll: boolean;
+  providers: readonly { mode: string }[];
+  approval: Approval;
+  evidence: readonly ActionEvidence[];
+  egress: readonly EgressEvent[];
+}): boolean {
+  if (
+    !input.mockAll ||
+    !input.providers.length ||
+    input.providers.some((provider) => !['mock', 'disabled'].includes(provider.mode)) ||
+    input.approval.status !== 'pending'
+  )
+    return false;
+  if (
+    input.egress.some(
+      (event) =>
+        !event.destination.startsWith('mock://') &&
+        !event.destination.startsWith('hermes-internal://'),
+    )
+  )
+    return false;
+  const action = input.approval.proposedAction;
+  if (
+    !action ||
+    typeof action !== 'object' ||
+    Array.isArray(action) ||
+    typeof action.actionId !== 'string' ||
+    typeof action.previewFingerprint !== 'string'
+  )
+    return false;
+  return input.evidence.some(
+    (item) =>
+      item.runId === input.approval.runId &&
+      item.actionId === action.actionId &&
+      item.phase === 'proposed' &&
+      item.executionMode === 'mock' &&
+      item.fingerprint === action.previewFingerprint,
+  );
+}
 
 export const BENCHMARK_ARMS = ['graph', 'baseline', 'baseline_agent'] as const;
 export type BenchmarkArm = (typeof BENCHMARK_ARMS)[number];
@@ -52,10 +130,16 @@ export function evaluateAssertionsAgainstResult(
   result: unknown,
 ): AssertionResult[] {
   return assertions.map((assertion) => {
-    const field = assertion.path.split('.').at(-1) ?? '';
-    const value =
+    const outcomes =
       result && typeof result === 'object' && !Array.isArray(result)
-        ? (result as Record<string, unknown>)[field]
+        ? (result as Record<string, unknown>).outcomes
+        : undefined;
+    const value =
+      outcomes &&
+      typeof outcomes === 'object' &&
+      !Array.isArray(outcomes) &&
+      Object.hasOwn(outcomes, assertion.id)
+        ? (outcomes as Record<string, unknown>)[assertion.id]
         : undefined;
     const actual = value === undefined || value === null ? null : String(value);
     return {
@@ -75,6 +159,41 @@ export function assertionsForRun(run: Run): GraphAssertion[] {
     assertions?: GraphAssertion[];
   };
   return input.graphSnapshot?.assertions ?? input.assertions ?? [];
+}
+
+export function outcomeAssertionsForRun(run: Run): GraphAssertion[] {
+  const experiment = experimentForRun(run);
+  if (experiment) return experiment.outcomeAssertions;
+  const input = (run.input ?? {}) as {
+    graphSnapshot?: AgentGraph;
+    outcomeAssertions?: GraphAssertion[];
+  };
+  return (
+    input.outcomeAssertions ??
+    (input.graphSnapshot ? outcomeAssertionsForGraph(input.graphSnapshot) : [])
+  );
+}
+
+/** Missing completion evidence never upgrades a quiescent agent into a verified answer. */
+export function benchmarkCompletionVerified(input: RollupInput): boolean {
+  if (input.run.kind === 'baseline') return input.run.status === 'succeeded';
+  const result = input.run.result as
+    { completion?: { status?: string; verified?: boolean } } | undefined;
+  if (input.run.kind === 'baseline_agent')
+    return result?.completion?.status === 'done' && result.completion.verified === true;
+  const graph = (input.run.input as { graphSnapshot?: AgentGraph })?.graphSnapshot;
+  const agentNodes = graph?.nodes.filter((node) => node.type === 'agent_task') ?? [];
+  return agentNodes.every((node) =>
+    input.steps.some((step) => {
+      const output = step.output as
+        { completionDecision?: { status?: string; verified?: boolean } } | undefined;
+      return (
+        step.nodeId === node.id &&
+        output?.completionDecision?.status === 'done' &&
+        output.completionDecision.verified === true
+      );
+    }),
+  );
 }
 
 export function pairIdOf(run: Run): string | undefined {
@@ -100,18 +219,48 @@ export interface BenchmarkSample {
   wallMs: number;
   humanWaitMs: number;
   mocked: boolean;
+  experimentFingerprint?: string;
+  qualityEligible?: boolean;
+  provenanceKnown?: boolean;
+  completionVerified?: boolean;
+  pipelineAssertionsPassed?: number;
+  pipelineAssertionsTotal?: number;
 }
 
 export function benchmarkSample(input: RollupInput): BenchmarkSample | null {
   const { run } = input;
   if (!isBenchmarkArm(run.kind) || !run.graphId) return null;
   const analytics = rollup(input);
-  const assertions = assertionsForRun(run);
+  const assertions = outcomeAssertionsForRun(run);
   const results =
     run.kind === 'graph'
       ? evaluateAssertions(assertions, input.steps)
       : evaluateAssertionsAgainstResult(assertions, run.result);
   const passed = results.filter((result) => result.passed).length;
+  const all = assertionsForRun(run);
+  const pipeline = all.filter((item) => !assertions.some((outcome) => outcome.id === item.id));
+  const pipelineResults = run.kind === 'graph' ? evaluateAssertions(pipeline, input.steps) : [];
+  const events = input.toolLifecycle ?? [];
+  const executed = events.filter(
+    (event) =>
+      event.phase === 'succeeded' ||
+      event.phase === 'executing' ||
+      (event.phase === 'failed' && event.outcome !== 'not_executed'),
+  );
+  const provenanceKnown =
+    input.toolLifecycle !== undefined &&
+    executed.every(
+      (event) =>
+        event.evidence?.executionMode !== undefined ||
+        events.some(
+          (other) =>
+            other.action.id === event.action.id && other.evidence?.executionMode !== undefined,
+        ),
+    );
+  const mocked =
+    analytics.totals.egress.mocked > 0 ||
+    events.some((event) => event.evidence?.executionMode === 'mock');
+  const completionVerified = benchmarkCompletionVerified(input);
   return {
     runId: run.id,
     arm: run.kind,
@@ -122,14 +271,24 @@ export function benchmarkSample(input: RollupInput): BenchmarkSample | null {
     hasAssertions: assertions.length > 0,
     assertionsPassed: passed,
     assertionsTotal: assertions.length,
-    success: run.status === 'succeeded' && passed === assertions.length,
+    success:
+      run.status === 'succeeded' &&
+      assertions.length > 0 &&
+      passed === assertions.length &&
+      completionVerified,
     costCents: analytics.totals.estimatedCostCents,
     unpricedCalls: analytics.totals.unpricedCalls,
     tokens: analytics.totals.tokensIn + analytics.totals.tokensOut,
     llmCalls: analytics.totals.llmCalls,
     wallMs: analytics.totals.wallMs,
     humanWaitMs: analytics.totals.humanWaitMs,
-    mocked: analytics.totals.egress.mocked > 0,
+    mocked,
+    experimentFingerprint: experimentForRun(run)?.fingerprint,
+    qualityEligible: assertions.length > 0,
+    provenanceKnown,
+    completionVerified,
+    pipelineAssertionsPassed: pipelineResults.filter((result) => result.passed).length,
+    pipelineAssertionsTotal: pipeline.length,
   };
 }
 
@@ -197,6 +356,7 @@ export interface PairedSaving {
   /** Pairs where the graph succeeded and this baseline did not, and vice versa. */
   graphOnlyWins: number;
   baselineOnlyWins: number;
+  unpricedPairs?: number;
 }
 
 export interface GraphBenchmark {
@@ -205,11 +365,13 @@ export interface GraphBenchmark {
   hasAssertions: boolean;
   arms: Partial<Record<BenchmarkArm, ArmStats>>;
   savings: PairedSaving[];
+  experimentFingerprint?: string;
 }
 
 export interface BenchmarkReport {
   includeMocked: boolean;
   mockedRunsExcluded: number;
+  ineligibleRunsExcluded?: number;
   graphs: GraphBenchmark[];
   /** Every graph's runs pooled together, per arm. */
   overall: Partial<Record<BenchmarkArm, ArmStats>>;
@@ -248,21 +410,19 @@ export function pairRuns(
 ): [BenchmarkSample, BenchmarkSample][] {
   const used = new Set<string>();
   const pairs: [BenchmarkSample, BenchmarkSample][] = [];
-  const time = (sample: BenchmarkSample) => new Date(sample.createdAt).getTime();
   for (const graphRun of graphRuns) {
+    if (!graphRun.pairId || !graphRun.experimentFingerprint) continue;
     const candidates = others.filter(
-      (other) => other.graphId === graphRun.graphId && !used.has(other.runId),
+      (other) =>
+        other.graphId === graphRun.graphId &&
+        !used.has(other.runId) &&
+        other.experimentFingerprint === graphRun.experimentFingerprint &&
+        other.pairId === graphRun.pairId,
     );
     const exact = graphRun.pairId
       ? candidates.find((other) => other.pairId === graphRun.pairId)
       : undefined;
-    const nearest = exact
-      ? exact
-      : candidates
-          .filter((other) => !other.pairId || !graphRun.pairId)
-          .sort(
-            (a, b) => Math.abs(time(a) - time(graphRun)) - Math.abs(time(b) - time(graphRun)),
-          )[0];
+    const nearest = exact;
     if (!nearest) continue;
     used.add(nearest.runId);
     pairs.push([graphRun, nearest]);
@@ -285,7 +445,12 @@ export function pairedSaving(
     both
       .map(([graph, baseline]) => saving(pick(graph), pick(baseline)))
       .filter((value): value is number => value !== null);
-  const cost = values((sample) => sample.costCents);
+  const priced = both.filter(
+    ([graph, baseline]) => graph.unpricedCalls === 0 && baseline.unpricedCalls === 0,
+  );
+  const cost = priced
+    .map(([graph, baseline]) => saving(graph.costCents, baseline.costCents))
+    .filter((value): value is number => value !== null);
   const tokens = values((sample) => sample.tokens);
   const wall = values((sample) => sample.wallMs);
   return {
@@ -294,6 +459,7 @@ export function pairedSaving(
     bothSucceeded: both.length,
     medianCostSaving: cost.length > 0 ? median(cost) : null,
     costSavingCi: bootstrapMedianCi(cost),
+    unpricedPairs: both.length - priced.length,
     medianTokenSaving: tokens.length > 0 ? median(tokens) : null,
     medianWallSaving: wall.length > 0 ? median(wall) : null,
     graphOnlyWins: pairs.filter(([graph, baseline]) => graph.success && !baseline.success).length,
@@ -331,13 +497,25 @@ export function buildBenchmarkReport(
   options: { includeMocked?: boolean } = {},
 ): BenchmarkReport {
   const includeMocked = options.includeMocked ?? false;
-  const samples = includeMocked ? allSamples : allSamples.filter((sample) => !sample.mocked);
-  const graphIds = [...new Set(samples.map((sample) => sample.graphId))];
-  const graphs = graphIds
-    .map((graphId) => {
-      const mine = samples.filter((sample) => sample.graphId === graphId);
+  const eligible = allSamples.filter(
+    (sample) =>
+      !!sample.experimentFingerprint &&
+      sample.qualityEligible === true &&
+      sample.provenanceKnown === true,
+  );
+  const samples = includeMocked ? eligible : eligible.filter((sample) => !sample.mocked);
+  const experimentKeys = [
+    ...new Set(samples.map((sample) => sample.graphId + ':' + sample.experimentFingerprint)),
+  ];
+  const graphs = experimentKeys
+    .map((key) => {
+      const mine = samples.filter(
+        (sample) => sample.graphId + ':' + sample.experimentFingerprint === key,
+      );
+      const graphId = mine[0]!.graphId;
       return {
         graphId,
+        experimentFingerprint: mine[0]!.experimentFingerprint,
         graphName: graphNames[graphId] ?? graphId,
         hasAssertions: mine.some((sample) => sample.hasAssertions),
         arms: statsByArm(mine),
@@ -348,11 +526,16 @@ export function buildBenchmarkReport(
     .filter((graph) => Object.keys(graph.arms).length > 1)
     .sort((a, b) => a.graphName.localeCompare(b.graphName));
   const compared = samples.filter((sample) =>
-    graphs.some((graph) => graph.graphId === sample.graphId),
+    graphs.some(
+      (graph) =>
+        graph.graphId === sample.graphId &&
+        graph.experimentFingerprint === sample.experimentFingerprint,
+    ),
   );
   return {
     includeMocked,
     mockedRunsExcluded: includeMocked ? 0 : allSamples.filter((sample) => sample.mocked).length,
+    ineligibleRunsExcluded: allSamples.length - eligible.length,
     graphs,
     overall: statsByArm(compared),
     overallSavings: savingsFor(compared),

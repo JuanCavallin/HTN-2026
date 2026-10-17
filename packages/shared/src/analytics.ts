@@ -21,6 +21,7 @@ import type { Approval, EgressEvent, Json, PauseSpan, Run, Step, StepStatus } fr
 import type { ModelTier } from './providers.js';
 import type { AgentGraph, GraphAssertion } from './schemas/graph.js';
 import type { ScheduleDecision } from './scheduling.js';
+import type { ToolLifecycleEvent } from './control.js';
 
 /* -------------------------------------------------------------------------- */
 /* Egress ledger summary                                                      */
@@ -176,6 +177,8 @@ export interface RollupInput {
   egress: EgressEvent[];
   scheduleDecisions?: ScheduleDecision[];
   approvals?: Approval[];
+  /** Trusted broker events; mock tools may perform no network call and emit no egress row. */
+  toolLifecycle?: ToolLifecycleEvent[];
 }
 
 /* -------------------------------------------------------------------------- */

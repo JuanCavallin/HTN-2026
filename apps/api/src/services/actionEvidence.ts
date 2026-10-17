@@ -46,6 +46,7 @@ export function actionFingerprint(action: ToolAction): string {
         descriptorVersion: action.descriptorVersion,
         destination: action.destination ?? null,
         accountRef: action.accountRef ?? null,
+        review: action.review ?? null,
         arguments: action.arguments,
         dataLabels: action.dataLabels,
       }),

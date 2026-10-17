@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { redactCredentialFields } from '../../lib/actions';
+import { isHandoffApproval } from '../../lib/handoff';
 
 /**
  * The human half of the risk gate.
@@ -103,11 +104,9 @@ export function ApprovalPanel({
   // presence of a URL keeps the handoff wording correct even when no viewable
   // session exists -- the person still has to go and do the thing.
   const action = approval.proposedAction;
-  const isHandoff =
-    !!action &&
-    typeof action === 'object' &&
-    !Array.isArray(action) &&
-    (action as Record<string, unknown>).kind === 'human_handoff';
+  const isHandoff = isHandoffApproval(approval);
+  const review =
+    action && typeof action === 'object' && !Array.isArray(action) ? action.review : undefined;
   const [draft, setDraft] = useState<string | null>(null);
 
   const submit = async (decision: ApprovalDecision) => {
@@ -282,6 +281,22 @@ export function ApprovalPanel({
       </div>
 
       <p className="mt-2 text-sm text-slate-100">{approval.question}</p>
+
+      {review &&
+        typeof review === 'object' &&
+        !Array.isArray(review) &&
+        review.kind === 'browser_target' && (
+          <section className="mt-2" aria-label="Browser target review">
+            <h3 className="text-sm font-medium">Prepared browser target</h3>
+            <p className="text-xs text-slate-400">
+              Approve only this operation and target. The snapshot and target review are fixed; a
+              changed target requires a fresh decision.
+            </p>
+            <pre className="mt-1 max-h-48 overflow-auto rounded bg-slate-950/70 px-3 py-2 text-[11px] text-slate-300">
+              {JSON.stringify(redactCredentialFields(review), null, 2)}
+            </pre>
+          </section>
+        )}
 
       {!compact && (
         <p className="mt-1 text-xs text-slate-500">

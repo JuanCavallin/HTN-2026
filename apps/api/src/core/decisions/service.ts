@@ -239,10 +239,13 @@ export class DecisionService {
         : fallbackRecommendation('deny', 'jev-action-policy-failed');
     }
 
-    const confidencePolicy =
-      recommendation.confidence < this.minimumConfidence
-        ? escalateLowConfidence(recommendation.policy)
-        : recommendation.policy;
+    // Model uncertainty/risk is a human-review boundary, not a retryable tool
+    // rejection. Deterministic privacy/permission denials and failed policy
+    // evaluation still cannot be overridden by a receipt.
+    const failedPolicy = recommendation.reasonCodes.includes('jev-action-policy-failed');
+    const confidencePolicy = failedPolicy ? 'deny'
+      : recommendation.confidence < this.minimumConfidence || recommendation.policy === 'deny'
+        ? 'ask_user' : recommendation.policy;
     const finalPolicy = strictestActionPolicy(baseline, confidencePolicy);
     return {
       actionId: action.id,

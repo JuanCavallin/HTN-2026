@@ -17,9 +17,11 @@ import type {
   ScheduleDecision,
   Step,
   StoredEvent,
+  ToolLifecycleEvent,
 } from '@htn/shared';
 import { isTerminal, stripPiiValue, type BaselineInput } from '@htn/shared';
-import { buildBaselineTask } from '../core/playbooks/baselineTask.js';
+import { buildBenchmarkExperiment } from '../core/playbooks/baselineTask.js';
+import { config } from '../config.js';
 import {
   pauseHeldSince,
   pauseRun as gatePauseRun,
@@ -31,7 +33,7 @@ import { listToolCatalog } from './toolCatalog.js';
 import { formatPreflightIssues, graphPreflightIssues } from '../core/graph/preflight.js';
 import { newId, nowIso } from '../lib/ids.js';
 import type { ListRunsFilter } from '../store/types.js';
-import { bus, orchestrator, store } from './runtime.js';
+import { bus, orchestrator, store, toolRegistry } from './runtime.js';
 import { browserControlStatesForRun } from '../providers/withBrowserOwnership.js';
 import { credentials } from './credentials.js';
 
@@ -78,6 +80,7 @@ async function assertGraphRunnable(graph: AgentGraph): Promise<void> {
 }
 
 export interface RunDetail {
+  toolLifecycle: ToolLifecycleEvent[];
   run: Run;
   steps: Step[];
   approvals: Approval[];
@@ -123,7 +126,15 @@ export async function createRun(args: {
     const graph = await store.getGraph(requested.graphId);
     if (!graph) throw new GraphNotFoundError(requested.graphId);
     await assertGraphRunnable(graph);
-    input = { ...requested, graphSnapshot: graph } as Json;
+    const experiment = await experimentForGraph(
+      graph,
+      (requested as { variables?: Record<string, unknown> }).variables ?? {},
+    );
+    input = {
+      ...requested,
+      graphSnapshot: graph,
+      benchmarkExperiment: experiment.experiment,
+    } as unknown as Json;
   }
   let baselineGraphName: string | undefined;
   if (args.kind === 'baseline' || args.kind === 'baseline_agent') {
@@ -182,27 +193,65 @@ async function resolveBaselineInput(
   }
   const graph = await store.getGraph(requested.graphId);
   if (!graph) throw new GraphNotFoundError(requested.graphId);
-  if (requested.prompt) {
-    return { input: { ...requested, variables }, graphName: graph.name };
-  }
+  const { task, experiment } = await experimentForGraph(graph, variables);
+  return {
+    input: {
+      ...requested,
+      variables,
+      ...task,
+      benchmarkExperiment: experiment,
+      outcomeAssertions: experiment.outcomeAssertions,
+      graphVersion: graph.version,
+      ...(graph.assertions ? { assertions: graph.assertions } : {}),
+    },
+    graphName: graph.name,
+  };
+}
 
+async function experimentForGraph(graph: AgentGraph, variables: Record<string, unknown>) {
   const requests = (await store.listConversations())
     .filter((conversation) => conversation.graphId === graph.id)
     .flatMap((conversation) => conversation.messages)
     .filter((message) => message.role === 'user')
     .sort((a, b) => a.at.localeCompare(b.at))
     .map((message) => message.text);
-  const task = buildBaselineTask({ graph, requests, variables });
-  return {
-    input: {
-      ...requested,
-      variables,
-      ...task,
-      graphVersion: graph.version,
-      ...(graph.assertions ? { assertions: graph.assertions } : {}),
-    },
-    graphName: graph.name,
+  const tools = (await toolRegistry.list()).filter(
+    (tool) => tool.descriptor.availability === 'available' && !tool.descriptor.simulated,
+  );
+  const named = new Set<string>();
+  for (const node of graph.nodes) {
+    const cfg = node.config as Record<string, unknown>;
+    if (typeof cfg.tool === 'string') named.add(cfg.tool);
+    for (const key of ['availableTools', 'candidateTools'])
+      if (Array.isArray(cfg[key]))
+        for (const id of cfg[key]) if (typeof id === 'string') named.add(id);
+  }
+  const toolIds = tools
+    .filter((tool) => named.size === 0 || named.has(tool.descriptor.id))
+    .map((tool) => tool.descriptor.id);
+  // Explicit allowlist: never hash/serialize credentials or private user data.
+  const configuration = {
+    mockAll: config.mock.all,
+    browserBackend: config.browser.backend,
+    credentialSource: config.credentials.source,
+    browserCredentialSource: config.credentials.browserSource,
+    webSearch: { backend: config.webSearch.backend, mode: config.webSearch.mode },
+    agent: config.agent,
+    providers: Object.fromEntries(
+      Object.entries(config.providers).map(([id, cfg]) => [
+        id,
+        { mode: cfg.mode, models: cfg.models },
+      ]),
+    ),
+    tools: tools
+      .filter((tool) => toolIds.includes(tool.descriptor.id))
+      .map((tool) => ({
+        id: tool.descriptor.id,
+        version: tool.descriptor.version,
+        mode: tool.descriptor.executionMode,
+      })),
   };
+  return buildBenchmarkExperiment({ graph, requests, variables, configuration, toolIds });
 }
 
 /** A graph run is more useful named after its graph than after the playbook. */
@@ -228,7 +277,7 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
   const run = await store.getRun(id);
   if (!run) return null;
 
-  const [steps, approvals, egress, piiWithValues, scheduleDecisions, agentSessions] =
+  const [steps, approvals, egress, piiWithValues, scheduleDecisions, agentSessions, events] =
     await Promise.all([
       store.listSteps(id),
       store.listApprovals(id),
@@ -236,6 +285,7 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
       store.listPiiSpans(id),
       store.listScheduleDecisions(id),
       store.listSessionStates(id),
+      store.eventsSince(id, 0),
     ]);
 
   return {
@@ -246,6 +296,9 @@ export async function getRunDetail(id: string): Promise<RunDetail | null> {
     piiSpans: piiWithValues.map(stripPiiValue),
     scheduleDecisions,
     agentSessions,
+    toolLifecycle: events.flatMap(({ event }) =>
+      event.type === 'tool.lifecycle' ? [event.lifecycle] : [],
+    ),
   };
 }
 

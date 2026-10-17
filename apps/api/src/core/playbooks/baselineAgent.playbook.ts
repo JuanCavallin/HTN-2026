@@ -79,7 +79,12 @@ export const baselineAgentPlaybook = definePlaybook<BaselineAgentInput>({
           ...reply,
           exposedTools: agentTask.scheduleDecision.exposedTools.length,
           toolCalls: agentTask.toolCalls.length,
-          completion: agentTask.completionDecision.status,
+          // Benchmark success requires a verified `done`, the same bar a graph
+          // agent node is held to, so record both halves of the verdict.
+          completion: {
+            status: agentTask.completionDecision.status,
+            verified: agentTask.completionDecision.verified,
+          },
         }),
       ) as Json,
     };

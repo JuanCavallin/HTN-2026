@@ -72,11 +72,30 @@ export function Benchmarks() {
           <h1 className="text-lg font-semibold text-slate-100">Graph vs baseline</h1>
           <p className="mt-1 max-w-3xl text-sm text-slate-400">
             Every workflow run measured against the same task sent to a single frontier call (B0)
-            and to one frontier agent with every tool (B1). Success means every assertion passed;
-            savings count only on pairs where both sides succeeded.
+            and to one frontier agent with the same eligible tool pool (B1). Only matching server
+            experiment snapshots are paired. Success requires shared outcome checks and verified
+            agent completion; cost savings require fully priced successful pairs.
           </p>
         </div>
         <div className="flex items-center gap-3 text-sm">
+          <button
+            className="rounded-md border border-slate-700 px-2.5 py-1.5 text-slate-200"
+            disabled={!report}
+            onClick={() => {
+              if (!report) return;
+              const url = URL.createObjectURL(
+                new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }),
+              );
+              const anchor = document.createElement('a');
+              anchor.href = url;
+              anchor.download =
+                'benchmark-report-' + new Date().toISOString().slice(0, 10) + '.json';
+              anchor.click();
+              URL.revokeObjectURL(url);
+            }}
+          >
+            Export JSON
+          </button>
           <label className="flex items-center gap-2 text-slate-300">
             <input
               type="checkbox"
@@ -96,6 +115,12 @@ export function Benchmarks() {
       </header>
 
       {error && <p className="text-sm text-rose-400">{error}</p>}
+      {!!report?.ineligibleRunsExcluded && (
+        <p className="text-xs text-amber-300">
+          {report.ineligibleRunsExcluded} run(s) excluded: missing a current experiment snapshot,
+          outcome checks, or trusted execution provenance.
+        </p>
+      )}
       {!report && loading && (
         <div className="flex items-center gap-2 text-sm text-slate-500">
           <Spinner />
@@ -151,8 +176,12 @@ function ReportView({ report }: { report: BenchmarkReport }) {
       </section>
 
       {report.graphs.map((graph) => (
-        <Card key={graph.graphId} title={graph.graphName}>
+        <Card key={graph.graphId + graph.experimentFingerprint} title={graph.graphName}>
           <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              Experiment {graph.experimentFingerprint?.slice(0, 12)} · task, inputs, graph version,
+              tools and configuration frozen
+            </p>
             {!graph.hasAssertions && (
               <p className="text-xs text-amber-300">
                 This workflow has no assertions, so “success” only means the run finished — it does
@@ -235,7 +264,10 @@ function KpiRow({
             entry.bothSucceeded +
             ' of ' +
             entry.pairs +
-            ' pairs both succeeded'
+            ' pairs both succeeded' +
+            (entry.unpricedPairs
+              ? ' · ' + entry.unpricedPairs + ' excluded from cost savings: price or usage unknown'
+              : '')
           }
         />
       ))}
@@ -353,6 +385,13 @@ function SavingsLines({ savings }: { savings: PairedSaving[] }) {
               tokens {savingLabel(entry.medianTokenSaving, 'fewer', 'more')}, active time{' '}
               {savingLabel(entry.medianWallSaving, 'faster', 'slower')} — median over{' '}
               {entry.bothSucceeded} pair(s) where both succeeded.
+              {!!entry.unpricedPairs && (
+                <>
+                  {' '}
+                  {entry.unpricedPairs} successful pair(s) excluded from cost savings because price
+                  or usage is unknown.
+                </>
+              )}
             </>
           ) : (
             <>no pair where both succeeded yet.</>

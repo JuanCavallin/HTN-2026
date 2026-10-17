@@ -19,6 +19,8 @@ import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   assertionsForRun,
+  outcomeAssertionsForRun,
+  experimentForRun,
   evaluateAssertions,
   evaluateAssertionsAgainstResult,
   isBenchmarkArm,
@@ -41,6 +43,7 @@ interface Side {
   analytics: RunAnalytics;
   graph: AgentGraph | null;
   assertions: AssertionResult[];
+  pipelineAssertions: AssertionResult[];
 }
 
 function graphOf(run: Run): AgentGraph | null {
@@ -50,7 +53,7 @@ function graphOf(run: Run): AgentGraph | null {
 async function loadSide(id: string): Promise<Side> {
   const [detail, analytics] = await Promise.all([api.getRun(id), api.analytics(id)]);
   const graph = graphOf(detail.run);
-  return { run: detail.run, detail, analytics, graph, assertions: [] };
+  return { run: detail.run, detail, analytics, graph, assertions: [], pipelineAssertions: [] };
 }
 
 /**
@@ -59,15 +62,20 @@ async function loadSide(id: string): Promise<Side> {
  * without that copy borrows the graph side's assertions.
  */
 function withAssertions(side: Side, sides: Side[]): Side {
-  if (side.graph?.assertions) {
-    return { ...side, assertions: evaluateAssertions(side.graph.assertions, side.detail.steps) };
-  }
-  const own = assertionsForRun(side.run);
-  const borrowed = sides.find((other) => other.graph?.assertions)?.graph?.assertions ?? [];
-  const assertions = own.length > 0 ? own : side.run.kind !== 'graph' ? borrowed : [];
-  return assertions.length > 0
-    ? { ...side, assertions: evaluateAssertionsAgainstResult(assertions, side.run.result) }
-    : side;
+  void sides;
+  const outcomes = outcomeAssertionsForRun(side.run);
+  const pipeline = assertionsForRun(side.run).filter(
+    (item) => !outcomes.some((outcome) => outcome.id === item.id),
+  );
+  return {
+    ...side,
+    assertions:
+      side.run.kind === 'graph'
+        ? evaluateAssertions(outcomes, side.detail.steps)
+        : evaluateAssertionsAgainstResult(outcomes, side.run.result),
+    pipelineAssertions:
+      side.run.kind === 'graph' ? evaluateAssertions(pipeline, side.detail.steps) : [],
+  };
 }
 
 export function Compare() {
@@ -125,6 +133,9 @@ export function Compare() {
   const graphs = sides.map((side) => side.graph).filter((graph): graph is AgentGraph => !!graph);
   const sameGraph = graphs.length > 1 && graphs.every((graph) => graph.id === graphs[0]!.id);
   const updating = sides.some((side) => !isTerminal(side.run.status));
+  const experiment = experimentForRun(sides[0]!.run)?.fingerprint;
+  const matchedExperiment =
+    !!experiment && sides.every((side) => experimentForRun(side.run)?.fingerprint === experiment);
   const columns = { gridTemplateColumns: '10rem repeat(' + sides.length + ', minmax(0, 1fr))' };
   const row = (label: string, render: (side: Side) => string) => (
     <Row label={label} values={sides.map(render)} />
@@ -143,6 +154,13 @@ export function Compare() {
           Measurements refresh while any run is active; values may be partial.
         </p>
       )}
+      <p className={'text-xs ' + (matchedExperiment ? 'text-slate-400' : 'text-amber-300')}>
+        {matchedExperiment
+          ? 'Matching experiment ' +
+            experiment!.slice(0, 12) +
+            ': shared task, inputs, outcome checks and configuration.'
+          : 'These runs do not share a current experiment snapshot. Measurements are shown for inspection; they are not a matched benchmark.'}
+      </p>
 
       <div className="grid gap-x-4 gap-y-1 text-sm" style={columns}>
         <div />
@@ -168,13 +186,25 @@ export function Compare() {
       </div>
 
       {sides.some((side) => side.assertions.length > 0) && (
-        <Card title="Correctness (assertions)">
+        <Card title="Shared outcome checks">
           <div
             className="grid gap-4"
             style={{ gridTemplateColumns: columns.gridTemplateColumns.replace('10rem ', '') }}
           >
             {sides.map((side) => (
               <AssertionList key={side.run.id} assertions={side.assertions} />
+            ))}
+          </div>
+        </Card>
+      )}
+      {sides.some((side) => side.pipelineAssertions.length > 0) && (
+        <Card title="Graph pipeline checks (not graded against baselines)">
+          <div
+            className="grid gap-4"
+            style={{ gridTemplateColumns: columns.gridTemplateColumns.replace('10rem ', '') }}
+          >
+            {sides.map((side) => (
+              <AssertionList key={side.run.id} assertions={side.pipelineAssertions} />
             ))}
           </div>
         </Card>

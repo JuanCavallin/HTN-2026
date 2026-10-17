@@ -390,6 +390,37 @@ async function main(): Promise<void> {
     assert.match(stopped.text, /no available model is allowed to see that/);
     assert.deepEqual(stopped.toolCalls, []);
     assert.equal(backendCalls, callsBefore, 'no model is called for data it may not see');
+
+    // The all-tools baseline pins a cost tier. A pin is a preference among
+    // ELIGIBLE routes, never a way past the privacy check (audit P0).
+    for (const label of ['private', 'secret', 'local_only'] as const) {
+      const pinned = await sessions.create({
+        runId: 'gateway_pinned_' + label,
+        stepId: 'gateway_pinned_step_' + label,
+        harness: 'hermes',
+        objective: 'Summarize SENSITIVE_MARKER.',
+        dataLabels: [label],
+        budget: { stepsRemaining: 1 },
+        pinnedCostTier: CLOUD_TOOL_ROUTE.costTier,
+      });
+      await sessions.beginTurn(pinned.id);
+      const pinnedCredentials = sessions.issueGatewayCredentials(pinned.id);
+      let pinnedCalls = 0;
+      const refused = await new ModelGatewayService(decisions, sessions, model, catalog, bus, {
+        modelRoutes: () => [CLOUD_TOOL_ROUTE],
+        backend: {
+          async complete() {
+            pinnedCalls += 1;
+            return { text: 'leaked', tokensIn: 1, tokensOut: 1 };
+          },
+        },
+      }).complete(
+        { messages: [{ role: 'user', content: 'Summarize SENSITIVE_MARKER.' }] },
+        await sessions.resolveGatewayToken(pinnedCredentials.model, 'model'),
+      );
+      assert.equal(pinnedCalls, 0, 'a pinned ' + label + ' session never reaches a cloud route');
+      assert.deepEqual(refused.toolCalls, []);
+    }
   }
 
   console.log('model gateway check: ok');

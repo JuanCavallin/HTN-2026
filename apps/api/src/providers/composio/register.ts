@@ -10,6 +10,7 @@ import type {
 import type { ProviderConfig } from '../../config.js';
 import type { InMemoryToolExecutorRegistry } from '../../core/tools/executors.js';
 import type { InMemoryToolRegistry } from '../../core/tools/registry.js';
+import { conditionalWriteField, isOfficeToolkit, normalizeComposioResult } from './results.js';
 
 export interface ClassifiedTool {
   toolId: string;
@@ -296,6 +297,21 @@ export class ComposioToolCatalog {
         destinationFor: ({ arguments: args }) =>
           destinationFrom(args) ?? 'composio://' + tool.toolkit + '/' + tool.name,
         execute: async (action, ctx) => {
+          const conditionalField =
+            isOfficeToolkit(tool) && classified.baselineEffect !== 'read'
+              ? conditionalWriteField(tool)
+              : null;
+          if (
+            conditionalField &&
+            (!isRecord(action.arguments) ||
+              typeof action.arguments[conditionalField] !== 'string' ||
+              !String(action.arguments[conditionalField]).trim() ||
+              String(action.arguments[conditionalField]).trim() === '*')
+          ) {
+            throw new Error(
+              'RESOURCE_VERSION_REQUIRED: supply the discovered conditional-write field before reviewing this Office edit.',
+            );
+          }
           const called = await this.adapter.callTool(
             {
               name: tool.name,
@@ -316,18 +332,20 @@ export class ComposioToolCatalog {
             (called.meta.mode === 'live'
               ? ' through the connected account.'
               : '; no external resource changed.');
-          const outputLabels =
-            classified.baselineEffect === 'read'
-              ? mergeLabels(action.dataLabels, ['private'])
-              : [...action.dataLabels];
+          const normalized = normalizeComposioResult(
+            tool,
+            called.data,
+            action.dataLabels,
+            called.meta.mode === 'live' ? 'live' : 'mock',
+            [this.cfg.apiKey ?? ''],
+          );
           return {
-            // Provider content stays outside the run trace and model context.
-            output: executionReceipt(tool.name, called.data),
+            // Only the receipt is persisted; bounded result data travels on
+            // local MCP after the broker tightens canonical session labels.
+            output: normalized.receipt,
+            modelOutput: normalized.modelOutput,
             summary,
-            sanitizedSummary: outputLabels.every((label) => label === 'public')
-              ? summary
-              : undefined,
-            dataLabels: outputLabels,
+            dataLabels: normalized.dataLabels,
             verified: classified.baselineEffect === 'read',
             evidenceVerified: false,
             executionMode: called.meta.mode === 'live' ? 'live' : 'mock',

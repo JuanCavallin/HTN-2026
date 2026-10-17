@@ -76,6 +76,8 @@ export interface ToolAction {
   previewFingerprint?: string;
   /** Bound by the broker from trusted descriptor metadata, not model arguments. */
   accountRef?: string;
+  /** Server-prepared operation/target bound to the exact human review. */
+  review?: Json;
 }
 
 export type ActionPolicy = 'auto' | 'verify' | 'ask_user' | 'deny';

@@ -20,13 +20,17 @@ import { store } from '../store/index.js';
 const RUNS_PER_ARM = 300;
 
 async function sampleFor(run: Run): Promise<BenchmarkSample | null> {
-  const [steps, egress, approvals, scheduleDecisions] = await Promise.all([
+  const [steps, egress, approvals, scheduleDecisions, events] = await Promise.all([
     store.listSteps(run.id),
     store.listEgress(run.id),
     store.listApprovals(run.id),
     store.listScheduleDecisions(run.id),
+    store.eventsSince(run.id, 0),
   ]);
-  return benchmarkSample({ run, steps, egress, approvals, scheduleDecisions });
+  const toolLifecycle = events.flatMap(({ event }) =>
+    event.type === 'tool.lifecycle' ? [event.lifecycle] : [],
+  );
+  return benchmarkSample({ run, steps, egress, approvals, scheduleDecisions, toolLifecycle });
 }
 
 export async function loadBenchmarkSamples(): Promise<{

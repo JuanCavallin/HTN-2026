@@ -146,14 +146,17 @@ const uncertain = createBrowserExecutor({
     rationale: 'weak match',
   }),
 });
-// Jev's pick is followed at any confidence. Refusing it sent the model back
-// to retry the same click until its tool budget ran out.
+const uncertainAction = action('localbrowser.click', { sessionId: 'session_1' });
+const preparation = await uncertain.prepareReview!(uncertainAction, context);
+assert.equal(preparation.requiresApproval, true);
+await assert.rejects(uncertain.execute(uncertainAction, context), /requires human review/);
+assert.equal(calls.performed, 1, 'an uncertain target never executes before review');
 const lowPick = await uncertain.execute(
-  action('localbrowser.click', { sessionId: 'session_1' }),
-  context,
+  { ...uncertainAction, review: preparation.review },
+  { ...context, policyRule: 'human-approved-exact-tool-action' },
 );
-assert.equal(calls.performed, 2, 'a low-confidence target still executes');
-assert.match(lowPick.summary, /low-confidence pick, 0\.40/);
+assert.equal(calls.performed, 2, 'the same prepared target executes once after approval');
+assert.match(lowPick.summary, /reviewed browser target/);
 assert.equal(calls.closed, 0, 'bound sessions are not closed by an action');
 
 assert.equal(calls.closed, 0, 'an explicitly opened session stays available during the run');
@@ -174,13 +177,15 @@ assert.deepEqual(announced, ['opened:session_1', 'closed:session_1']);
     },
     async navigate(input) {
       pool.navigated += 1;
-      if (pool.failNavigate) return { ok: false, error: failure('expired'), meta: meta('navigate') };
+      if (pool.failNavigate)
+        return { ok: false, error: failure('expired'), meta: meta('navigate') };
       return { ok: true, data: { url: input.url }, meta: meta('navigate') };
     },
     async extract<T>(input: { sessionId: string; instruction: string }) {
       pool.scopes.push(input.instruction);
       // No <main> on this page: the scoped read is thin, the whole page is not.
-      const text = input.instruction === 'main' ? '' : 'Product page. Price $120. In stock. '.repeat(10);
+      const text =
+        input.instruction === 'main' ? '' : 'Product page. Price $120. In stock. '.repeat(10);
       return { ok: true, data: { text } as T, meta: meta('extract') };
     },
     async closeSession() {
@@ -221,7 +226,9 @@ assert.deepEqual(announced, ['opened:session_1', 'closed:session_1']);
   await pooled.closeRunSessions(context.runId, context);
   assert.equal(pool.closed, 2, 'run cleanup releases the pooled session');
 
-  const secret = { ...research('localbrowser.read', { url: 'https://example.com', instruction: 'x' }) };
+  const secret = {
+    ...research('localbrowser.read', { url: 'https://example.com', instruction: 'x' }),
+  };
   const opensBefore = pool.opened;
   await pooled.execute({ ...secret, dataLabels: ['private'] }, context);
   assert.equal(pool.opened, opensBefore + 1, 'non-public research is never pooled');

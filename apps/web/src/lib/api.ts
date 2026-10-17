@@ -28,6 +28,7 @@ import type {
   ActionPreview,
   BrowserViewer,
   BenchmarkReport,
+  ToolLifecycleEvent,
 } from '@htn/shared';
 export type { BrowserViewer } from '@htn/shared';
 
@@ -53,6 +54,7 @@ export interface RunDetail {
   approvals: Approval[];
   egress: EgressEvent[];
   piiSpans: PiiSpan[];
+  toolLifecycle?: ToolLifecycleEvent[];
 }
 
 export class ApiError extends Error {

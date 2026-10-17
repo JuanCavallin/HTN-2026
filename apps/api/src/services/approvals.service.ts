@@ -91,8 +91,15 @@ async function decideApprovalLocked(id: string, body: ApprovalDecision): Promise
     throw new ApprovalConflictError(
       'This run is no longer waiting on the approval. Start a new action.',
     );
-  const handoff = existing.proposedAction;
-  if (isRecord(handoff) && handoff.kind === 'human_handoff') {
+  const proposed = existing.proposedAction;
+  const handoff =
+    isRecord(proposed) && isRecord(proposed.review) && proposed.review.kind === 'browser_handoff'
+      ? proposed.review
+      : proposed;
+  if (
+    isRecord(handoff) &&
+    (handoff.kind === 'human_handoff' || handoff.kind === 'browser_handoff')
+  ) {
     if (decision === 'revised')
       throw new ApprovalRevisionError(
         'A browser handoff cannot be revised into a different target or continuation.',
@@ -235,6 +242,7 @@ async function validateExactToolRevision(approval: Approval, revised: unknown): 
     'dataLabels',
     'previewFingerprint',
     'accountRef',
+    'review',
   ]) {
     if (JSON.stringify(proposed[key]) !== JSON.stringify(revised[key]))
       throw new ApprovalRevisionError('Revision cannot change ' + key + '.');

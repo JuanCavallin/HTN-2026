@@ -12,9 +12,12 @@ import assert from 'node:assert/strict';
 import {
   benchmarkSample,
   buildBenchmarkReport,
+  canAutoApproveMockBenchmark,
   modelCostCents,
+  outcomeAssertionsForGraph,
   pairedSaving,
   rollup,
+  type ActionEvidence,
   type AgentGraph,
   type Approval,
   type BenchmarkSample,
@@ -22,6 +25,7 @@ import {
   type Json,
   type Run,
   type Step,
+  type ToolLifecycleEvent,
 } from '@htn/shared';
 import {
   answerContract,
@@ -158,19 +162,44 @@ check(
   demoTask.prompt.includes('Case reference ACME-1.'),
 );
 check(
-  'judge assertion becomes an answer field with its options',
+  'judge assertion becomes an answer field keyed by its assertion id, with options',
   JSON.stringify(demoTask.answerFields) ===
-    JSON.stringify([{ name: 'choice', options: ['file_correction', 'no_action'] }]),
+    JSON.stringify([{ name: 'a_verdict', options: ['file_correction', 'no_action'] }]),
   JSON.stringify(demoTask.answerFields),
 );
 check(
   'pipeline-property assertions are NOT asked of the baseline',
-  !demoTask.answerFields.some((f) => f.name === 'spans'),
+  !demoTask.answerFields.some((f) => f.name === 'a_pii' || f.name === 'spans'),
 );
 check(
-  'contract names the field and options, never the expected value',
-  answerContract(demoTask.answerFields).includes('"choice": "file_correction" | "no_action"'),
+  'contract asks for outcomes by assertion id, never the expected value',
+  answerContract(demoTask.answerFields).includes(
+    '"outcomes": {"a_verdict": "file_correction" | "no_action"}',
+  ),
+  answerContract(demoTask.answerFields),
 );
+{
+  // Two nodes ending in the same field name must not collide.
+  const twoChoices = {
+    ...demo,
+    assertions: [
+      { id: 'x1', description: 'd', path: 'nodes.verdict.choice', expected: 'no_action' },
+      {
+        id: 'x2',
+        description: 'd',
+        path: 'nodes.verdict.choice',
+        scope: 'outcome' as const,
+        expected: 'file_correction',
+      },
+    ],
+  } as AgentGraph;
+  const fields = buildBaselineTask({ graph: twoChoices, requests: [], variables: {} }).answerFields;
+  check(
+    'answer fields keep a unique identity per assertion',
+    fields.map((f) => f.name).join(',') === 'x1,x2',
+    JSON.stringify(fields),
+  );
+}
 const chatTask = buildBaselineTask({ graph: demo, requests: ['Find X', 'Also Y'], variables: {} });
 check(
   'chat requests become the prompt, refinements kept',
@@ -185,18 +214,134 @@ check(
 check('reply parser returns null on no JSON', parseBaselineReply('no json here') === null);
 
 console.log('Benchmark');
-const graphWithAssertion = { ...demo, assertions: [demo.assertions![0]!] } as AgentGraph;
 const baselineSample = benchmarkSample({
   run: run({
     id: 'b1',
     kind: 'baseline',
-    result: { choice: 'file_correction' },
-    input: { assertions: graphWithAssertion.assertions } as Json,
+    result: { outcomes: { a_verdict: 'file_correction' } },
+    // The demo's pipeline assertion (a_pii, 3 redacted spans) travels along but
+    // must not be graded against a baseline that cannot produce it.
+    input: {
+      assertions: demo.assertions,
+      outcomeAssertions: outcomeAssertionsForGraph(demo),
+    } as unknown as Json,
   }),
   steps: [],
   egress: [egress({ runId: 'b1', tokensIn: 10, tokensOut: 10, estimatedCostCents: 2 })],
+  toolLifecycle: [],
 });
-check('baseline success is judged by its snapshotted assertions', baselineSample?.success === true);
+check(
+  'baseline success is judged only by shared outcome assertions',
+  baselineSample?.success === true && baselineSample.assertionsTotal === 1,
+  JSON.stringify(baselineSample),
+);
+check(
+  'a top-level field with the old name does not satisfy an outcome',
+  benchmarkSample({
+    run: run({
+      id: 'b2',
+      kind: 'baseline',
+      result: { choice: 'file_correction' },
+      input: { outcomeAssertions: outcomeAssertionsForGraph(demo) } as unknown as Json,
+    }),
+    steps: [],
+    egress: [],
+  })?.success === false,
+);
+
+function lifecycle(mode: 'live' | 'mock'): ToolLifecycleEvent {
+  return {
+    id: 'tl_' + mode,
+    runId: 'run_1',
+    stepId: 's1',
+    sessionStateId: 'ss',
+    phase: 'succeeded',
+    action: { id: 'act_' + mode } as ToolLifecycleEvent['action'],
+    evidence: { executionMode: mode } as ToolLifecycleEvent['evidence'],
+    at: iso(0),
+  };
+}
+const liveModelMockSearch = benchmarkSample({
+  run: run({ id: 'g_mix', input: { graphSnapshot: demo } as unknown as Json }),
+  steps: [],
+  // A real model call and no mock egress row: the old classifier said "live".
+  egress: [egress({ runId: 'g_mix', tokensIn: 10, tokensOut: 10, estimatedCostCents: 1 })],
+  toolLifecycle: [lifecycle('mock')],
+});
+check(
+  'a live model with mock tool evidence is classified as mocked',
+  liveModelMockSearch?.mocked === true,
+);
+check(
+  'missing lifecycle history leaves provenance unknown',
+  benchmarkSample({ run: run({ id: 'g_old' }), steps: [], egress: [] })?.provenanceKnown === false,
+);
+check(
+  'an agent baseline without a verified done verdict is not a success',
+  benchmarkSample({
+    run: run({
+      id: 'b1_unverified',
+      kind: 'baseline_agent',
+      result: {
+        outcomes: { a_verdict: 'file_correction' },
+        completion: { status: 'blocked', verified: false },
+      },
+      input: { outcomeAssertions: outcomeAssertionsForGraph(demo) } as unknown as Json,
+    }),
+    steps: [],
+    egress: [],
+  })?.success === false,
+);
+
+console.log('Approval automation');
+const pendingWrite = {
+  id: 'ap',
+  runId: 'r',
+  status: 'pending',
+  proposedAction: { actionId: 'act_w', previewFingerprint: 'fp' },
+} as unknown as Approval;
+const mockEvidence: ActionEvidence = {
+  actionId: 'act_w',
+  runId: 'r',
+  resourceRef: 'x',
+  kind: 'document',
+  phase: 'proposed',
+  evidenceLevel: 'arguments_only',
+  fingerprint: 'fp',
+  summary: '',
+  dataLabels: ['public'],
+  executionMode: 'mock',
+} as ActionEvidence;
+check(
+  'an empty ledger is not proof a pending action is mocked',
+  !canAutoApproveMockBenchmark({
+    mockAll: false,
+    providers: [{ mode: 'live' }],
+    approval: pendingWrite,
+    evidence: [{ ...mockEvidence, executionMode: 'live' }],
+    egress: [],
+  }),
+);
+check(
+  'live evidence on the pending action blocks auto-approval even under MOCK_ALL',
+  !canAutoApproveMockBenchmark({
+    mockAll: true,
+    providers: [{ mode: 'mock' }],
+    approval: pendingWrite,
+    evidence: [{ ...mockEvidence, executionMode: 'live' }],
+    egress: [],
+  }),
+);
+check(
+  'explicit mock provenance for the exact pending action allows auto-approval',
+  canAutoApproveMockBenchmark({
+    mockAll: true,
+    providers: [{ mode: 'mock' }],
+    approval: pendingWrite,
+    evidence: [mockEvidence],
+    egress: [],
+  }),
+);
 
 function sample(overrides: Partial<BenchmarkSample>): BenchmarkSample {
   return {
@@ -216,6 +361,10 @@ function sample(overrides: Partial<BenchmarkSample>): BenchmarkSample {
     wallMs: 1000,
     humanWaitMs: 0,
     mocked: false,
+    experimentFingerprint: 'f'.repeat(64),
+    qualityEligible: true,
+    provenanceKnown: true,
+    completionVerified: true,
     ...overrides,
   };
 }
@@ -252,5 +401,34 @@ check(
   'cost per success = spend / successes',
   close(report.overall.baseline?.costPerSuccessCents ?? undefined, 40 / 2),
 );
+check(
+  'runs from a different experiment snapshot never pair',
+  pairedSaving('baseline', graphRuns, [
+    sample({ runId: 'b_x', arm: 'baseline', pairId: 'p1', experimentFingerprint: 'e'.repeat(64) }),
+  ]).pairs === 0,
+);
+{
+  const unpriced = pairedSaving(
+    'baseline',
+    [sample({ runId: 'g_u', pairId: 'u1', costCents: 1, unpricedCalls: 1 })],
+    [sample({ runId: 'b_u', arm: 'baseline', pairId: 'u1', costCents: 10 })],
+  );
+  check(
+    'pairs with unpriced calls are excluded from cost savings',
+    unpriced.bothSucceeded === 1 &&
+      unpriced.unpricedPairs === 1 &&
+      unpriced.medianCostSaving === null,
+  );
+}
+{
+  const withLegacy = buildBenchmarkReport(
+    [...graphRuns, ...baselines, sample({ runId: 'legacy', experimentFingerprint: undefined })],
+    { g1: 'Demo' },
+  );
+  check(
+    'runs without an experiment snapshot are excluded and counted',
+    withLegacy.ineligibleRunsExcluded === 1 && withLegacy.overall.graph?.runs === 3,
+  );
+}
 
 console.log('\n' + checks + ' checks passed.');

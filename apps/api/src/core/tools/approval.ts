@@ -123,6 +123,7 @@ function exactActionJson(action: ToolAction): Json {
     arguments: trace.arguments,
     destination: action.destination ?? null,
     ...(action.accountRef ? { accountRef: action.accountRef } : {}),
+    ...(action.review ? { review: action.review } : {}),
     dataLabels: action.dataLabels,
     ...(action.previewFingerprint ? { previewFingerprint: action.previewFingerprint } : {}),
   };
