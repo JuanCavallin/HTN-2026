@@ -234,6 +234,12 @@ export interface AgentSessionState {
    * graph against "frontier model, every tool" as the design spec asks.
    */
   pinnedCostTier?: ModelCostTier;
+  /**
+   * A graph's frozen route tier for this task. Unlike the pin it is only a
+   * preference among ELIGIBLE routes: with none of that tier eligible, Jev
+   * picks as usual.
+   */
+  preferredModelTier?: import('./providers.js').ModelTier;
   /** Server-side resource binding; never included in model context by default. */
   boundBrowserSessionId?: string;
   selectedToolIds: string[];

@@ -426,6 +426,60 @@ export const graphAssertionSchema = z.object({
 export type GraphAssertion = z.infer<typeof graphAssertionSchema>;
 
 /**
+ * Decisions frozen for a saved graph, so a run executes them instead of asking
+ * Jev again. SERVER-OWNED: written by the compile step or learned from a run,
+ * never taken from a client save. Every entry is only a cache — the runtime
+ * reuses it when its node hash, decision-provider mode and exact tool set (ids
+ * and versions) still match, and otherwise asks Jev as if it were absent.
+ */
+const compiledToolVersionsSchema = z.record(z.string(), z.string());
+
+export const compiledAgentRouteSchema = z.object({
+  kind: z.literal('agent_route'),
+  nodeHash: z.string(),
+  decisionMode: z.string(),
+  /** The candidate set the route was decided over: tool id -> descriptor version. */
+  tools: compiledToolVersionsSchema,
+  privacy: z.enum(['cloud', 'private']),
+  intelligence: z.enum(['low', 'high']),
+  privacyConfidence: z.number(),
+  intelligenceConfidence: z.number(),
+  modelTier: z.enum(['local', 'cheap', 'standard', 'frontier']),
+  exposedTools: z.array(z.string()),
+  confidence: z.number(),
+  rationale: z.string().optional(),
+  source: z.enum(['compile', 'run']),
+  at: z.string(),
+});
+
+export const compiledDispatchSchema = z.object({
+  kind: z.literal('dispatch'),
+  nodeHash: z.string(),
+  decisionMode: z.string(),
+  /** The registered options the choice was made among, in order. */
+  options: z.array(z.string()),
+  choice: z.string(),
+  confidence: z.number(),
+  source: z.enum(['compile', 'run']),
+  at: z.string(),
+});
+
+export const compiledNodeDecisionSchema = z.discriminatedUnion('kind', [
+  compiledAgentRouteSchema,
+  compiledDispatchSchema,
+]);
+
+export const compiledGraphDecisionsSchema = z.object({
+  protocol: z.literal('agentos-graph-compile-v1'),
+  nodes: z.record(z.string(), compiledNodeDecisionSchema).default({}),
+});
+
+export type CompiledAgentRoute = z.infer<typeof compiledAgentRouteSchema>;
+export type CompiledDispatch = z.infer<typeof compiledDispatchSchema>;
+export type CompiledNodeDecision = z.infer<typeof compiledNodeDecisionSchema>;
+export type CompiledGraphDecisions = z.infer<typeof compiledGraphDecisionsSchema>;
+
+/**
  * Returns the node ids forming a cycle, or null when the graph is acyclic.
  * Exported because the interpreter and the editor both need this answer, and a
  * cycle must never reach the executor: it awaits a promise map, so a cycle is a
@@ -507,6 +561,8 @@ export const agentGraphSchema = z
     createdAt: z.string(),
     updatedAt: z.string(),
     assertions: z.array(graphAssertionSchema).optional(),
+    /** Server-owned frozen Jev decisions; see compiledGraphDecisionsSchema. */
+    compiled: compiledGraphDecisionsSchema.optional(),
   })
   .superRefine((graph, ctx) => {
     const assertionIds = new Set<string>();

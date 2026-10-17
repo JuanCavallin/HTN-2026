@@ -317,6 +317,18 @@ export class ModelGatewayService {
         .join(','),
     ].join('|');
     const reusedRouteId = pinnedRoute ? undefined : this.taskModelChoices.get(choiceKey);
+    // A compiled graph route already chose this task's tier. Take an ELIGIBLE
+    // route of that tier without asking Jev; with none eligible (labels have
+    // tightened, say), Jev picks among what is left as usual.
+    const tier = session.preferredModelTier;
+    const preferredRoute =
+      pinnedRoute || reusedRouteId || !tier
+        ? undefined
+        : modelCandidates.find((route) =>
+            tier === 'local'
+              ? route.deployment === 'local'
+              : route.deployment !== 'local' && route.costTier === tier,
+          );
     try {
       modelDecision = pinnedRoute
         ? {
@@ -326,7 +338,13 @@ export class ModelGatewayService {
           }
         : reusedRouteId
           ? { selectedRouteId: reusedRouteId, confidence: 1, reasonCodes: ['task-model-reused'] }
-          : await this.decisionService.selectModel(decisionState, modelCandidates, callContext);
+          : preferredRoute
+            ? {
+                selectedRouteId: preferredRoute.id,
+                confidence: 1,
+                reasonCodes: ['compiled-model-tier-' + tier],
+              }
+            : await this.decisionService.selectModel(decisionState, modelCandidates, callContext);
     } catch (error) {
       if (!(error instanceof NoEligibleModelRouteError)) throw error;
       // The session now holds data no available model may see -- typically a
@@ -343,9 +361,9 @@ export class ModelGatewayService {
       (route) => route.id === modelDecision.selectedRouteId,
     );
     if (!selectedRoute) throw new Error('Selected model route is no longer available.');
-    // A reused pick is not a new decision: logging it again would show Jev
-    // calls that never happened. The `requested` lifecycle still names the route.
-    if (!reusedRouteId) {
+    // A reused or compiled pick is not a new Jev decision: logging one would
+    // show calls that never happened. The `requested` lifecycle names the route.
+    if (!reusedRouteId && !preferredRoute) {
       await this.emitDecision(
         session.runId,
         session.stepId,

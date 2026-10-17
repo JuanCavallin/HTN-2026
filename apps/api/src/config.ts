@@ -97,6 +97,12 @@ const envSchema = z.object({
   AGENT_MAX_DURATION_MS: z.coerce.number().int().positive().default(300_000),
   AGENT_MAX_TOOL_CALLS_PER_TURN: z.coerce.number().int().positive().default(8),
   AGENT_NETWORK_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+  // Freeze graph-level Jev decisions (agent tool grants and tiers, fixed
+  // dispatch choices) at save time and reuse them in runs. On unless "off".
+  GRAPH_COMPILE: z
+    .string()
+    .optional()
+    .transform((v) => !/^(0|false|no|off)$/i.test(v ?? '')),
   BROWSER_MAX_SESSIONS: z.coerce.number().int().positive().default(2),
   BROWSER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BROWSER_DECISION_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
@@ -346,6 +352,9 @@ export const config = Object.freeze({
     dsn: env.SENTRY_DSN,
     tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
     release: env.SENTRY_RELEASE,
+  },
+  graphCompile: {
+    enabled: env.GRAPH_COMPILE,
   },
   agent: {
     maxDurationMs: env.AGENT_MAX_DURATION_MS,

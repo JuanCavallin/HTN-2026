@@ -487,6 +487,51 @@ async function main(): Promise<void> {
     assert.equal(backendRoute?.id, TOOL_ROUTE.id, 'private data stays on the local route');
   }
 
+  {
+    // A compiled graph route's tier picks the model with no Jev call, but only
+    // among eligible routes: an ineligible tier falls back to Jev.
+    const counting = new DecisionService(createJev({ mode: 'mock', keyVar: 'JEV_API_KEY' }));
+    const realSelect = counting.selectModel.bind(counting);
+    let selections = 0;
+    counting.selectModel = async (...args) => {
+      selections += 1;
+      return realSelect(...args);
+    };
+    const tiered = new ModelGatewayService(counting, sessions, model, catalog, bus, {
+      modelRoutes: () => [TOOL_ROUTE, CLOUD_TOOL_ROUTE],
+      backend: {
+        async complete(input) {
+          backendRoute = input.route;
+          return { text: 'ok', tokensIn: 1, tokensOut: 1 };
+        },
+      },
+    });
+    const tierCall = async (labels: ('public' | 'private')[], tier: 'standard' | 'frontier') => {
+      const task = await sessions.create({
+        runId: 'gateway_tier_' + labels.join('_') + '_' + tier,
+        stepId: 'gateway_tier_step',
+        harness: 'hermes',
+        objective: 'Summarize notes.',
+        sanitizedObjective: 'Summarize notes.',
+        dataLabels: labels,
+        budget: { stepsRemaining: 1 },
+        preferredModelTier: tier,
+      });
+      await sessions.beginTurn(task.id);
+      const issued = sessions.issueGatewayCredentials(task.id);
+      return tiered.complete(
+        { messages: [{ role: 'user', content: 'Summarize notes.' }] },
+        await sessions.resolveGatewayToken(issued.model, 'model'),
+      );
+    };
+    await tierCall(['public'], 'standard');
+    assert.equal(selections, 0, 'an eligible compiled tier needs no Jev model call');
+    assert.equal(backendRoute?.id, CLOUD_TOOL_ROUTE.id, 'the route of that tier is used');
+    await tierCall(['private'], 'standard');
+    assert.equal(selections, 1, 'with no eligible route of that tier, Jev picks');
+    assert.equal(backendRoute?.id, TOOL_ROUTE.id, 'and private data still stays local');
+  }
+
   console.log('model gateway check: ok');
 }
 

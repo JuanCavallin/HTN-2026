@@ -32,6 +32,7 @@ import { graphAncestorIds } from '@htn/shared';
 import type { PlaybookContext, PlaybookOutcome } from '../playbooks/types.js';
 import { collectRefs, lookup, resolveRefs, type RefScope } from './refs.js';
 import { toolRisk, UNKNOWN_TOOL_ACTION_KIND } from './toolRisk.js';
+import { isStaticDispatch, nodeHash, usableDispatch } from './compile.js';
 
 /* -------------------------------------------------------------------------- */
 /* Node outcomes                                                              */
@@ -321,7 +322,7 @@ async function executeNode(
     case 'tool':
       return runTool(ctx, node, scope, lease);
     case 'dispatch':
-      return runDispatch(ctx, node, scope, lease);
+      return runDispatch(ctx, node, scope, lease, graph);
     case 'judge':
       return runJudge(ctx, node, scope);
     case 'agent_task':
@@ -654,6 +655,7 @@ async function runDispatch(
   node: Extract<GraphNode, { type: 'dispatch' }>,
   scope: RefScope,
   lease: SessionLease,
+  graph: AgentGraph,
 ): Promise<NodeResult> {
   const cfg = resolveRefs(node.config, scope);
 
@@ -696,14 +698,39 @@ async function runDispatch(
       }
 
       const decider = ctx.provider('decision');
-      const decision = await decider.decide(
-        {
-          question: cfg.goal,
+      // A goal with no {{refs}} asks the same question every run, so the
+      // choice frozen at save time is reused while the options are unchanged.
+      const staticGoal = isStaticDispatch(node);
+      const hash = staticGoal ? nodeHash(node) : '';
+      const frozen = staticGoal
+        ? usableDispatch(graph.compiled?.nodes[node.id], {
+            nodeHash: hash,
+            decisionMode: decider.mode,
+            options,
+          })
+        : undefined;
+      const decision = frozen
+        ? { ok: true as const, data: { choice: frozen.choice, confidence: frozen.confidence } }
+        : await decider.decide(
+            {
+              question: cfg.goal,
+              options,
+              evidence: cfg.evidence,
+            },
+            ctx.callContext({ stepId: step.id, policyRule: 'graph-node-tool-selection' }),
+          );
+      if (staticGoal && !frozen && decision.ok && options.includes(decision.data.choice)) {
+        await ctx.recordCompiledDecision?.(graph.id, node.id, {
+          kind: 'dispatch',
+          nodeHash: hash,
+          decisionMode: decider.mode,
           options,
-          evidence: cfg.evidence,
-        },
-        ctx.callContext({ stepId: step.id, policyRule: 'graph-node-tool-selection' }),
-      );
+          choice: decision.data.choice,
+          confidence: decision.data.confidence,
+          source: 'run',
+          at: new Date().toISOString(),
+        });
+      }
 
       // Fail closed, exactly as runAgentTask does: a decision-layer outage must
       // not widen what can be called. With no choice there is nothing to run.
@@ -729,7 +756,7 @@ async function runDispatch(
         availableTools: cfg.candidateTools,
         exposedTools: [tool],
         confidence: decision.data.confidence,
-        rule: 'dispatch-selected-single-tool',
+        rule: frozen ? 'dispatch-compiled-single-tool' : 'dispatch-selected-single-tool',
       });
 
       const toolArgs = await dispatchArgs(ctx, cfg, tool, step.id);
@@ -827,6 +854,11 @@ async function runAgentTaskNode(
     maxTurns: cfg.maxTurns,
     maxDurationMs: cfg.maxDurationMs,
     maxFailedToolCalls: cfg.maxFailedToolCalls,
+    compiledRoute: {
+      graphId: graph.id,
+      nodeHash: nodeHash(node),
+      entry: graph.compiled?.nodes[node.id],
+    },
   });
 
   return {

@@ -10,6 +10,7 @@
 import type {
   Capability,
   CapabilityMap,
+  CompiledNodeDecision,
   CompletionDecision,
   DataLabel,
   DecisionState,
@@ -35,6 +36,8 @@ import { classify } from './risk.js';
 import type { DecisionService } from './decisions/service.js';
 import type { SessionStateService } from './sessions/service.js';
 import type { ToolRegistry } from './tools/registry.js';
+import { eligibleTaskTools, mockTwinsOfLiveTools } from './tools/taskEligibility.js';
+import { toolVersions, usableAgentRoute } from './graph/compile.js';
 import { fanOut, type FanOutOutcome } from './swarm.js';
 import { getPlaybook } from './playbooks/registry.js';
 import type {
@@ -91,6 +94,12 @@ export interface OrchestratorDeps {
   };
   /** Cached/local catalog sources, including user-configured MCP servers. */
   localToolCandidates?: () => Promise<string[]>;
+  /** Keep a graph-level Jev decision a run had to make, so the next run reuses it. */
+  recordCompiledDecision?: (
+    graphId: string,
+    nodeId: string,
+    entry: CompiledNodeDecision,
+  ) => Promise<void>;
   /** Release resources only after the run and all its graph branches have settled. */
   releaseRunResources?: (input: { runId: string; stepId: string }) => Promise<void>;
   /**
@@ -604,6 +613,10 @@ export class Orchestrator {
 
       judgeCompletion: judgeCheckpoint,
 
+      recordCompiledDecision: async (graphId, nodeId, entry) => {
+        await this.deps.recordCompiledDecision?.(graphId, nodeId, entry).catch(() => undefined);
+      },
+
       runAgentTask: async (spec: AgentTaskSpec): Promise<AgentTaskResult> => {
         const step = await createStep({
           label: spec.label,
@@ -745,6 +758,8 @@ export class Orchestrator {
           // Resolve all candidates through the trusted registry, then use Jev's
           // typed family/tool decisions before Hermes can start its inner loop.
           let availableTools = [...new Set([...spec.availableTools, ...discoveredIds])];
+          // Exact candidate set (id -> version) a frozen route must match.
+          let candidateVersions: Record<string, string> | undefined;
           if (ceiling !== undefined)
             availableTools = availableTools.filter((id) => ceiling.includes(id));
           if (this.deps.toolRegistry) {
@@ -846,6 +861,7 @@ export class Orchestrator {
             }
 
             availableTools = descriptors.map((descriptor) => descriptor.id);
+            candidateVersions = toolVersions(descriptors);
           }
 
           // Jev makes the one task-level capability decision. Its exposedTools
@@ -862,6 +878,18 @@ export class Orchestrator {
                 })
               : undefined;
           const cachedRoute = routeCacheKey ? this.getCachedTaskRoute(routeCacheKey) : undefined;
+          // A route frozen when the graph was saved replaces the Jev call, and
+          // only where that call would have happened: never for the baseline
+          // arm, never for state the live decider may not see.
+          const mayAskDecider = decider.mode !== 'live' || decisionState.sanitizedForRemote;
+          const frozenRoute =
+            !allToolsBaseline && mayAskDecider && spec.compiledRoute && candidateVersions
+              ? usableAgentRoute(spec.compiledRoute.entry, {
+                  nodeHash: spec.compiledRoute.nodeHash,
+                  decisionMode: decider.mode,
+                  tools: candidateVersions,
+                })
+              : undefined;
           // The all-tools baseline deliberately skips Jev: it IS the "no
           // routing" arm. This is an explicit opt-in, not a failure path, so
           // the fail-closed rule below (failure never exposes all tools) is
@@ -882,15 +910,47 @@ export class Orchestrator {
                   rationale: 'Baseline arm: every eligible tool exposed, frontier model, no Jev.',
                 },
               }
-            : cachedRoute
-              ? { ok: true as const, data: cachedRoute }
-              : decider.mode !== 'live' || decisionState.sanitizedForRemote
-                ? await decider.route(
-                    { task: decisionState.taskSummary, availableTools },
-                    buildCallContext({ stepId: step.id, policyRule: 'subtask-routing' }),
-                  )
-                : null;
-          if (routeCacheKey && routed?.ok) this.cacheTaskRoute(routeCacheKey, routed.data);
+            : frozenRoute
+              ? { ok: true as const, data: frozenRoute }
+              : cachedRoute
+                ? { ok: true as const, data: cachedRoute }
+                : mayAskDecider
+                  ? await decider.route(
+                      { task: decisionState.taskSummary, availableTools },
+                      buildCallContext({ stepId: step.id, policyRule: 'subtask-routing' }),
+                    )
+                  : null;
+          if (routeCacheKey && routed?.ok && !frozenRoute)
+            this.cacheTaskRoute(routeCacheKey, routed.data);
+          // No usable frozen route: keep what Jev decided for the next run.
+          if (
+            routed?.ok &&
+            !frozenRoute &&
+            !allToolsBaseline &&
+            spec.compiledRoute &&
+            spec.nodeId &&
+            candidateVersions &&
+            this.deps.recordCompiledDecision
+          ) {
+            await this.deps
+              .recordCompiledDecision(spec.compiledRoute.graphId, spec.nodeId, {
+                kind: 'agent_route',
+                nodeHash: spec.compiledRoute.nodeHash,
+                decisionMode: decider.mode,
+                tools: candidateVersions,
+                privacy: routed.data.privacy,
+                intelligence: routed.data.intelligence,
+                privacyConfidence: routed.data.privacyConfidence,
+                intelligenceConfidence: routed.data.intelligenceConfidence,
+                modelTier: routed.data.modelTier,
+                exposedTools: routed.data.exposedTools.filter((id) => availableTools.includes(id)),
+                confidence: routed.data.confidence,
+                ...(routed.data.rationale ? { rationale: routed.data.rationale } : {}),
+                source: 'run',
+                at: nowIso(),
+              })
+              .catch(() => undefined);
+          }
           if (routed && !routed.ok && availableTools.length > 0) {
             // Without this the run just shows an agent that never calls a
             // tool; the reason (e.g. a Jev AUTH failure) was invisible.
@@ -952,9 +1012,11 @@ export class Orchestrator {
             escalated: false,
             rule: allToolsBaseline
               ? 'baseline-all-tools-frontier'
-              : routed?.ok
-                ? 'jev-routed'
-                : 'route-failed-safe-local',
+              : frozenRoute
+                ? 'compiled-graph-route'
+                : routed?.ok
+                  ? 'jev-routed'
+                  : 'route-failed-safe-local',
             at: nowIso(),
           };
           await store.createScheduleDecision(decision);
@@ -979,6 +1041,8 @@ export class Orchestrator {
             boundBrowserSessionId,
             contextScopeId: spec.contextScope?.id,
             ...(allToolsBaseline ? { pinnedCostTier: 'frontier' as const } : {}),
+            // The frozen route's tier picks the model without a per-task Jev call.
+            ...(frozenRoute ? { preferredModelTier: frozenRoute.modelTier } : {}),
           };
           const sessionState = priorState
             ? await sessionStateService.patch(priorState.id, {
@@ -1476,38 +1540,6 @@ export class Orchestrator {
       expiresAt: Date.now() + 5 * 60_000,
     });
   }
-}
-
-function eligibleTaskTools(descriptors: ToolDescriptor[], state: DecisionState): ToolDescriptor[] {
-  return descriptors.filter(
-    (descriptor) =>
-      descriptor.availability === 'available' &&
-      descriptor.baselineEffect !== 'unknown' &&
-      descriptor.simulated !== true &&
-      state.dataLabels.every((label) => descriptor.allowedDataLabels.includes(label)),
-  );
-}
-
-/**
- * Mock-backed tools that duplicate an operation a live tool in the same set
- * already serves. With Browserbase live and the local browser mocked, an agent
- * was offered both: `localbrowser.read` "succeeded" with simulated text, the
- * model took that for an empty page and retried the lookup with another tool,
- * so the turn kept going after its tools had succeeded. A mock tool with no
- * live twin stays -- an all-mock demo, or a mock mail.send whose approval gate
- * is the point of the demo.
- */
-function mockTwinsOfLiveTools(descriptors: ToolDescriptor[]): ToolDescriptor[] {
-  const twinKey = (descriptor: ToolDescriptor) =>
-    (descriptor.interactionMode ?? descriptor.family) +
-    ':' +
-    descriptor.id.slice(descriptor.id.lastIndexOf('.') + 1);
-  const live = new Set(
-    descriptors.filter((descriptor) => descriptor.executionMode === 'live').map(twinKey),
-  );
-  return descriptors.filter(
-    (descriptor) => descriptor.executionMode === 'mock' && live.has(twinKey(descriptor)),
-  );
 }
 
 /** A live Hermes turn that ended on a tool call reports `{ text: '' }`: no answer. */

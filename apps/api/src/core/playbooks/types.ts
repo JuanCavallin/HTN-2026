@@ -13,6 +13,7 @@ import type { ZodType } from 'zod';
 import type {
   Capability,
   CapabilityMap,
+  CompiledNodeDecision,
   CompletionDecision,
   DataLabel,
   IntelligenceLevel,
@@ -109,6 +110,13 @@ export interface AgentTaskSpec {
    * approval still apply; only the Jev narrowing is skipped.
    */
   routing?: 'jev' | 'all_tools_frontier';
+  /**
+   * Graph agent nodes only. The node's frozen route (see core/graph/compile.ts)
+   * and the identity it must match; the orchestrator reuses it only when the
+   * resolved candidate set and decision mode still match, and otherwise asks
+   * Jev and records the answer for `graphId`.
+   */
+  compiledRoute?: { graphId: string; nodeHash: string; entry?: CompiledNodeDecision };
 }
 
 export interface AgentTaskResult {
@@ -184,6 +192,16 @@ export interface PlaybookContext {
 
   /** Evaluate an explicit checkpoint through the same verified completion gate. */
   judgeCompletion(checkpoint: SessionCheckpoint, stepId?: string): Promise<CompletionDecision>;
+
+  /**
+   * Keep a graph-level Jev decision this run had to make (no usable frozen
+   * entry existed), so the next run of the graph reuses it. Best effort.
+   */
+  recordCompiledDecision?(
+    graphId: string,
+    nodeId: string,
+    entry: CompiledNodeDecision,
+  ): Promise<void>;
 
   /**
    * Record a routing decision made OUTSIDE runAgentTask.

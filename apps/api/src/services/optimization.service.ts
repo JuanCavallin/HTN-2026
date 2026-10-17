@@ -30,6 +30,7 @@ import { store } from '../store/index.js';
 import { listRuns } from './runs.service.js';
 import { synthesiseGraph } from './synthesis.service.js';
 import { GraphNotFoundError, GraphValidationError } from './graphs.service.js';
+import { saveGraphOwned } from './graphCompile.service.js';
 
 /** How far back to look for run history to critique. */
 const RECENT_RUNS_LIMIT = 10;
@@ -247,7 +248,7 @@ export async function optimizeGraph(graphId: string): Promise<OptimizeGraphResul
     });
   }
 
-  const saved = await store.saveGraph(parsed.data);
+  const saved = await saveGraphOwned(parsed.data);
 
   return { graph: saved, critique, suggestedAssertions };
 }

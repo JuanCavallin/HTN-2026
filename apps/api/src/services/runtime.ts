@@ -37,6 +37,7 @@ import { ComposioToolCatalog } from '../providers/composio/register.js';
 import { McpConnectionManager } from '../core/mcp/connections.js';
 import { store } from '../store/index.js';
 import { invalidateToolCatalogCache } from './toolCatalog.js';
+import { configureGraphCompile, recordCompiledDecision } from './graphCompile.service.js';
 
 export const bus = new RunBus((runId, event) => store.appendEvent(runId, event));
 
@@ -169,6 +170,25 @@ export const modelGateway = new ModelGatewayService(
   },
 );
 
+/** Extra candidates every agent task is offered, at run time and at compile time. */
+async function localToolCandidates(): Promise<string[]> {
+  const [mcpToolIds, registered] = await Promise.all([
+    mcpConnections.candidateToolIds(),
+    toolRegistry.list(),
+  ]);
+  const browserToolIds = registered
+    .filter(
+      (tool) =>
+        tool.descriptor.availability === 'available' &&
+        (tool.descriptor.id === 'web.search' ||
+          tool.descriptor.transport === 'local' ||
+          tool.descriptor.providerId === 'browserbase' ||
+          tool.descriptor.providerId === 'browserless'),
+    )
+    .map((tool) => tool.descriptor.id);
+  return [...new Set([...mcpToolIds, ...browserToolIds])];
+}
+
 export const orchestrator = new Orchestrator({
   store,
   bus,
@@ -188,23 +208,8 @@ export const orchestrator = new Orchestrator({
   // Graph tool nodes execute through the SAME broker a harness turn does.
   toolBroker,
   toolDiscovery: composioToolCatalog,
-  localToolCandidates: async () => {
-    const [mcpToolIds, registered] = await Promise.all([
-      mcpConnections.candidateToolIds(),
-      toolRegistry.list(),
-    ]);
-    const browserToolIds = registered
-      .filter(
-        (tool) =>
-          tool.descriptor.availability === 'available' &&
-          (tool.descriptor.id === 'web.search' ||
-            tool.descriptor.transport === 'local' ||
-            tool.descriptor.providerId === 'browserbase' ||
-            tool.descriptor.providerId === 'browserless'),
-      )
-      .map((tool) => tool.descriptor.id);
-    return [...new Set([...mcpToolIds, ...browserToolIds])];
-  },
+  localToolCandidates,
+  recordCompiledDecision,
   releaseRunResources: async ({ runId, stepId }) => {
     const ctx = { runId, stepId, policyRule: 'agent-task-resource-release' };
     await browserTools.closeRunSessions(runId, ctx);
@@ -216,6 +221,16 @@ export const orchestrator = new Orchestrator({
     );
   },
 });
+
+// Freeze the Jev decisions a saved graph can make once (see core/graph/compile.ts).
+configureGraphCompile(
+  {
+    decider: () => providers.provider('decision'),
+    resolveTools: (ids) => toolRegistry.resolve(ids),
+    localToolCandidates,
+  },
+  { enabled: config.graphCompile.enabled },
+);
 
 let providersInitialized = false;
 

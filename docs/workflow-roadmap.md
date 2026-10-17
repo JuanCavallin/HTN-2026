@@ -303,6 +303,24 @@ execution; overlay status, measurements, scope/resource markers and expandable t
 traces. Do not replace logical nodes with unrelated runtime nodes or infer dependencies
 from event arrival order. Preserve selection and layout across updates.
 
+## Fewer Jev round trips (TODO, future)
+
+Done: the model is chosen once per agent task; public reversible reads and pre-review
+browser checks use the deterministic policy; saved graphs freeze agent tool grants and
+tiers and fixed dispatch choices (`compiled`, see `apps/api/src/core/graph/compile.ts`,
+`GRAPH_COMPILE=off` to disable). Two further steps were proposed and are not built:
+
+- **Cross-run browser target cache.** Target picks are cached per run and browser
+  session only, so a second run of the same graph asks Jev again on an identical page.
+  Key a persisted cache by graph node, page origin and path, goal and a fingerprint of
+  the numbered element table; before reusing a hit, require the existing role-and-label
+  identity check (`validateTargetScript`) and freshness/occlusion checks to pass, and
+  fall back to Jev on any mismatch. Never cache targets for non-public pages.
+- **Keep the remaining run-time decisions live.** Judge verdicts, completion verdicts,
+  dispatch goals with `{{refs}}` and browser picks on new pages judge evidence the run
+  produces; do not freeze them. Revisit only with measurements showing which of these
+  dominate latency, and prefer making each call cheaper over skipping it.
+
 ## Manual checks for the first batch
 
 Start with `pnpm dev` and **Build a workflow** (not **Run as agent task**, which
