@@ -44,7 +44,7 @@
  */
 
 import { createGateway, experimental_evaluate as evaluate } from 'ai';
-import type { BrowserOperation } from '@htn/shared';
+import type { BrowserOperation, ElementRow, ElementTable } from '@htn/shared';
 import type {
   BrowserDecider,
   BrowserDecision,
@@ -66,6 +66,120 @@ function probabilityForChoice(
 ): number {
   if (!probabilities) return 0;
   return probabilities[choice] ?? 0;
+}
+
+/** One browser step's Jev request, before anything is sent. */
+export interface BrowserQuestionPlan {
+  clickRows: ElementRow[];
+  typeRows: ElementRow[];
+  selectRows: ElementRow[];
+  /** Every operation this page and step allow. Empty means nothing is possible. */
+  viableOperations: BrowserOperation[];
+  /** The only viable operation, when there is exactly one; it is then not asked. */
+  presetOperation?: BrowserOperation;
+  /** The `questions` for evaluate(). Empty when nothing is left to ask. */
+  questions: Record<string, unknown>;
+}
+
+/**
+ * The questions one browser step asks Jev. Pure, and exported so the browser
+ * benchmark measures exactly the request this decider sends.
+ */
+export function planBrowserQuestions(
+  table: ElementTable,
+  allowedOperations?: readonly BrowserOperation[],
+): BrowserQuestionPlan {
+  const allowed = (op: BrowserOperation): boolean =>
+    !allowedOperations || allowedOperations.includes(op);
+
+  /* -- The operation head. Only offer what this page can actually do. ------ */
+  const clickRows = allowed('CLICK') ? eligibleRows(table, 'CLICK') : [];
+  const typeRows = allowed('TYPE_TEXT') ? eligibleRows(table, 'TYPE_TEXT') : [];
+  const selectRows = allowed('SELECT') ? eligibleRows(table, 'SELECT') : [];
+
+  const operationCriteria: Record<string, string> = {};
+  if (clickRows.length > 0) operationCriteria.CLICK = 'Click one of the listed elements.';
+  if (typeRows.length > 0) {
+    // The label says so on purpose: this is the rule people get wrong.
+    operationCriteria.TYPE_TEXT =
+      'Type into one of the listed fields. A separate model supplies the text.';
+  }
+  if (selectRows.length > 0) operationCriteria.SELECT = 'Choose an option in a dropdown.';
+  if (allowed('SCROLL_DOWN')) operationCriteria.SCROLL_DOWN = 'Scroll down to reveal more.';
+  if (allowed('SCROLL_UP')) operationCriteria.SCROLL_UP = 'Scroll back up.';
+  if (allowed('WAIT')) operationCriteria.WAIT = 'Wait for the page to settle.';
+  if (allowed('DONE')) operationCriteria.DONE = 'The goal is already satisfied on this page.';
+  if (allowed('BLOCKED')) {
+    operationCriteria.BLOCKED = 'The goal cannot be progressed from this page.';
+  }
+
+  const viableOperations = Object.keys(operationCriteria) as BrowserOperation[];
+
+  /**
+   * ASK THE OPERATION ONLY WHEN IT IS GENUINELY IN DOUBT.
+   *
+   * A choice with one option is not a question — the SDK rejects it, and
+   * asking it would burn a round trip to be told what we already know. But
+   * "there is only one possible operation" does NOT mean there is nothing to
+   * decide: we still need the TARGET.
+   *
+   * Getting this wrong is what made a constrained call (`allowedOperations:
+   * ['TYPE_TEXT']`) return BLOCKED without ever contacting Jev — the caller
+   * narrowing the operation accidentally suppressed the whole decision.
+   */
+  const askOperation = viableOperations.length > 1;
+  const presetOperation = askOperation ? undefined : viableOperations[0];
+
+  /* -- Speculative target heads, all in the SAME request. ------------------ */
+  // `questions` is intentionally loosely typed: the heads are built
+  // conditionally, so the key set is not statically known.
+  const questions: Record<string, unknown> = {};
+
+  if (askOperation) {
+    questions.operation = {
+      type: 'choice',
+      instructions: 'What is the single best next action for the goal?',
+      criteria: operationCriteria,
+    };
+  }
+
+  // When the operation is already known, only its own head is worth asking —
+  // the speculative heads exist to cover an operation we have not chosen yet.
+  const wants = (op: BrowserOperation): boolean => askOperation || presetOperation === op;
+
+  const clickCriteria = toCriteria(clickRows);
+  if (wants('CLICK') && clickCriteria && Object.keys(clickCriteria).length > 1) {
+    questions.click_target = {
+      type: 'choice',
+      instructions: 'Which element should be clicked?',
+      criteria: clickCriteria,
+    };
+  }
+  const typeCriteria = toCriteria(typeRows);
+  if (wants('TYPE_TEXT') && typeCriteria && Object.keys(typeCriteria).length > 1) {
+    questions.type_text_target = {
+      type: 'choice',
+      instructions: 'Which field should be typed into?',
+      criteria: typeCriteria,
+    };
+  }
+  const selectCriteria = toCriteria(selectRows);
+  if (wants('SELECT') && selectCriteria && Object.keys(selectCriteria).length > 1) {
+    questions.select_target = {
+      type: 'choice',
+      instructions: 'Which dropdown should be used?',
+      criteria: selectCriteria,
+    };
+  }
+
+  return {
+    clickRows,
+    typeRows,
+    selectRows,
+    viableOperations,
+    ...(presetOperation ? { presetOperation } : {}),
+    questions,
+  };
 }
 
 export interface JevBrowserDeciderOptions {
@@ -109,31 +223,8 @@ export function createJevBrowserDecider(
       baseURL: cfg.baseUrl ?? DEFAULT_BASE_URL,
     }).evaluationModel(MODEL_ID);
 
-    const allowed = (op: BrowserOperation): boolean =>
-      !allowedOperations || allowedOperations.includes(op);
-
-    /* -- The operation head. Only offer what this page can actually do. ---- */
-    const clickRows = allowed('CLICK') ? eligibleRows(table, 'CLICK') : [];
-    const typeRows = allowed('TYPE_TEXT') ? eligibleRows(table, 'TYPE_TEXT') : [];
-    const selectRows = allowed('SELECT') ? eligibleRows(table, 'SELECT') : [];
-
-    const operationCriteria: Record<string, string> = {};
-    if (clickRows.length > 0) operationCriteria.CLICK = 'Click one of the listed elements.';
-    if (typeRows.length > 0) {
-      // The label says so on purpose: this is the rule people get wrong.
-      operationCriteria.TYPE_TEXT =
-        'Type into one of the listed fields. A separate model supplies the text.';
-    }
-    if (selectRows.length > 0) operationCriteria.SELECT = 'Choose an option in a dropdown.';
-    if (allowed('SCROLL_DOWN')) operationCriteria.SCROLL_DOWN = 'Scroll down to reveal more.';
-    if (allowed('SCROLL_UP')) operationCriteria.SCROLL_UP = 'Scroll back up.';
-    if (allowed('WAIT')) operationCriteria.WAIT = 'Wait for the page to settle.';
-    if (allowed('DONE')) operationCriteria.DONE = 'The goal is already satisfied on this page.';
-    if (allowed('BLOCKED')) {
-      operationCriteria.BLOCKED = 'The goal cannot be progressed from this page.';
-    }
-
-    const viableOperations = Object.keys(operationCriteria) as BrowserOperation[];
+    const { clickRows, typeRows, selectRows, viableOperations, presetOperation, questions } =
+      planBrowserQuestions(table, allowedOperations);
 
     // Nothing at all is possible here. Only now is BLOCKED the right answer.
     if (viableOperations.length === 0) {
@@ -142,63 +233,6 @@ export function createJevBrowserDecider(
         confidence: 0,
         source: 'jev',
         rationale: 'No operation was possible on this page, so Jev was not asked.',
-      };
-    }
-
-    /**
-     * ASK THE OPERATION ONLY WHEN IT IS GENUINELY IN DOUBT.
-     *
-     * A choice with one option is not a question — the SDK rejects it, and
-     * asking it would burn a round trip to be told what we already know. But
-     * "there is only one possible operation" does NOT mean there is nothing to
-     * decide: we still need the TARGET.
-     *
-     * Getting this wrong is what made a constrained call (`allowedOperations:
-     * ['TYPE_TEXT']`) return BLOCKED without ever contacting Jev — the caller
-     * narrowing the operation accidentally suppressed the whole decision.
-     */
-    const askOperation = viableOperations.length > 1;
-    const presetOperation = askOperation ? undefined : viableOperations[0];
-
-    /* -- Speculative target heads, all in the SAME request. ---------------- */
-    // `questions` is intentionally loosely typed: the heads are built
-    // conditionally, so the key set is not statically known.
-    const questions: Record<string, unknown> = {};
-
-    if (askOperation) {
-      questions.operation = {
-        type: 'choice',
-        instructions: 'What is the single best next action for the goal?',
-        criteria: operationCriteria,
-      };
-    }
-
-    // When the operation is already known, only its own head is worth asking —
-    // the speculative heads exist to cover an operation we have not chosen yet.
-    const wants = (op: BrowserOperation): boolean => askOperation || presetOperation === op;
-
-    const clickCriteria = toCriteria(clickRows);
-    if (wants('CLICK') && clickCriteria && Object.keys(clickCriteria).length > 1) {
-      questions.click_target = {
-        type: 'choice',
-        instructions: 'Which element should be clicked?',
-        criteria: clickCriteria,
-      };
-    }
-    const typeCriteria = toCriteria(typeRows);
-    if (wants('TYPE_TEXT') && typeCriteria && Object.keys(typeCriteria).length > 1) {
-      questions.type_text_target = {
-        type: 'choice',
-        instructions: 'Which field should be typed into?',
-        criteria: typeCriteria,
-      };
-    }
-    const selectCriteria = toCriteria(selectRows);
-    if (wants('SELECT') && selectCriteria && Object.keys(selectCriteria).length > 1) {
-      questions.select_target = {
-        type: 'choice',
-        instructions: 'Which dropdown should be used?',
-        criteria: selectCriteria,
       };
     }
 
@@ -250,7 +284,7 @@ export function createJevBrowserDecider(
       /* -- Use the matching head; discard the rest. ------------------------ */
       // When the operation was never in doubt it was not asked, so take the
       // preset rather than reading an answer that does not exist.
-      const opAnswer = askOperation ? result.answers.operation : undefined;
+      const opAnswer = presetOperation ? undefined : result.answers.operation;
       const operation = (presetOperation ??
         (opAnswer?.type === 'choice' ? opAnswer.choice : 'BLOCKED')) as BrowserOperation;
 

@@ -64,6 +64,17 @@ import type {
 import { BROWSERBASE_API_DESTINATION, needsTarget } from '@htn/shared';
 import { config, type ProviderConfig } from '../../config.js';
 import { browserLocation, browserFailure } from '../browserSafety.js';
+import {
+  COLLECT_ROWS,
+  INTERACTIVE_SELECTOR,
+  NON_TEXT_INPUT,
+  inferRole,
+  truncate,
+  rejectionFor,
+  validateTargetScript,
+  type RawRow,
+  type TargetState,
+} from '../browserPage.js';
 import { notifyBrowserSessionClosed } from '../withBrowserOwnership.js';
 
 import { credentials, type ResolvedCredential } from '../../services/credentials.js';
@@ -104,155 +115,6 @@ interface Handle {
   credential: ResolvedCredential;
   runId: string;
   snapshot?: Snapshot;
-}
-
-/** One row as the in-page collector returns it. Serialisable, no DOM types. */
-interface RawRow {
-  domIndex: number;
-  tag: string;
-  role: string | null;
-  type: string | null;
-  name: string;
-  value: string;
-  visible: boolean;
-}
-
-const INTERACTIVE_SELECTOR = [
-  'a[href]',
-  'button',
-  'input:not([type="hidden"])',
-  'select',
-  'textarea',
-  '[role="button"]',
-  '[role="link"]',
-  '[role="checkbox"]',
-  '[role="radio"]',
-  '[role="combobox"]',
-  '[role="textbox"]',
-  '[role="menuitem"]',
-  '[role="tab"]',
-  '[contenteditable="true"]',
-].join(',');
-
-/**
- * Identical in shape to the local adapter's collector, and a string IIFE for
- * the same two reasons: this package has no `dom` lib, and Stagehand's
- * `evaluate` string form evaluates an EXPRESSION — a string holding
- * arrow-function source comes back `undefined`, silently.
- */
-const COLLECT_ROWS = `(() => {
-  const SEL = ${JSON.stringify(INTERACTIVE_SELECTOR)};
-  const out = [];
-  document.querySelectorAll(SEL).forEach((el, domIndex) => {
-    const style = window.getComputedStyle(el);
-    const visible =
-      !el.closest('[hidden], [aria-hidden="true"]') &&
-      el.getClientRects().length > 0 &&
-      style.visibility !== 'hidden' &&
-      style.display !== 'none' &&
-      Number(style.opacity) !== 0;
-    out.push({
-      domIndex,
-      tag: el.tagName.toLowerCase(),
-      role: el.getAttribute('role'),
-      type: el.getAttribute('type'),
-      name: (
-        el.getAttribute('aria-label') ||
-        (el.innerText || '').trim() ||
-        el.getAttribute('placeholder') ||
-        el.getAttribute('title') ||
-        el.getAttribute('alt') ||
-        ''
-      ),
-      value: (el.type === 'password' || /password|passcode|secret|token|credential|otp|mfa|one-time-code/i.test([el.name || '', el.id || '', el.getAttribute('autocomplete') || '', el.getAttribute('aria-label') || ''].join(' ')) || el.value === undefined || el.value === null) ? '' : String(el.value),
-      visible,
-    });
-  });
-  return out;
-})()`;
-
-/**
- * PRE-FLIGHT VALIDATION IN ONE PROTOCOL CALL — see the local adapter for the
- * full reasoning. Against Browserbase this matters more, not less: every
- * protocol call is a round trip to their cloud, so four checks per click is
- * four network hops. `browser-use/jev-ultrafast` reports cutting median
- * protocol calls from 1,092 to 101 by making reads atomic like this.
- */
-function validateTargetScript(domIndex: number): string {
-  return `(() => {
-     const SEL = ${JSON.stringify(INTERACTIVE_SELECTOR)};
-     const el = document.querySelectorAll(SEL)[${domIndex}];
-     if (!el) return { exists: false };
-
-     const rect = el.getBoundingClientRect();
-     const style = window.getComputedStyle(el);
-     const visible =
-       rect.width > 0 && rect.height > 0 &&
-       style.visibility !== 'hidden' && style.display !== 'none' &&
-       Number(style.opacity) !== 0;
-
-     const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-
-     let occluded = true;
-     if (visible) {
-       const hit = document.elementFromPoint(
-         rect.left + rect.width / 2,
-         rect.top + rect.height / 2,
-       );
-       occluded = !hit || !(hit === el || el.contains(hit) || hit.contains(el));
-     }
-
-     return { exists: true, visible, enabled, occluded };
-   })()`;
-}
-
-interface TargetState {
-  exists: boolean;
-  visible?: boolean;
-  enabled?: boolean;
-  occluded?: boolean;
-}
-
-/** Everything unproven is treated as not-actionable. */
-function rejectionFor(state: TargetState | null): TargetRejection | null {
-  if (!state || typeof state !== 'object') return 'occluded';
-  if (!state.exists) return 'detached';
-  if (!state.visible || !state.enabled) return 'not_interactable';
-  if (state.occluded !== false) return 'occluded';
-  return null;
-}
-
-const MAX_LABEL_CHARS = 80;
-
-function truncate(text: string, max = MAX_LABEL_CHARS): string {
-  const clean = text.replace(/\s+/g, ' ').trim();
-  return clean.length > max ? clean.slice(0, max - 1) + '…' : clean;
-}
-
-const NON_TEXT_INPUT = new Set([
-  'checkbox',
-  'radio',
-  'submit',
-  'button',
-  'reset',
-  'file',
-  'image',
-  'range',
-  'color',
-]);
-
-function inferRole(tag: string, type: string | null): string {
-  if (tag === 'a') return 'link';
-  if (tag === 'button') return 'button';
-  if (tag === 'select') return 'combobox';
-  if (tag === 'textarea') return 'textbox';
-  if (tag === 'input') {
-    if (type === 'checkbox') return 'checkbox';
-    if (type === 'radio') return 'radio';
-    if (type === 'submit' || type === 'button' || type === 'reset') return 'button';
-    return 'textbox';
-  }
-  return tag || 'element';
 }
 
 function meta(op: string, started: number, destination: string | null) {
@@ -538,30 +400,6 @@ export function createLiveBrowserbase(cfg: ProviderConfig): BrowserAdapter {
         totalInteractive: visible.length,
       },
     };
-  }
-
-  /** Same probe as the local adapter. Anything but `false` fails closed. */
-  async function isOccluded(handle: Handle, domIndex: number): Promise<boolean> {
-    try {
-      const page = await activePage(handle);
-      const result = await page.evaluate<boolean | null, undefined>(
-        `(() => {
-           const SEL = ${JSON.stringify(INTERACTIVE_SELECTOR)};
-           const el = document.querySelectorAll(SEL)[${domIndex}];
-           if (!el) return null;
-           const rect = el.getBoundingClientRect();
-           if (rect.width === 0 || rect.height === 0) return true;
-           const x = rect.left + rect.width / 2;
-           const y = rect.top + rect.height / 2;
-           const hit = document.elementFromPoint(x, y);
-           if (!hit) return true;
-           return !(hit === el || el.contains(hit) || hit.contains(el));
-         })()`,
-      );
-      return typeof result === 'boolean' ? result : true;
-    } catch {
-      return true;
-    }
   }
 
   return {

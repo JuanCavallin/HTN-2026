@@ -570,7 +570,8 @@ const OUTLIER_RATIO = 1.5;
 const COST_OUTLIER_FLOOR_CENTS = 5;
 const LATENCY_OUTLIER_FLOOR_MS = 500;
 
-function median(values: number[]): number {
+/** Middle value, or the mean of the two middle values; 0 for no values. */
+export function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
