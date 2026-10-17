@@ -78,6 +78,43 @@ function deterministicActionPolicy(descriptor: ToolDescriptor, action: ToolActio
   return 'auto';
 }
 
+function isPlainPublicRead(
+  baseline: ActionPolicy,
+  descriptor: ToolDescriptor,
+  action: ToolAction,
+): boolean {
+  return (
+    baseline === 'auto' &&
+    descriptor.baselineEffect === 'read' &&
+    descriptor.reversibility === 'reversible' &&
+    !descriptor.requiresChangeReview &&
+    descriptor.requiredScopes.length === 0 &&
+    !action.accountRef &&
+    action.dataLabels.every((label) => label === 'public')
+  );
+}
+
+/**
+ * The descriptor-only policy, with no Jev call. Used where the full policy is
+ * evaluated later with more information (a prepared browser target), so an
+ * early hard deny stops preparation without spending a second Jev round trip.
+ */
+export function baselineAuthorization(
+  descriptor: ToolDescriptor,
+  action: ToolAction,
+  at: string,
+): AuthorizationDecision {
+  const baseline = deterministicActionPolicy(descriptor, action);
+  return {
+    actionId: action.id,
+    recommendation: fallbackRecommendation(baseline, 'deterministic-pre-review'),
+    finalPolicy: baseline,
+    allowed: baseline === 'auto' || baseline === 'verify',
+    reasonCodes: ['descriptor-baseline-' + baseline, 'deterministic-pre-review'],
+    at,
+  };
+}
+
 function fallbackRecommendation(
   policy: ActionPolicy,
   reasonCode: string,
@@ -232,6 +269,11 @@ export class DecisionService {
 
     if (this.adapter.mode === 'live' && !canSendToRemoteDecisionModel(state)) {
       recommendation = fallbackRecommendation(baseline, 'deterministic-local-action-policy');
+    } else if (isPlainPublicRead(baseline, descriptor, action)) {
+      // Jev can only make a policy stricter, and a public, reversible,
+      // scope-free read is already `auto` with nothing to protect. Skipping
+      // the round trip keeps authorization deterministic, not absent.
+      recommendation = fallbackRecommendation(baseline, 'deterministic-public-read');
     } else {
       const result = await this.adapter.recommendActionPolicy({ state, action, descriptor }, ctx);
       recommendation = result.ok

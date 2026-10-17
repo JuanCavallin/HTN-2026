@@ -12,7 +12,7 @@ import type {
 } from '@htn/shared';
 import { newId, nowIso } from '../../lib/ids.js';
 import type { RunBus } from '../bus.js';
-import type { DecisionService } from '../decisions/service.js';
+import { baselineAuthorization, type DecisionService } from '../decisions/service.js';
 import { decisionStateFromSession } from '../sessions/decisionState.js';
 import type { SessionStateService } from '../sessions/service.js';
 import type { ToolApprovalGate } from './approval.js';
@@ -181,12 +181,17 @@ export class ToolBroker {
       policyRule: 'exact-tool-action-authorization',
       signal: request.signal,
     };
-    let authorization = await this.decisions.authorizeAction(
-      decisionStateFromSession(session),
-      action,
-      registered.descriptor,
-      callContext,
-    );
+    // An executor that prepares a review (a browser target) is authorized by
+    // Jev once, AFTER preparation, when the exact target is known. Before it,
+    // only the descriptor policy runs, so a hard deny still skips preparation.
+    let authorization = executor.prepareReview
+      ? baselineAuthorization(registered.descriptor, action, nowIso())
+      : await this.decisions.authorizeAction(
+          decisionStateFromSession(session),
+          action,
+          registered.descriptor,
+          callContext,
+        );
     try {
       for (;;) {
         let preparedRequiresApproval = false;
